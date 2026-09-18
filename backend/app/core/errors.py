@@ -74,6 +74,35 @@ class ErrorCode(StrEnum):
 # 因为它看起来已经实现（这条教训来自 `EvidenceIssueCode` 的诚实标注）。
 NEXT_ACTION_RECONCILE = "reconcile"
 
+# 对外错误响应体的**唯一**形状定义。
+#
+# 为什么需要它：同一条语义曾经有四个出口 —— `PlatformError.to_payload()`、
+# API 层两处手写 dict（401 与 404 的脱敏替换）、runtime 的拒绝分支 ——
+# 于是新增一个字段时只落到了其中一部分：`/interactions` 在不同失败路径上
+# 返回不同形状的错误体，同一个端点自己就不一致。
+#
+# 形状不一致不是"小瑕疵"：客户端只能按"有就取、没有就跳过"来写，
+# 最终等于该字段不存在。收敛成单一构造点后，新增字段不可能只落一半。
+ERROR_PAYLOAD_KEYS = ("code", "message", "retryable", "request_id", "next_action")
+
+
+def public_error_payload(
+    code: str,
+    message: str,
+    *,
+    retryable: bool = False,
+    request_id: str | None = None,
+    next_action: str = "",
+) -> dict:
+    """构造对外错误响应体。**这是唯一允许出现错误字段名的地方。**"""
+    return {
+        "code": code,
+        "message": message,
+        "retryable": retryable,
+        "request_id": request_id,
+        "next_action": next_action,
+    }
+
 
 @dataclass
 class PlatformError(Exception):
@@ -120,15 +149,34 @@ class PlatformError(Exception):
 
     def to_payload(self) -> dict:
         """转换为 API 响应体。只暴露稳定码与可理解描述，不泄露内部细节。"""
-        return {
-            "code": self.code.value,
-            "message": self.message,
-            "retryable": self.retryable,
-            "request_id": self.request_id,
-            "next_action": self.next_action,
-        }
+        return public_error_payload(
+            self.code.value,
+            self.message,
+            retryable=self.retryable,
+            request_id=self.request_id,
+            next_action=self.next_action,
+        )
 
 
-def deny(code: ErrorCode, message: str, **details) -> PlatformError:
-    """构造一个不可重试的拒绝错误。特权路径失败一律用这个。"""
-    return PlatformError(code=code, message=message, retryable=False, details=details)
+def deny(
+    code: ErrorCode,
+    message: str,
+    *,
+    request_id: str | None = None,
+    **details,
+) -> PlatformError:
+    """构造一个不可重试的拒绝错误。特权路径失败一律用这个。
+
+    `request_id` 是显式参数，不落进 `details`。此前它只能靠 `**details` 传递，
+    结果是 `deny(code, msg, request_id="r1")` 把 id 塞进了 `details`
+    ——一个不会出现在错误响应里的字典——然后**静默丢失**：
+    调用方以为写了追踪 id，实际响应里是 null。
+    把参数提到签名上，这种写法就会绑到正确的字段。
+    """
+    return PlatformError(
+        code=code,
+        message=message,
+        retryable=False,
+        request_id=request_id,
+        details=details,
+    )

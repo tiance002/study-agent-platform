@@ -27,6 +27,8 @@ from app.audit.sink import AuditSink
 from app.budget.ledger import BudgetLedger
 from app.core.clock import SystemClock
 from app.core.errors import PlatformError
+from app.core.ids import new_request_id
+from app.core.request_context import bind_request_id, reset_request_id
 from app.execution.confirmation import ConfirmationStore
 from app.execution.state_machine import ActionStateMachine
 from app.identity.auth import AuthProvider, BearerSessionAuthProvider
@@ -158,6 +160,23 @@ def create_app(*, platform: PlatformState | None = None) -> FastAPI:
     )
     app.state.platform = platform or build_platform()
     app.include_router(router)
+
+    @app.middleware("http")
+    async def _bind_request_id(request: Request, call_next):
+        """给每个请求绑定一个追踪 id，并回写到响应头。
+
+        这是 `request_id` 真正的来源：在此之前它从没有任何 raise 点设置过，
+        于是每条错误响应里都是 null —— 字段在、值为空，最容易被误读成已实现。
+        id 一律服务端生成：它会进日志，让客户端决定日志内容等于开一个日志注入口。
+        """
+        rid = new_request_id()
+        token = bind_request_id(rid)
+        try:
+            response = await call_next(request)
+        finally:
+            reset_request_id(token)
+        response.headers["X-Request-Id"] = rid
+        return response
 
     @app.exception_handler(PlatformError)
     async def _platform_error(_: Request, exc: PlatformError) -> JSONResponse:

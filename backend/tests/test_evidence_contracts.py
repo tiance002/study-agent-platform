@@ -420,6 +420,22 @@ def test_supported_state_cannot_carry_issues():
 
 
 @pytest.mark.invariant
+def test_supported_means_no_detected_gap_not_verified_conclusions():
+    """记录一条已知局限：首版 `supported` = 「未检测到缺口」。
+
+    规格的措辞是「核心结论有充分且一致的证据」，但要验证那句话需要冻结的
+    核心结论标注集。首版只能确认"检索过程没发现异常"，**这是更弱的一句话**。
+
+    这条测试是**故意设的绊线**：等标注集就绪、`supported` 加上正向结论覆盖校验后，
+    它应当改成断言"没有结论覆盖时不得返回 supported"，而不是继续放宽。
+    不改就失败，免得这条局限被悄悄忘掉。
+    """
+    assessment = assess_retrieval(RetrievalSignals(candidate_count=3, top_score=5))
+    assert assessment.state is EvidenceState.SUPPORTED
+    assert assessment.supported_claim_refs == (), "首版没有任何结论覆盖信息"
+
+
+@pytest.mark.invariant
 def test_unsupported_state_must_cite_at_least_one_issue():
     """非支持状态必须可解释：说不出缺口的"不足"是不可审计的。"""
     with pytest.raises(ValueError) as exc:

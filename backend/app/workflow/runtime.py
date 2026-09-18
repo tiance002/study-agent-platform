@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from app.audit.sink import AuditSink, RiskLevel
 from app.budget.ledger import BudgetLedger, Dimension
 from app.core.clock import Clock
-from app.core.errors import ErrorCode, PlatformError, deny
+from app.core.errors import ErrorCode, PlatformError, deny, public_error_payload
 from app.core.hashing import content_hash
 from app.execution.confirmation import ConfirmationStore
 from app.execution.outbox import ToolDispatcher
@@ -572,7 +572,7 @@ class InteractionRuntime:
             output={},
             citations=(),
             audit_event_ids=(),
-            error={"code": code, "message": message, "retryable": False},
+            error=public_error_payload(code, message, request_id=request.request_id),
         )
 
     def _fail(

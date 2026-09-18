@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:c46f6111dbeacc9f289296f3e24a05c74616708f0eddf7ede5fb53d11f7cbd29, generated_at=2026-09-18T16:24:39Z -->
-> 生成时间：2026-09-18T16:24:39Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:239dfe90e177f00bcd0a32aaa5ce9adbce604d8cf93b6c2a92e802424673207e, generated_at=2026-09-18T16:33:54Z -->
+> 生成时间：2026-09-18T16:33:54Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -104,6 +104,31 @@ planned → intent_persisted → dispatched
 | 流式 | 交互走 SSE；**不得同步等待沙箱完成** |
 | 版本 | 每次运行固定 `policy_version`、`node_registry_version`、`tool_registry_version`、`validator_version`、`dataset_version`、`prompt_version` 与模型标识 |
 
+### 3.1 错误响应体的形状（手写区 · 尚未被生成器覆盖）
+
+所有对外错误响应体必须有**同一组字段**，一个不多一个不少：
+
+```text
+{ code, message, retryable, request_id, next_action }
+```
+
+| 字段 | 语义 |
+|---|---|
+| `code` | 稳定错误码。401/404 对外替换成 `UNAUTHENTICATED` / `NOT_FOUND`，避免用内部码差异探测存在性 |
+| `message` | 用户可理解描述，不含内部细节 |
+| `retryable` | 仅对明确瞬时错误为真。**「结果未知」恒为假** |
+| `request_id` | 追踪 id，服务端生成，与响应头 `X-Request-Id` 同源 |
+| `next_action` | 由 `code` 推导。`RECONCILIATION_REQUIRED` → `reconcile`，其余为空串 |
+
+三条约束：**① 形状只有一个定义点**（代码里是 `core/errors.public_error_payload`），
+任何调用方都不得手写这个 dict；**② `next_action` 由 `code` 推导**，不由 raise 点填写，
+否则新增 raise 点时会漏；**③ `retryable=true` 与「先去对账」不能同时出现** ——
+那会让客户端在不解决未知状态的情况下重放请求，产生第二次副作用。
+
+状态码映射：`AUTH_REQUIRED` → 401；跨租户/跨项目 → 404（不暴露存在性）；
+`RECONCILIATION_REQUIRED` → 409（不是 403「你不被允许」，也不是 5xx「服务故障」——
+后者会被当故障重试，而盲目重试正是这条错误要阻止的行为）；审计或策略组件不可用 → 503。
+
 ## 4. 手写区 · 一次交互的固定顺序（不得调换）
 
 1. 身份、租户、学习项目鉴权
@@ -131,8 +156,14 @@ planned → intent_persisted → dispatched
 | CI | `--check` 重新渲染并与文件比对（不只看哈希） |
 | 禁止 | 生成区出现人工编辑内容 |
 
-**已知局限：** 当前导出的是「有哪些路径/错误码/node schema」，**不包含**请求体字段级的 schema 细节。
-字段级契约应随 Pydantic 模型导出补齐 —— 那属于实施期的增量工作。
+**已知局限：** 当前导出的是「有哪些路径/错误码/node schema」，**不包含**请求体字段级的 schema 细节，
+也**不包含**错误响应体的字段级形状（§3.1 因此暂列手写区）。
+字段级契约应随 Pydantic 模型与错误体构造器导出补齐 —— 那属于实施期的增量工作。
+
+**注意：** §3.1 是手写区，与生成区之间**没有自动一致性检查**。
+代码侧的机械守卫是 `tests/test_error_payload_contract.py` 里的键集比对
+（它把所有出口收集起来比对形状）。两者的关系是：测试守代码内部一致，
+本节守对外契约声明；改动错误体时两处都要看。
 
 ## 6. 手写区 · 常见坑
 

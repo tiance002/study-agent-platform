@@ -26,8 +26,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.audit.sink import RiskLevel
 from app.budget.ledger import Dimension
 from app.core.authority import Authority
-from app.core.errors import ErrorCode, PlatformError, deny
+from app.core.errors import ErrorCode, PlatformError, deny, public_error_payload
 from app.core.ids import new_request_id
+from app.core.request_context import current_request_id
 from app.execution.confirmation import BudgetCeiling
 from app.identity.models import Principal
 from app.knowledge.retrieval import Chunk
@@ -340,31 +341,40 @@ def error_response(exc: PlatformError):
 
     跨租户/跨项目的拒绝一律以 404 呈现：**不能让人通过状态码差异**
     探测出别的租户有哪些项目。
+
+    ⚠️ 对外字段一律由 `public_error_payload` 生成，这里只替换 `code`/`message`，
+    **不手写 dict**。手写过的后果很具体：新增 `next_action` 时它只出现在
+    部分响应里，同一个端点在不同失败路径上返回不同形状的错误体。
     """
     from fastapi.responses import JSONResponse
 
+    # 追踪 id 兜底：调用点不知道 id 时用中间件绑定的那个。
+    # 此前没有任何 raise 点设置过它，导致每条错误响应的 request_id 都是 null。
+    request_id = exc.request_id or current_request_id()
+
     status = 403
     payload = exc.to_payload()
+    payload["request_id"] = request_id
     if exc.code is ErrorCode.AUTH_REQUIRED:
         status = 401
-        payload = {
-            "code": "UNAUTHENTICATED",
-            "message": "未认证或凭据无效",
-            "retryable": False,
-            "request_id": exc.request_id,
-        }
+        # 对外不复用内部错误码，也不透露具体失败原因。
+        payload = public_error_payload(
+            "UNAUTHENTICATED", "未认证或凭据无效", request_id=request_id
+        )
     elif exc.code in (
         ErrorCode.CROSS_TENANT_DENIED,
         ErrorCode.CROSS_PROJECT_DENIED,
         ErrorCode.TENANT_CONTEXT_MISSING,
     ):
         status = 404
-        payload = {
-            "code": "NOT_FOUND",
-            "message": "资源不存在",
-            "retryable": False,
-            "request_id": exc.request_id,
-        }
+        payload = public_error_payload(
+            "NOT_FOUND", "资源不存在", request_id=request_id
+        )
     elif exc.code in (ErrorCode.AUDIT_SINK_UNAVAILABLE, ErrorCode.POLICY_GATEWAY_UNAVAILABLE):
         status = 503
+    elif exc.code is ErrorCode.RECONCILIATION_REQUIRED:
+        # 409：请求本身没问题，是动作处于「结果未知」，必须先对账。
+        # 用 403 等于说「你不被允许」，那是误导；用 5xx 又会被客户端当故障重试，
+        # 而盲目重试正是这条错误要阻止的行为。
+        status = 409
     return JSONResponse(status_code=status, content=payload)
