@@ -7,8 +7,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:187a0ff28660214730ec9af452ae6bd45197cd6215f6c77fd15ff1940782bcf9, generated_at=2026-09-18T16:33:54Z -->
-> 生成时间：2026-09-18T16:33:54Z
+<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:ff957194503239d863df087460998ac5ee7ff7361ff13edee0638e76198996f4, generated_at=2026-09-18T16:55:58Z -->
+> 生成时间：2026-09-18T16:55:58Z
 
 > 由 `tools/skills/gen_contracts.py` 从代码扫描导出，请勿手工编辑本区。
 > **注意**：这是**代码层实体**，不是 PostgreSQL 表。迁移落地后应改由 alembic 导出 DDL。
@@ -35,7 +35,7 @@
 | `Principal` | `app.identity.models` | 4 | 是 | — |
 | `SessionToken` | `app.identity.session` | 8 | 是 | — |
 | `FetchFailure` | `app.knowledge.evidence_state` | 3 | — | — |
-| `RetrievalSignals` | `app.knowledge.evidence_state` | 8 | — | — |
+| `RetrievalSignals` | `app.knowledge.evidence_state` | 9 | — | — |
 | `Chunk` | `app.knowledge.retrieval` | 9 | 是 | 是 |
 | `ScoredChunk` | `app.knowledge.retrieval` | 2 | — | — |
 | `ComponentVerdict` | `app.learning.evidence` | 7 | — | — |
@@ -55,7 +55,7 @@
 | `ToolSpec` | `app.registry.models` | 15 | — | — |
 | `TenantContext` | `app.tenancy.context` | 3 | 是 | — |
 | `NodeContext` | `app.workflow.context` | 8 | 是 | — |
-| `InteractionRequest` | `app.workflow.runtime` | 8 | 是 | 是 |
+| `InteractionRequest` | `app.workflow.runtime` | 9 | 是 | 是 |
 | `InteractionResult` | `app.workflow.runtime` | 10 | — | — |
 
 合计 42 个实体。

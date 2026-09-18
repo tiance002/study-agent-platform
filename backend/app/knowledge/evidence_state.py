@@ -52,18 +52,33 @@
 （所以收紧成默认不产生），这里是**把能力的边界讲大**（所以只能诚实标注）。
 
 没有一并收紧的原因很实际：若要求正向的结论覆盖才返回 `supported`，
-首版（标注集不存在）会让每次检索都判成 `insufficient`，这个状态就退化成常量。
-那既没用，也会掩盖真正的不足。正确的处理是 ——
+## `supported` 需要**正向**的结论覆盖证明
 
-- 现在：把 `supported` 读作「**未检测到缺口**」，而不是「结论已充分验证」；
-- 标注集就绪后：给 `supported` 加上正向的结论覆盖校验，并把这条注释删掉。
+规格对 `supported` 的定义是「核心结论有充分且一致的证据」。曾经本判定器在没有
+issue 时就返回它 —— 检查的其实是"检索过程没发现异常"（有候选、相关度达标、
+必需步骤完成、没有抓取失败），**不是**"核心结论已被验证"。
 
-在那之前，展示层不应把 `supported` 渲染成"已确认正确"这类措辞。
+上一轮我把这一点当作"已知局限"标注了，理由是：要求正向覆盖会让首版每次都判成
+`insufficient`，状态退化成常量。**这个理由站不住。** 状态退化成常量不是"问题被掩盖"，
+而是"如实反映我们确实还不知道" —— 真正的错误是用一个更强的词去描述一个更弱的判断。
+
+正确做法是二选一，而不是削弱术语：
+
+1. **`supported` 必须有正向覆盖**：给出必需结论集合（`required_claim_refs`）
+   与已覆盖集合（`supported_claim_refs`），只有必需结论全部被覆盖才返回 `supported`；
+   拿不到覆盖信息时产生 `MISSING_SUPPORT` 并返回 `insufficient`。
+2. **"检索过程无异常"另立名目**：它是**过程健康度**，与证据是否充分正交，
+   所以放在独立的 `RetrievalHealth` 里，**不占用证据状态**。
+
+于是首版的实际表现是：普通检索会返回 `insufficient` + `MISSING_SUPPORT`
+（因为标注集还不存在，无法给出必需结论集合），同时 `retrieval_health`
+如实报告过程是否干净。这是正确的：**我们现在确实无法证明核心结论有充分证据。**
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 from app.core.evidence_issues import (
     EvidenceAssessment,
@@ -101,17 +116,29 @@ class RetrievalSignals:
     fetch_failures: tuple[FetchFailure, ...] = field(default_factory=tuple)
     scope_blocked: bool = False
     tool_result_unknown: bool = False
+    # **本次检索必须支撑的核心结论**。来自冻结的核心结论标注集。
+    # 空表示"我们还不知道该要求哪些结论" —— 那就无法证明覆盖，
+    # 必须判 `insufficient`，而不是默认放过。
+    required_claim_refs: tuple[str, ...] = ()
     # 已明确站住的核心结论。**不是候选片段** —— 是"哪些结论已有充分支撑"。
-    # 首版恒为空（没有冻结的标注集可用），因此有缺口时状态一律 insufficient。
     supported_claim_refs: tuple[str, ...] = ()
 
 
-def _derive_state(signals: RetrievalSignals, issues: list[EvidenceIssue]) -> EvidenceState:
-    """状态是 issues 与已支持结论的函数，不是独立判断。"""
+def _derive_state(
+    issues: list[EvidenceIssue], effective_claims: tuple[str, ...]
+) -> EvidenceState:
+    """状态是 issues 与**可信**已支持结论的函数，不是独立判断。
+
+    `effective_claims` 是调用方已经确认可用的覆盖集合（见 `assess_retrieval`
+    的归一化）：覆盖信息拿不到时它为空，状态因此落到 `insufficient`。
+    """
     if not issues:
+        # 注意：issues 为空**蕴含**覆盖已确认 —— 拿不到必需结论集合时
+        # `assess_retrieval` 一定会塞一条 MISSING_SUPPORT 进来。
+        # 所以这里的 SUPPORTED 是"必需结论全覆盖且无其他缺口"，不是"没发现异常"。
         return EvidenceState.SUPPORTED
-    if signals.supported_claim_refs:
-        # 能明确指出"哪些结论站住了、哪些没站住" —— 这才是部分支持。
+    if effective_claims:
+        # 能指名"哪些结论站住了、哪些没站住" —— 这才是部分支持。
         return EvidenceState.PARTIALLY_SUPPORTED
     # 有缺口，又说不出哪些核心结论已站住。
     # ⚠️ 这里**不能**因为 candidate_count > 0 就升级成 partially_supported：
@@ -181,21 +208,72 @@ def assess_retrieval(signals: RetrievalSignals) -> EvidenceAssessment:
             )
         )
 
-    if not signals.required_steps_completed and not issues:
-        # 步骤没跑完却没有具体码：仍必须拒绝 supported。
-        # 「未完成步骤影响核心结论 → 不得 supported」是规格的硬要求，
-        # 不能因为"没有更精确的码"就放过。
+    # 覆盖判定：这是 `supported` 需要的**正向**证明。
+    required = tuple(signals.required_claim_refs)
+    covered = set(signals.supported_claim_refs)
+    missing: tuple[str, ...] = ()
+    support_gaps: list[str] = []
+    if not required:
+        support_gaps.append("未提供必需结论集合，无法证明核心结论已被覆盖")
+    else:
+        missing = tuple(sorted(set(required) - covered))
+        if missing:
+            support_gaps.append(f"{len(missing)} 条必需结论缺少支撑")
+    if not signals.required_steps_completed:
+        support_gaps.append("必需检索步骤未完成")
+    if support_gaps:
+        # 「必需结论覆盖未知」与「步骤没跑完」共用 MISSING_SUPPORT：
+        # 它们都是"核心结论缺少支撑"，闭集里没有更细的码。
+        # 不能因为"没有更精确的码"就放过 —— 那会让 supported 失去正向证明。
         issues.append(
             EvidenceIssue(
                 code=EvidenceIssueCode.MISSING_SUPPORT,
-                detail="必需检索步骤未完成，核心结论缺少支撑",
+                detail="；".join(support_gaps),
+                claim_refs=missing,
                 retryable=True,
-                next_action="run_required_steps",
+                next_action=(
+                    "run_required_steps"
+                    if not signals.required_steps_completed
+                    else ("supply_required_claims" if not required else "expand_query")
+                ),
             )
         )
 
+    # 拿不到必需结论集合时，**不声称任何结论已支持**。
+    # 否则会与 `insufficient` 的模型约束（不得携带已支持结论）冲突，
+    # 也会把"不知道哪些结论算数"讲成"部分结论已知"。
+    effective_claims = tuple(signals.supported_claim_refs) if required else ()
+
     return EvidenceAssessment(
-        state=_derive_state(signals, issues),
+        state=_derive_state(issues, effective_claims),
         issues=tuple(issues),
-        supported_claim_refs=signals.supported_claim_refs,
+        supported_claim_refs=effective_claims,
     )
+
+
+class RetrievalHealth(StrEnum):
+    """检索**过程**的健康度。
+
+    它与证据状态正交，所以**必须独立命名、独立字段**：
+
+    - 证据状态回答「核心结论有没有足够证据」—— 需要覆盖信息才敢说 `supported`；
+    - 过程健康度回答「这次检索有没有按预期跑完」—— 抓取失败、结果未知、范围被截断。
+
+    两者不能互相顶替。曾用证据状态顺带表达"过程无异常"，结果是在外部抓取失败时
+    仍然返回 `supported`：一句"检索顺利"被当成了"结论有据"。
+    """
+
+    CLEAN = "clean"
+    DEGRADED = "degraded"
+
+
+def assess_retrieval_health(signals: RetrievalSignals) -> RetrievalHealth:
+    """过程健康度。
+
+    ⚠️ `CLEAN` **不代表证据充分** —— 那由 `assess_retrieval` 回答。
+    首版因为拿不到必需结论集合，正常检索的证据状态就是 `insufficient`，
+    而过程健康度很可能是 `CLEAN`。这不是矛盾，是两个问题各归各位。
+    """
+    if signals.tool_result_unknown or signals.fetch_failures or signals.scope_blocked:
+        return RetrievalHealth.DEGRADED
+    return RetrievalHealth.CLEAN

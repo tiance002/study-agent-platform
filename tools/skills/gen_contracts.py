@@ -292,6 +292,29 @@ def normalize(block: str) -> str:
     ).strip()
 
 
+def parse_header(content: str) -> dict[str, str]:
+    """解析 BEGIN 标记行里的 `source` / `source_hash` / `generated_at`。
+
+    用**已知键**定位，而不是按逗号切分：`source` 是人类可读说明，
+    将来写成带逗号的形式完全可能，按逗号切会静默解析错 ——
+    而这里恰恰是用来防漂移的地方，解析错就等于白防。
+    """
+    start = content.index(BEGIN_MARKER)
+    line = content[start : content.index("-->", start)]
+
+    def cut(text: str, key: str, *next_keys: str) -> str:
+        value = text.split(f"{key}=", 1)[1]
+        stops = [value.find(f", {other}=") for other in next_keys]
+        stops = [stop for stop in stops if stop != -1]
+        return (value[: min(stops)] if stops else value).strip()
+
+    return {
+        "source": cut(line, "source", "source_hash", "generated_at"),
+        "source_hash": cut(line, "source_hash", "generated_at"),
+        "generated_at": cut(line, "generated_at"),
+    }
+
+
 def write_generated(contract_path: Path, body: str, digest: str, source_label: str) -> None:
     content = contract_path.read_text(encoding="utf-8")
     start = content.index(BEGIN_MARKER)
@@ -332,7 +355,10 @@ def run_target(target: Target, *, check: bool) -> int:
     rendered = RENDERERS[target.renderer]()
     content = target.contract_path.read_text(encoding="utf-8")
     recorded_body = extract_generated(content)
-    recorded_hash = content[content.index(BEGIN_MARKER):].split("source_hash=")[1].split(",")[0]
+    header = parse_header(content)
+    recorded_hash = header["source_hash"]
+    recorded_source = header["source"]
+    source_stale = recorded_source != target.source_label
 
     if check:
         problems = []
@@ -340,6 +366,13 @@ def run_target(target: Target, *, check: bool) -> int:
             problems.append("生成区内容与当前源码导出结果不一致")
         if recorded_hash != digest:
             problems.append(f"source_hash 不一致（记录 {recorded_hash}，实际 {digest}）")
+        if source_stale:
+            # 只改 `Target.source_label` 也必须被发现。此前 header 里的 `source=`
+            # 既不参与校验、也不参与写入判定，于是标签会永远停在旧值 ——
+            # 一条"生成视图从哪来"的说明，错了却没人会知道。
+            problems.append(
+                f"来源说明不一致（记录 {recorded_source!r}，实际 {target.source_label!r}）"
+            )
         if problems:
             print(
                 f"[fail] {target.name}: {'；'.join(problems)}\n"
@@ -349,16 +382,23 @@ def run_target(target: Target, *, check: bool) -> int:
         print(f"[ok]   {target.name}: 生成区与源码一致（{digest[:19]}…）")
         return 0
 
-    # 内容与哈希都没变时**不写文件**。
+    # 内容、哈希与来源说明都没变时**不写文件**。
     #
     # 否则每次重新生成都会重写 `generated_at`，于是三个契约文件总是同时出现在
     # diff 里 —— 时间戳噪音会把真正的契约变更淹没。这与行尾噪音（见
     # `write_generated` 里的 `newline="\n"`）是同一类问题，而且更隐蔽：
     # 行尾噪音一眼能认出，时间戳噪音看起来像"生成过，应该没问题"。
     #
+    # ⚠️ 跳过条件必须包含 `source_stale`：只比较内容与哈希时，
+    # 改了 `source_label` 会被判为"未变化"从而永远不修（这条是审查发现的）。
+    #
     # 顺带让语义更准确：`generated_at` 变成「该视图最近一次**变化**的时刻」，
     # 而不是「最近一次跑脚本的时刻」—— 后者对读文档的人没有信息量。
-    if normalize(recorded_body) == normalize(rendered) and recorded_hash == digest:
+    if (
+        normalize(recorded_body) == normalize(rendered)
+        and recorded_hash == digest
+        and not source_stale
+    ):
         print(f"[ok]   {target.name}: 内容未变化，未改动文件（{digest[:19]}…）")
         return 0
 

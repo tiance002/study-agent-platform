@@ -58,6 +58,10 @@ class InteractionBody(BaseModel):
     params: dict = Field(default_factory=dict)
     # 只能引用一条已存在的服务端确认；不能声明「我确认过了」。
     confirmation_id: str | None = None
+    # 幂等键：**由客户端提供**，用于表达"这是我上一次那个请求的重试"。
+    # 与追踪 id 分工明确 —— 后者由服务端每请求生成，客户端拿不到稳定值，
+    # 所以它做不了幂等键（见 `InteractionRequest` 的注释）。
+    idempotency_key: str | None = None
 
 
 class IngestBody(BaseModel):
@@ -260,12 +264,16 @@ def create_confirmation(request: Request, project_id: str, body: ConfirmationBod
 
 @router.post("/projects/{project_id}/interactions")
 def interact(request: Request, project_id: str, body: InteractionBody) -> dict:
-    """执行一次交互。node 必须已注册，否则拒绝且不留预算。"""
+    """执行一次交互。node 必须已注册，否则拒绝且不留预算。
+
+    追踪 id **复用中间件绑定的那个**，不在这里另生成：否则响应头、响应体、
+    错误体与审计事件会各带一个不同的 id，出问题时无法把它们串起来。
+    """
     state = _state(request)
     principal, context = _project_scope(request, project_id)
     result = state.runtime.run(
         InteractionRequest(
-            request_id=new_request_id(),
+            request_id=current_request_id() or new_request_id(),
             tenant_id=context.tenant_id,
             principal_id=principal.principal_id,
             learning_project_id=context.require_project(),
@@ -273,6 +281,7 @@ def interact(request: Request, project_id: str, body: InteractionBody) -> dict:
             user_input=body.user_input,
             params=body.params,
             confirmation_id=body.confirmation_id,
+            idempotency_key=body.idempotency_key,
         )
     )
     return result.to_dict()

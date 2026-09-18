@@ -99,6 +99,60 @@ def test_regeneration_still_repairs_a_hand_edited_block(tmp_path):
 
 
 @pytest.mark.invariant
+def test_check_detects_stale_source_label(tmp_path):
+    """只改 `Target.source_label` 也必须被发现。
+
+    此前 header 里的 `source=` 既不参与校验、也不参与写入判定。
+    后果是「生成视图从哪来」这句说明错了却没人知道 ——
+    而且上一轮加的"内容未变化就不写文件"会把这个问题**放大**：
+    内容确实没变，于是连重新生成都不会修复旧标签。
+
+    这类缺陷的共同点是：**它不会报错**。只有专门比对才看得见。
+    """
+    target, copy_path = _copy_of("tool-catalog", tmp_path)
+
+    # 只改来源说明，正文与哈希都不动。
+    changed = gc.Target(
+        name=target.name,
+        contract_path=target.contract_path,
+        sources=target.sources,
+        renderer=target.renderer,
+        source_label="换了一个来源说明",
+    )
+
+    assert gc.run_target(changed, check=True) == 1, "--check 必须发现来源说明漂移"
+
+    # 普通生成要真的修好它（不能因为"内容没变"就跳过）。
+    assert gc.run_target(changed, check=False) == 0
+    assert gc.parse_header(copy_path.read_text(encoding="utf-8"))["source"] == "换了一个来源说明"
+    assert gc.run_target(changed, check=True) == 0
+
+
+@pytest.mark.invariant
+def test_header_parsing_tolerates_commas_in_source_label(tmp_path):
+    """来源说明里带逗号时也必须解析正确。
+
+    按逗号切分看似够用，但 `source` 是人类可读说明，写成「A、B、C」或带逗号
+    完全可能 —— 那会让校验拿到一个被截断的标签，于是**该报的漂移报不出来**。
+    这里是防止"防漂移机制自己漂移"。
+    """
+    target, copy_path = _copy_of("tool-catalog", tmp_path)
+    changed = gc.Target(
+        name=target.name,
+        contract_path=target.contract_path,
+        sources=target.sources,
+        renderer=target.renderer,
+        source_label="注册表导出, 含权限轴与幂等声明",
+    )
+    assert gc.run_target(changed, check=False) == 0
+
+    header = gc.parse_header(copy_path.read_text(encoding="utf-8"))
+    assert header["source"] == "注册表导出, 含权限轴与幂等声明"
+    assert header["source_hash"].startswith("sha256:")
+    assert header["generated_at"]
+
+
+@pytest.mark.invariant
 def test_check_detects_stale_source_hash(tmp_path):
     """source_hash 被改坏也必须被发现（防止绕过内容比对）。"""
     original = gc.TARGETS["tool-catalog"]

@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:239dfe90e177f00bcd0a32aaa5ce9adbce604d8cf93b6c2a92e802424673207e, generated_at=2026-09-18T16:33:54Z -->
-> 生成时间：2026-09-18T16:33:54Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:eddb2dac9d3ac81af50014ff8e67c1618cebd558c11ad333a4bc1dbc8417d2ad, generated_at=2026-09-18T16:55:58Z -->
+> 生成时间：2026-09-18T16:55:58Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -128,6 +128,36 @@ planned → intent_persisted → dispatched
 状态码映射：`AUTH_REQUIRED` → 401；跨租户/跨项目 → 404（不暴露存在性）；
 `RECONCILIATION_REQUIRED` → 409（不是 403「你不被允许」，也不是 5xx「服务故障」——
 后者会被当故障重试，而盲目重试正是这条错误要阻止的行为）；审计或策略组件不可用 → 503。
+
+### 3.2 交互结果的证据字段与幂等（手写区）
+
+交互响应里与证据相关的字段**只有一套**，且各答一个问题：
+
+| 字段 | 回答的问题 | 取值 |
+|---|---|---|
+| `output.evidence_state` | 核心结论有没有足够证据 | `supported` / `partially_supported` / `conflicting` / `insufficient` |
+| `output.issues[]` | 缺口具体是什么 | `EvidenceIssueCode` 闭集 + `claim_refs` / `retryable` / `next_action` |
+| `output.retrieval_health` | 这次检索有没有按预期跑完 | `clean` / `degraded` |
+
+三条不可违反的约束：
+
+1. **`supported` 需要正向覆盖证明**：必须满足 `required_claim_refs ⊆ supported_claim_refs`。
+   拿不到必需结论集合时（首版的常态）输出 `MISSING_SUPPORT` + `insufficient`。
+2. **`retrieval_health=clean` 不代表证据充分**。两者正交：首版正常检索就是
+   `clean` + `insufficient`。展示层不得把 `clean` 渲染成"结论可靠"。
+3. **不得存在第二套证据判定**。历史上曾并存一个按「有没有 citation」计算的
+   `evidence_sufficiency`，会与 `evidence_state` 直接矛盾（外部抓取失败但本地有命中时
+   必然如此）。该字段已删除，**不提供兼容投影**——它不是历史契约，而是错误判定的遗迹。
+
+追踪与幂等是两个字段，不得混用：
+
+| 字段 | 来源 | 用途 |
+|---|---|---|
+| `request_id`（响应头 `X-Request-Id` 同值） | 服务端每请求生成 | 全链路追踪。响应头、响应体、错误体、审计必须是同一个值 |
+| `idempotency_key`（请求体可选） | **客户端**提供 | 表达"这是我上一次那个请求的重试"。绑定主体 + 项目 + 请求内容；同键不同内容 → `IDEMPOTENCY_VIOLATION` |
+
+重放时响应带 `output.idempotent_replay: true`（**重放必须可观测**，否则客户端分不清
+「重试没生效」和「命中了缓存」），且 `request_id` 仍是本次请求的。
 
 ## 4. 手写区 · 一次交互的固定顺序（不得调换）
 

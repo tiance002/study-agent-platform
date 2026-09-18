@@ -17,7 +17,13 @@ from app.core.evidence_issues import (
     EvidenceState,
 )
 from app.execution.child_run import ChildEnvelope, EnvelopeStatus
-from app.knowledge.evidence_state import FetchFailure, RetrievalSignals, assess_retrieval
+from app.knowledge.evidence_state import (
+    FetchFailure,
+    RetrievalHealth,
+    RetrievalSignals,
+    assess_retrieval,
+    assess_retrieval_health,
+)
 from app.policy.taint import TaintSource, derive, derive_model_output, mark_tainted
 from app.workflow.runtime import InteractionRequest
 
@@ -78,11 +84,80 @@ def test_issue_serialization_field_names_match_spec():
 
 
 @pytest.mark.invariant
-def test_no_issues_means_supported():
-    assessment = assess_retrieval(RetrievalSignals(candidate_count=3, top_score=2))
-    assert assessment.state is EvidenceState.SUPPORTED
-    assert assessment.issues == ()
-    assert assessment.has_blocking_issue is False
+def test_supported_requires_full_claim_coverage():
+    """`supported` 需要**正向**的结论覆盖证明，不是"没发现问题"。
+
+    规格的定义是「核心结论有充分且一致的证据」。曾经只要 issues 为空就返回它 ——
+    那检查的其实是"检索过程没发现异常"，而过程无异常绝不等于结论有据。
+    """
+    covered = assess_retrieval(
+        RetrievalSignals(
+            candidate_count=3,
+            top_score=2,
+            required_claim_refs=("claim.a", "claim.b"),
+            supported_claim_refs=("claim.a", "claim.b"),
+        )
+    )
+    assert covered.state is EvidenceState.SUPPORTED
+    assert covered.issues == ()
+    assert covered.has_blocking_issue is False
+
+    # 覆盖信息缺失（首版的常态）→ 不得 supported，且必须给出 MISSING_SUPPORT。
+    unknown_coverage = assess_retrieval(RetrievalSignals(candidate_count=3, top_score=2))
+    assert unknown_coverage.state is EvidenceState.INSUFFICIENT
+    assert [
+        i.code for i in unknown_coverage.issues
+    ] == [EvidenceIssueCode.MISSING_SUPPORT]
+
+
+@pytest.mark.invariant
+def test_missing_claim_coverage_does_not_upgrade_by_having_candidates():
+    """有候选、相关度也好，只要覆盖未知就必须 insufficient。
+
+    这是审查点出的核心：`candidate_count > 0` 不能代替结论覆盖。
+    """
+    assessment = assess_retrieval(RetrievalSignals(candidate_count=9, top_score=99))
+    assert assessment.state is EvidenceState.INSUFFICIENT
+    assert assessment.supported_claim_refs == ()
+
+
+@pytest.mark.invariant
+def test_partial_claim_coverage_is_partially_supported():
+    """能指名"哪几条站住了、哪几条没站住"时才是部分支持。"""
+    assessment = assess_retrieval(
+        RetrievalSignals(
+            candidate_count=3,
+            top_score=2,
+            required_claim_refs=("claim.a", "claim.b"),
+            supported_claim_refs=("claim.a",),
+        )
+    )
+    assert assessment.state is EvidenceState.PARTIALLY_SUPPORTED
+    assert assessment.supported_claim_refs == ("claim.a",)
+    missing = [
+        i for i in assessment.issues if i.code is EvidenceIssueCode.MISSING_SUPPORT
+    ]
+    assert missing, "缺少的结论必须以 MISSING_SUPPORT 列出"
+    assert missing[0].claim_refs == ("claim.b",), "缺口要能指到具体是哪条结论"
+
+
+@pytest.mark.invariant
+def test_retrieval_health_is_separate_from_evidence_state():
+    """过程健康度独立于证据状态。
+
+    两个问题必须分开回答：核心结论有没有证据（证据状态）／这次检索有没有按预期跑完
+    （过程健康度）。曾经前者被后者顶替，结果是外部抓取失败时仍声称证据充分。
+    """
+    clean_but_unproven = RetrievalSignals(candidate_count=3, top_score=2)
+    assert assess_retrieval_health(clean_but_unproven) is RetrievalHealth.CLEAN
+    assert assess_retrieval(clean_but_unproven).state is EvidenceState.INSUFFICIENT
+
+    degraded = RetrievalSignals(
+        candidate_count=3,
+        top_score=2,
+        fetch_failures=(FetchFailure(source_ref="u", error_code="X", retryable=True),),
+    )
+    assert assess_retrieval_health(degraded) is RetrievalHealth.DEGRADED
 
 
 @pytest.mark.invariant
@@ -147,18 +222,33 @@ def test_candidates_with_gap_is_not_partially_supported():
 
 @pytest.mark.invariant
 def test_partially_supported_requires_explicit_supported_claims():
-    """给出已支持结论时才允许 `partially_supported`，且该结论必须被带进结果。"""
-    assessment = assess_retrieval(
+    """没有明确的已支持结论时不得 `partially_supported`，有则必须带进结果。
+
+    两个方向都要测：**缺条件时降级**、**满足条件时升级**。
+    只测其中一个方向会漏掉"条件其实没生效"这种实现错误。
+    """
+    gap = (FetchFailure(source_ref="u", error_code="EGRESS", retryable=True),)
+
+    # 方向一：有缺口 + 给不出已支持结论 → 只能 insufficient。
+    without_claims = assess_retrieval(
+        RetrievalSignals(candidate_count=2, top_score=3, fetch_failures=gap)
+    )
+    assert without_claims.state is EvidenceState.INSUFFICIENT
+    assert without_claims.supported_claim_refs == ()
+
+    # 方向二：有缺口但必需结论全部有支撑 → partially_supported，且结论被带出来。
+    with_claims = assess_retrieval(
         RetrievalSignals(
             candidate_count=2,
             top_score=3,
-            fetch_failures=(FetchFailure(source_ref="u", error_code="EGRESS", retryable=True),),
+            fetch_failures=gap,
+            required_claim_refs=("claim.tool_calling_loop",),
             supported_claim_refs=("claim.tool_calling_loop",),
         )
     )
-    assert assessment.state is EvidenceState.PARTIALLY_SUPPORTED
-    assert assessment.supported_claim_refs == ("claim.tool_calling_loop",)
-    assert assessment.issues, "部分支持必须同时列出缺口，否则等于只报喜"
+    assert with_claims.state is EvidenceState.PARTIALLY_SUPPORTED
+    assert with_claims.supported_claim_refs == ("claim.tool_calling_loop",)
+    assert with_claims.issues, "部分支持必须同时列出缺口，否则等于只报喜"
 
 
 @pytest.mark.invariant
@@ -420,19 +510,25 @@ def test_supported_state_cannot_carry_issues():
 
 
 @pytest.mark.invariant
-def test_supported_means_no_detected_gap_not_verified_conclusions():
-    """记录一条已知局限：首版 `supported` = 「未检测到缺口」。
+def test_retrieval_health_clean_does_not_imply_supported_evidence():
+    """`retrieval_health=CLEAN` 不得被读成"证据充分"。
 
-    规格的措辞是「核心结论有充分且一致的证据」，但要验证那句话需要冻结的
-    核心结论标注集。首版只能确认"检索过程没发现异常"，**这是更弱的一句话**。
+    这条**曾经是一条绊线测试**：上一版把 `supported` 的弱语义（"未检测到缺口"）
+    固定成断言，并在 docstring 里写明"等标注集就绪、加上正向覆盖校验后，
+    这条测试会失败，那时应把它改成断言严格行为"。
 
-    这条测试是**故意设的绊线**：等标注集就绪、`supported` 加上正向结论覆盖校验后，
-    它应当改成断言"没有结论覆盖时不得返回 supported"，而不是继续放宽。
-    不改就失败，免得这条局限被悄悄忘掉。
+    绊线按设计触发了——第六轮审查指出"不要继续弱化术语，而要加正向覆盖"。
+    现在它守的是严格行为，并额外钉住那个最容易混淆的推论：
+    **过程干净 ≠ 结论有据**（首版正常检索就是 CLEAN + insufficient）。
     """
-    assessment = assess_retrieval(RetrievalSignals(candidate_count=3, top_score=5))
-    assert assessment.state is EvidenceState.SUPPORTED
-    assert assessment.supported_claim_refs == (), "首版没有任何结论覆盖信息"
+    signals = RetrievalSignals(candidate_count=5, top_score=9)
+    assert assess_retrieval_health(signals) is RetrievalHealth.CLEAN
+
+    assessment = assess_retrieval(signals)
+    assert assessment.state is EvidenceState.INSUFFICIENT, (
+        "过程干净不代表证据充分；没有结论覆盖就不得 supported"
+    )
+    assert assessment.supported_claim_refs == ()
 
 
 @pytest.mark.invariant

@@ -21,7 +21,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from app.audit.sink import AuditSink, RiskLevel
 from app.budget.ledger import BudgetLedger, Dimension
@@ -31,7 +31,12 @@ from app.core.hashing import content_hash
 from app.execution.confirmation import ConfirmationStore
 from app.execution.outbox import ToolDispatcher
 from app.execution.state_machine import ActionStateMachine
-from app.knowledge.evidence_state import FetchFailure, RetrievalSignals, assess_retrieval
+from app.knowledge.evidence_state import (
+    FetchFailure,
+    RetrievalSignals,
+    assess_retrieval,
+    assess_retrieval_health,
+)
 from app.knowledge.retrieval import ChunkIndex
 from app.learning.evidence import EvidenceLog
 from app.learning.projector import MasteryProjection, Projector
@@ -62,6 +67,8 @@ SUPPORTED_OBLIGATIONS = frozenset(
 
 @dataclass(frozen=True)
 class InteractionRequest:
+    # 追踪 id。由服务端生成（HTTP 中间件绑定），贯穿响应头、响应体、错误体与审计。
+    # ⚠️ 它**不能**充当幂等键：每个请求都会换新值，客户端重试必然拿不到同一个。
     request_id: str
     tenant_id: str
     principal_id: str
@@ -72,6 +79,9 @@ class InteractionRequest:
     # 服务端确认记录的 id（由 `POST /projects/{id}/confirmations` 创建）。
     # 客户端只能**引用**一条已存在的确认，不能声明「我确认过了」。
     confirmation_id: str | None = None
+    # 幂等键：由**客户端**提供，用于表达"这是我上一次那个请求的重试"。
+    # 与 request_id 分工明确：追踪 vs 幂等。缺省表示不做幂等去重。
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -371,7 +381,12 @@ class InteractionRuntime:
             "run_in_sandbox": tools_impl.run_in_sandbox,
             "append_project_evidence": tools_impl.append_project_evidence,
         }
-        self._processed: dict[str, InteractionResult] = {}
+        # 幂等缓存：`idempotency_key` → (指纹, 结果)。
+        #
+        # ⚠️ 这是**开发适配器**：进程内、重启即失，多 worker 之间不共享。
+        # 生产实现必须落库（与 outbox / durable task 同一套），否则"幂等"只在
+        # 单进程生命周期内成立。这一点写进了 README 的已知局限。
+        self._idempotency: dict[str, tuple[str, InteractionResult]] = {}
 
     # ------------------------------------------------------------------ 入口
 
@@ -385,9 +400,27 @@ class InteractionRuntime:
             return self._run(request, context)
 
     def _run(self, request: InteractionRequest, context: TenantContext) -> InteractionResult:
-        # 0) 请求级幂等：同一 request_id 只处理一次。
-        if request.request_id in self._processed:
-            return self._processed[request.request_id]
+        # 0) 幂等：客户端用 `idempotency_key` 表达"这是同一个请求的重试"。
+        #
+        # ⚠️ 这里**不能**用 `request_id`。它是由服务端每请求生成一次的追踪 id，
+        # 客户端重试必然拿到新值 —— 那样的"幂等"永远命不中，等于没有实现，
+        # 而且不会报错：失败是静默的，只有对照两次结果才能发现。
+        fingerprint = self._idempotency_fingerprint(request)
+        if request.idempotency_key is not None:
+            seen = self._idempotency.get(request.idempotency_key)
+            if seen is not None:
+                stored_fingerprint, stored_result = seen
+                if stored_fingerprint != fingerprint:
+                    # 同一把钥匙开两扇门：必须拒绝，不能"以先到者为准"。
+                    return self._fail(
+                        request,
+                        deny(
+                            ErrorCode.IDEMPOTENCY_VIOLATION,
+                            "同一 idempotency_key 被用于内容不同的请求；"
+                            "幂等键必须唯一标识一次请求，不得复用于不同参数",
+                        ),
+                    )
+                return self._as_replay(stored_result, request)
 
         # 1) 输入预检查
         if len(request.user_input) > MAX_INPUT_CHARS:
@@ -458,8 +491,13 @@ class InteractionRuntime:
             self._close_run_quietly(run_account_id)
             return self._fail(request, exc, node_spec=node_spec, token=token)
 
-        # 6) 证据充分性检查：证据不足不得升级模型，只能如实说明。
-        evidence_sufficiency = "insufficient" if not output.get("citations") else "supported"
+        # 6) 证据判定**只有** node handler 返回的结构化 assessment 一个权威来源。
+        #
+        # ⚠️ 这里曾按「是否存在 citation」另算一个 `evidence_sufficiency` 并合并进输出，
+        # 于是同一响应可以同时出现 `evidence_state=insufficient` 与
+        # `evidence_sufficiency=supported`（外部抓取失败但本地有命中时必然如此）。
+        # 读旧字段的客户端会据此接受缺少关键证据的答案 —— 矛盾的证据判定比没有判定更危险。
+        # 该字段已删除，不再提供兼容投影：它不是历史契约，而是一个错误判定的遗迹。
 
         # 回收本次 run 的额度，避免授予额度泄漏到父账户。
         self._close_run_quietly(run_account_id)
@@ -471,12 +509,57 @@ class InteractionRuntime:
             model_tier=str(node_spec.min_tier),
             decision_id=tool_context.scratch.get("last_decision_id"),
             token_id=token.token_id,
-            output={**output, "evidence_sufficiency": evidence_sufficiency},
+            output=output,
             citations=tuple(output.get("citations", ())),
             audit_event_ids=tuple(audit_event_ids),
         )
-        self._processed[request.request_id] = result
+        if request.idempotency_key is not None:
+            self._idempotency[request.idempotency_key] = (fingerprint, result)
         return result
+
+    @staticmethod
+    def _as_replay(stored: InteractionResult, request: InteractionRequest) -> InteractionResult:
+        """把缓存的结果改造成**本次请求**的响应。
+
+        不能原样返回：缓存结果里带的是**第一次**请求的追踪 id，
+        直接返回会让响应头（本次请求）与响应体（上一次请求）指向两个不同的 id，
+        排障时又是一次"对不上"。
+
+        同时显式标注 `idempotent_replay`：客户端有权知道这次没有重新执行。
+        幂等重放必须是可观测的 —— 否则"重试没生效"和"重试命中了缓存"
+        在客户端看来完全一样。
+        """
+        payload = stored.error
+        if payload is not None:
+            payload = {**payload, "request_id": request.request_id}
+        return replace(
+            stored,
+            request_id=request.request_id,
+            output={**stored.output, "idempotent_replay": True},
+            error=payload,
+        )
+
+    @staticmethod
+    def _idempotency_fingerprint(request: InteractionRequest) -> str:
+        """把幂等键绑定到**主体、项目与请求内容**。
+
+        两处绑定都不可省：
+
+        - **绑主体/项目**：否则另一个人猜到（或复用）了同一个 key 就能读到别人的结果
+          —— 那等于把幂等缓存变成跨租户读取通道。
+        - **绑内容**：否则同一个 key 换个参数复用会静默返回上一次的结果，
+          客户端以为自己发了新请求。
+        """
+        return content_hash(
+            {
+                "tenant_id": request.tenant_id,
+                "project_id": request.learning_project_id,
+                "principal_id": request.principal_id,
+                "node_id": request.node_id,
+                "user_input": request.user_input,
+                "params": request.params,
+            }
+        )
 
     # ------------------------------------------------------------------ 内部
 
@@ -592,6 +675,11 @@ class InteractionRuntime:
             status = "failed"
         else:
             status = "denied"
+        # 错误体里的追踪 id 必须与响应体、响应头、审计事件**同一个值**。
+        # 此前它是 null：`exc.request_id` 没有任何 raise 点设置过，
+        # 而这里也没兜底 —— 于是"随时可查的追踪 id"在唯一的失败出口上是空的。
+        payload = exc.to_payload()
+        payload["request_id"] = request.request_id
         return InteractionResult(
             request_id=request.request_id,
             status=status,
@@ -602,7 +690,7 @@ class InteractionRuntime:
             output={},
             citations=(),
             audit_event_ids=(),
-            error=exc.to_payload(),
+            error=payload,
         )
 
     def projection(self, *, graph_version: str = "graph/v1") -> MasteryProjection:
@@ -704,28 +792,31 @@ def _handle_retrieve(invoker: ToolInvoker, request: InteractionRequest, ctx: Nod
                     )
                 )
 
-    assessment = assess_retrieval(
-        RetrievalSignals(
-            candidate_count=len(hits),
-            top_score=float(hits[0]["score"]) if hits else 0.0,
-            relevance_floor=RETRIEVAL_RELEVANCE_FLOOR,
-            required_steps_completed=required_steps_completed,
-            fetch_failures=tuple(failures),
-            tool_result_unknown=tool_result_unknown,
-            # ⚠️ 显式写空并说明原因，而不是靠默认值悄悄为空。
-            # 「哪些核心结论已被支持」需要冻结的核心结论标注集（计划第 9 项），
-            # 首版没有。因此**有缺口时状态一律 insufficient**，不会是 partially_supported。
-            # 这是刻意保守：有候选片段不等于有结论得到支持，
-            # 而"部分支持"的说法会把不确定性讲小。
-            supported_claim_refs=(),
-        )
+    signals = RetrievalSignals(
+        candidate_count=len(hits),
+        top_score=float(hits[0]["score"]) if hits else 0.0,
+        relevance_floor=RETRIEVAL_RELEVANCE_FLOOR,
+        required_steps_completed=required_steps_completed,
+        fetch_failures=tuple(failures),
+        tool_result_unknown=tool_result_unknown,
+        # ⚠️ 显式写空并说明原因，而不是靠默认值悄悄为空。
+        # 「本次检索必须支撑哪些核心结论」与「哪些已站住」都来自冻结的核心结论
+        # 标注集（计划第 9 项），首版没有。因此证据状态会落在 `insufficient`
+        # 并带一条 MISSING_SUPPORT —— 这是**正确的**：
+        # 我们现在确实无法证明核心结论有充分证据。
+        required_claim_refs=(),
+        supported_claim_refs=(),
     )
+    assessment = assess_retrieval(signals)
 
     return {
         "hits": hits,
         "evidence_state": str(assessment.state),
         "issues": [issue.to_dict() for issue in assessment.issues],
-        "note": "状态由 issues 推导，不由「是否存在命中」决定（02 号规格 §4）",
+        # 过程健康度与证据状态**正交**，所以分两个字段。
+        # 曾用证据状态顺带表达"过程无异常"，导致抓取失败时仍返回 supported。
+        "retrieval_health": str(assess_retrieval_health(signals)),
+        "note": "状态由 issues 与结论覆盖推导，不由「是否存在命中」决定（02 号规格 §4）",
         "citations": citations,
     }
 

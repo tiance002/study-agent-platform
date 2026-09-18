@@ -194,13 +194,47 @@ def test_registry_view_exposes_tool_boundaries(client, auth_headers):
 
 
 def test_retrieval_returns_citations_and_evidence_state(client, auth_headers):
+    """检索返回引用，但证据状态**不得**因为"有命中"就升级。
+
+    ⚠️ 这是**对外可见的契约变化**：此前这里断言 `evidence_state == "supported"`，
+    与规格不符 —— 有命中只说明检索返回了东西，不说明任何核心结论有充分证据。
+    首版没有冻结的核心结论标注集，所以正确状态是 `insufficient` + `MISSING_SUPPORT`，
+    同时 `retrieval_health` 如实报告过程是干净的。
+
+    **过程干净 ≠ 结论有据**，这两个问题现在分属两个字段。
+    """
     headers = auth_headers()
     _ingest(client, headers)
     body = _interact(client, headers, "retrieve_material")
+
     assert body["status"] == "ok"
-    assert body["output"]["evidence_state"] == "supported"
     assert body["citations"], "有命中时必须返回引用"
     assert body["citations"][0]["content_hash"].startswith("sha256:")
+
+    output = body["output"]
+    assert output["evidence_state"] == "insufficient"
+    assert output["retrieval_health"] == "clean"
+    assert [i["code"] for i in output["issues"]] == ["MISSING_SUPPORT"]
+    assert "unresolved" not in output
+
+
+def test_response_never_carries_two_conflicting_evidence_verdicts(client, auth_headers):
+    """同一响应里不得同时出现两个互相矛盾的证据判定。
+
+    审查复现过的缺陷：node handler 给出结构化的 `evidence_state=insufficient`，
+    运行时外层又按「有没有 citation」另算一个 `evidence_sufficiency=supported`。
+    读旧字段的客户端会据此接受缺少关键证据的答案 ——
+    **矛盾的判定比没有判定更危险**，因为它看起来像有依据。
+    """
+    headers = auth_headers()
+    _ingest(client, headers)
+    body = _interact(client, headers, "retrieve_material")
+
+    assert body["citations"], "本用例必须有命中，才构成「有 citation」的条件"
+    forbidden = {"evidence_sufficiency"}
+    assert not (forbidden & set(body["output"])), (
+        f"响应里又出现了第二套证据判定：{forbidden & set(body['output'])}"
+    )
 
 
 def test_unknown_node_is_denied(client, auth_headers):
