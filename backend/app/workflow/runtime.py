@@ -77,7 +77,7 @@ class InteractionRequest:
 @dataclass(frozen=True)
 class InteractionResult:
     request_id: str
-    status: str          # ok | denied | failed
+    status: str          # ok | denied | failed | reconciliation_required
     node_id: str
     model_tier: str
     decision_id: str | None
@@ -293,12 +293,19 @@ class ToolInvoker:
         self._ctx.scratch.setdefault("last_decision_id", decision.decision_id)
 
         if outcome.status.value != "succeeded":
+            if outcome.status.value == "unknown":
+                # ⚠️ 结果未知**不能**标成可自动重试。
+                # 标 retryable=True 会让客户端直接重放整个请求，在没对账的情况下
+                # 产生第二次副作用 —— 那不是恢复，是放大。
+                # 正确动作由 PlatformError.next_action 给出（reconcile），
+                # 且 PlatformError 会拒绝 retryable=True 的构造。
+                raise PlatformError(
+                    code=ErrorCode.RECONCILIATION_REQUIRED,
+                    message=f"工具 {tool_id} 结果未知，需先对账再决定是否重试：{outcome.error}",
+                )
             raise PlatformError(
-                code=ErrorCode.RECONCILIATION_REQUIRED
-                if outcome.status.value == "unknown"
-                else ErrorCode.ILLEGAL_STATE_TRANSITION,
+                code=ErrorCode.ILLEGAL_STATE_TRANSITION,
                 message=f"工具 {tool_id} 执行未成功：{outcome.error}",
-                retryable=outcome.status.value == "unknown",
             )
         return outcome.payload
 
@@ -576,9 +583,18 @@ class InteractionRuntime:
         node_spec: NodeSpec | None = None,
         token: CapabilityToken | None = None,
     ) -> InteractionResult:
+        # 状态不能只由 retryable 二分。「结果未知」既不是拒绝、也不是可重试的失败 ——
+        # 它有独立的下一步（对账），所以必须是独立状态。否则客户端只会看到
+        # retryable=False 就把未知当成终态放弃，永远不去对账。
+        if exc.code is ErrorCode.RECONCILIATION_REQUIRED:
+            status = "reconciliation_required"
+        elif exc.retryable:
+            status = "failed"
+        else:
+            status = "denied"
         return InteractionResult(
             request_id=request.request_id,
-            status="denied" if not exc.retryable else "failed",
+            status=status,
             node_id=node_spec.node_id if node_spec else request.node_id,
             model_tier=str(node_spec.min_tier) if node_spec else "L0",
             decision_id=None,
@@ -696,6 +712,12 @@ def _handle_retrieve(invoker: ToolInvoker, request: InteractionRequest, ctx: Nod
             required_steps_completed=required_steps_completed,
             fetch_failures=tuple(failures),
             tool_result_unknown=tool_result_unknown,
+            # ⚠️ 显式写空并说明原因，而不是靠默认值悄悄为空。
+            # 「哪些核心结论已被支持」需要冻结的核心结论标注集（计划第 9 项），
+            # 首版没有。因此**有缺口时状态一律 insufficient**，不会是 partially_supported。
+            # 这是刻意保守：有候选片段不等于有结论得到支持，
+            # 而"部分支持"的说法会把不确定性讲小。
+            supported_claim_refs=(),
         )
     )
 

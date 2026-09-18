@@ -69,12 +69,23 @@ class ErrorCode(StrEnum):
     EVIDENCE_UNMAPPED = "EVIDENCE_UNMAPPED"
 
 
+# 平台层 next_action 词汇表。
+# 目前只登记真实会被产生的取值 —— 永不触发的取值比缺失的取值更糟，
+# 因为它看起来已经实现（这条教训来自 `EvidenceIssueCode` 的诚实标注）。
+NEXT_ACTION_RECONCILE = "reconcile"
+
+
 @dataclass
 class PlatformError(Exception):
     """平台错误基类。必须携带稳定错误码与可重试标记。
 
     `retryable` 只对明确的瞬时错误为真；业务拒绝一律为假，
     否则调用方会重试一个永远不会成功的请求。
+
+    ⚠️ 「结果未知」（`RECONCILIATION_REQUIRED`）**不是**可自动重试的瞬时错误。
+    把它标成 `retryable=True` 会让客户端直接重放整个请求，在没有对账的情况下
+    产生第二次副作用 —— 那不是恢复，是放大。这条由 `__post_init__` 强制，
+    并要求调用方改走 `next_action`。
     """
 
     code: ErrorCode
@@ -82,6 +93,24 @@ class PlatformError(Exception):
     retryable: bool = False
     request_id: str | None = None
     details: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.code is ErrorCode.RECONCILIATION_REQUIRED and self.retryable:
+            raise ValueError(
+                "RECONCILIATION_REQUIRED 不得标记为可自动重试："
+                "结果未知时重试会产生第二次副作用，必须先到外部系统对账"
+            )
+
+    @property
+    def next_action(self) -> str:
+        """调用方接下来应当做什么。**由 code 推导，不由 raise 点手工填写。**
+
+        推导而非传参，是为了让它不可能被遗漏：新增一个 RECONCILIATION_REQUIRED
+        的 raise 点却忘了写 next_action 的情况，在结构上不会发生。
+        """
+        if self.code is ErrorCode.RECONCILIATION_REQUIRED:
+            return NEXT_ACTION_RECONCILE
+        return ""
 
     def __str__(self) -> str:
         text = f"[{self.code}] {self.message}"
@@ -96,6 +125,7 @@ class PlatformError(Exception):
             "message": self.message,
             "retryable": self.retryable,
             "request_id": self.request_id,
+            "next_action": self.next_action,
         }
 
 

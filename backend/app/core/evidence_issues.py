@@ -22,6 +22,16 @@
 稳定判断、指标与审计一律只读结构化字段（`code` / `claim_refs` / `source_refs` /
 `retryable`）。理由很直接：自然语言无法机械比较，一旦拿它做判断，
 「状态」就退化成模型措辞的产物。
+
+## 约束落在类型上，不落在注释里
+
+本模块的几条安全约束（unknown 不可重试、SCOPE_BLOCKED 文案固定、
+supported 不得带缺口、partially_supported 必须有已支持结论）
+全部由 `__post_init__` 强制，而不是写在 docstring 里。
+
+这是一次审查的教训：判定器当时确实不产生非法组合，但**其他调用方和未来的
+反序列化路径可以**。「约束写进模型」这句话如果只体现为注释，那就是没有写。
+判断一条约束是否真的落地，标准只有一个 —— 构造一个违反它的对象，会不会失败。
 """
 
 from __future__ import annotations
@@ -63,6 +73,16 @@ class EvidenceState(StrEnum):
     INSUFFICIENT = "insufficient"
 
 
+# `SCOPE_BLOCKED` 唯一允许的文案。固定，**不由调用方提供** ——
+# 任何自定义文案都有泄露「未授权资源是否存在」的风险，而权限边界的价值
+# 恰恰在于「不可探测」。把文案收进模型，就不存在"某处调用方写漏了".
+SCOPE_BLOCKED_SAFE_DETAIL = "本次检索范围受权限限制，未能覆盖全部候选来源"
+
+# 对账相关的固定取值。结果未知时**只有**对账一个正确动作，
+# 所以它不做成可自由填写的字符串。
+NEXT_ACTION_RECONCILE = "reconcile"
+
+
 @dataclass(frozen=True)
 class EvidenceIssue:
     """一条结构化的证据问题。
@@ -73,8 +93,13 @@ class EvidenceIssue:
     `TOOL_RESULT_UNKNOWN` 在对账完成前**必须**为 `retryable=False`：
     结果未知时重试会产生第二次副作用，那不是恢复，是放大。
 
-    `detail` 只用于展示。⚠️ `SCOPE_BLOCKED` 的 detail **不得**透露
-    未授权资源是否存在 —— 「你的权限不足」可以写，「该资源存在但你不能看」不行。
+    `detail` 只用于展示。⚠️ `SCOPE_BLOCKED` **不接受自定义 detail** ——
+    任意文案都可能写成「该资源存在但你不能看」，那等于把权限系统变成存在性探针。
+    该码的文案由模型固定填入 `SCOPE_BLOCKED_SAFE_DETAIL`。
+
+    ⚠️ 上面这些约束不是注释，而是**由 `__post_init__` 强制**。
+    只写在注释里的约束等于没有约束：判定器不会违规，不代表其他调用方和
+    未来的反序列化路径不会。约束必须落在类型能拒绝的地方。
     """
 
     code: EvidenceIssueCode
@@ -83,6 +108,29 @@ class EvidenceIssue:
     source_refs: tuple[str, ...] = ()
     retryable: bool = False
     next_action: str = ""
+
+    def __post_init__(self) -> None:
+        if self.code is EvidenceIssueCode.TOOL_RESULT_UNKNOWN:
+            if self.retryable:
+                raise ValueError(
+                    "TOOL_RESULT_UNKNOWN 不得标记为可重试："
+                    "结果未知时重试会产生第二次副作用 —— 那不是恢复，是放大；"
+                    "必须先完成对账"
+                )
+            if self.next_action != NEXT_ACTION_RECONCILE:
+                raise ValueError(
+                    f"TOOL_RESULT_UNKNOWN 的 next_action 只能是 "
+                    f"{NEXT_ACTION_RECONCILE!r}，收到 {self.next_action!r}"
+                )
+
+        if self.code is EvidenceIssueCode.SCOPE_BLOCKED:
+            if self.detail:
+                raise ValueError(
+                    "SCOPE_BLOCKED 不接受自定义 detail：任意文案都可能泄露"
+                    "未授权资源是否存在；请留空，由模型填入固定安全文案"
+                )
+            # frozen dataclass 里填入派生值用 object.__setattr__。
+            object.__setattr__(self, "detail", SCOPE_BLOCKED_SAFE_DETAIL)
 
     def to_dict(self) -> dict:
         return {
@@ -97,15 +145,49 @@ class EvidenceIssue:
 
 @dataclass(frozen=True)
 class EvidenceAssessment:
-    """状态 + 全部结构化问题。
+    """状态 + 全部结构化问题 + 已明确站住的核心结论。
 
-    「状态」不是独立于 issues 的另一个判断 —— 它是 issues 的函数。
-    把两者放在同一个对象里，是为了让「状态说 supported 但 issues 非空」这种
-    自相矛盾在结构上就难以产生。
+    「状态」不是独立于 issues 的另一个判断 —— 它是 issues 与已支持结论的函数。
+    把三者放在同一个对象里，是为了让自相矛盾的组合在**构造时**就失败。
+
+    `supported_claim_refs` 是 `partially_supported` 的必要条件（02 号规格 §4：
+    「可明确隔离已支持结论与缺口时返回该状态」）。**仅仅"有候选片段"不等于
+    有任何核心结论得到支持** —— 候选与结论之间还差一层覆盖关系，
+    在没有它的时候声称部分支持，就是夸大证据充分性。
     """
 
     state: EvidenceState
     issues: tuple[EvidenceIssue, ...] = field(default_factory=tuple)
+    supported_claim_refs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.state is EvidenceState.SUPPORTED:
+            if self.issues:
+                raise ValueError(
+                    "state=supported 不得携带任何 issue："
+                    "存在影响核心结论的缺口就不能声称已支持"
+                )
+            return
+
+        # 以下三种状态都必须可解释。
+        if not self.issues:
+            raise ValueError(
+                f"state={self.state} 必须至少携带一条 issue；"
+                "无法说明缺口的非支持状态是不可审计的"
+            )
+
+        if self.state is EvidenceState.PARTIALLY_SUPPORTED and not self.supported_claim_refs:
+            raise ValueError(
+                "state=partially_supported 必须显式列出已支持的核心结论"
+                "（supported_claim_refs）：只有候选片段、没有结论覆盖关系时，"
+                "正确状态是 insufficient —— 部分支持的说法会夸大证据充分性"
+            )
+
+        if self.state is EvidenceState.INSUFFICIENT and self.supported_claim_refs:
+            raise ValueError(
+                "state=insufficient 不得携带已支持的核心结论；"
+                "若确有结论站得住，状态应为 partially_supported"
+            )
 
     @property
     def has_blocking_issue(self) -> bool:
@@ -116,4 +198,5 @@ class EvidenceAssessment:
         return {
             "state": str(self.state),
             "issues": [issue.to_dict() for issue in self.issues],
+            "supported_claim_refs": list(self.supported_claim_refs),
         }

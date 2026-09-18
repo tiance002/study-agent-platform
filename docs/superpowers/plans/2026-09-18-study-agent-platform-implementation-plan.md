@@ -100,10 +100,16 @@
       **部分完成（2026-09-19）**：闭集、`EvidenceIssue` 模型、四级状态与确定性判定器已落地
       （`core/evidence_issues.py` + `knowledge/evidence_state.py`）；ChildRun 信封与检索 node
       均已切换到 `issues[]`，旧的 `unresolved` 字段与 `bool(hits)` 判定已移除。
-      已产生 6 个码：`NO_CANDIDATES`、`LOW_RELEVANCE`、`SOURCE_FETCH_FAILED`、`SCOPE_BLOCKED`、
-      `TOOL_RESULT_UNKNOWN`、`MISSING_SUPPORT`（后者当前由"必需步骤未完成"触发）。
-      **`SOURCE_CONFLICT` 与 `FRESHNESS_UNKNOWN` 尚未产生** —— 判定它们需要冻结的核心结论标注集，
-      输入当前不存在。不假装实现：一个永不触发的码比缺失的码更糟，因为它看起来已经做好。
+      **各码的落地程度分三级，不可混同**（此前笼统写作"已产生 6 个码"，属过度乐观）：
+      - 判定器支持 + 生产已接线：`NO_CANDIDATES`、`LOW_RELEVANCE`、`SOURCE_FETCH_FAILED`、
+        `TOOL_RESULT_UNKNOWN`、`MISSING_SUPPORT`（最后一个当前由"必需步骤未完成"触发）
+      - 判定器支持、**生产未接线、仅测试可构造**：`SCOPE_BLOCKED` —— 检索路径尚无按来源的
+        作用域概念（`project_grants` 未被检索读取），项目内过滤只会静默隐藏越界候选
+      - 判定器未实现、输入也不存在：`SOURCE_CONFLICT`、`FRESHNESS_UNKNOWN`
+        （需要来源权威性比较与文档时间戳策略）
+      `partially_supported` 同理：判定规则就绪，但**首版恒不产生** —— 它要求显式给出
+      已支持的核心结论（`supported_claim_refs`），而这依赖冻结的核心结论标注集。
+      给不出时一律 `insufficient`。不假装实现：一个永不触发的码比缺失的码更糟。
 - [ ] 冻结查询—文档—片段—核心结论标注集；只有分层指标证明无关键回归后才启用 reranker。
 
 **退出门：** SSRF、DNS rebinding、解压炸弹、路径逃逸和依赖外传测试均拒绝；检索结果在数据库层强制项目过滤；索引可由版本化源重新构建；标题召回失败时全局片段兜底仍可命中；reranker 未通过冻结评测集不得上线；证据问题可按稳定 code 统计且不泄露未授权资源存在性。

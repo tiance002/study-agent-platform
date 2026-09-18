@@ -11,22 +11,35 @@
 「关键证据失败，系统却说已支持」是最危险的一类错误：它让用户以为结论有据。
 错误的 `insufficient` 会被用户追问后修正；错误的 `supported` 会被直接采信。
 
-## 首版各码的启用情况（诚实标注）
+## 首版各码的真实落地程度（诚实标注，三级）
 
-| 码 | 首版是否产生 | 触发条件 / 缺什么 |
-|---|---|---|
-| `NO_CANDIDATES` | ✅ | 候选项数为 0 |
-| `LOW_RELEVANCE` | ✅ | 最高候选低于相关度下限 |
-| `SOURCE_FETCH_FAILED` | ✅ | 外部抓取失败（可重试性由调用方传入） |
-| `SCOPE_BLOCKED` | ✅ | 检索范围被权限截断 |
-| `TOOL_RESULT_UNKNOWN` | ✅ | 工具结果未知（强制不可重试，须先对账） |
-| `MISSING_SUPPORT` | 🔶 部分 | 当前用「必需步骤未完成」触发；完整的**核心结论覆盖率**判定依赖标注集 |
-| `SOURCE_CONFLICT` | ❌ 待接入 | 需要来源一致性与权威性比较 |
-| `FRESHNESS_UNKNOWN` | ❌ 待接入 | 需要文档时间戳与新鲜度策略 |
+一个码"存在"可以有三种含义，把三者混为一谈会让项目状态失真。
+实施计划里曾经笼统写作「已产生 6 个码」，那是过度乐观的表述。
 
-后两个**不是"还没写"，是"输入还不存在"** —— 它们的判定需要冻结的核心结论
-标注集。在此之前不产生它们，也不假装产生了：一个永不触发的码比缺失的码更糟，
-因为它看起来已经实现。
+| 码 | 判定器支持 | 生产运行时接线 | 首版触发条件 |
+|---|---|---|---|
+| `NO_CANDIDATES` | ✅ | ✅ 已接线 | 候选项数为 0 |
+| `LOW_RELEVANCE` | ✅ | ✅ 已接线 | 最高候选低于相关度下限 |
+| `SOURCE_FETCH_FAILED` | ✅ | ✅ 已接线 | 外部抓取失败（可重试性由调用方传入） |
+| `TOOL_RESULT_UNKNOWN` | ✅ | ✅ 已接线 | 工具结果未知（强制不可重试，须先对账） |
+| `MISSING_SUPPORT` | ✅ | ✅ 已接线 | 当前由「必需步骤未完成」触发；完整的**核心结论覆盖率**判定依赖标注集 |
+| `SCOPE_BLOCKED` | ✅ | ❌ **未接线，仅测试可构造** | 检索路径当前没有按来源的作用域概念（`project_grants` 未被检索读取），项目内过滤只会静默隐藏越界候选 |
+| `SOURCE_CONFLICT` | ❌ 待实现 | ❌ | 需要来源一致性与权威性比较 |
+| `FRESHNESS_UNKNOWN` | ❌ 待实现 | ❌ | 需要文档时间戳与新鲜度策略 |
+
+后两个**不是"还没写"，是"输入还不存在"**。`SCOPE_BLOCKED` 则是判定规则已就绪、
+但生产路径还产生不了它 —— 三者的差别必须写清楚，否则「有判定能力」会被读成
+「已经在工作」。一个永不触发的码比缺失的码更糟，因为它看起来已经实现。
+
+## `partially_supported` 为什么默认不出现
+
+02 号规格 §4 的措辞是「**可明确隔离已支持结论与缺口时**返回 `partially_supported`」。
+「有候选 + 有问题」并不满足这个条件：候选片段与核心结论之间还差一层覆盖关系，
+而覆盖关系来自冻结的核心结论标注集（计划第 9 项），首版并不存在。
+
+因此本判定器要求调用方显式给出 `supported_claim_refs`；给不出时一律
+`insufficient`。**宁可保守说"证据不足"，也不要用"部分支持"把不确定性讲小。**
+错误的 `insufficient` 会被追问后修正，错误的 `partially_supported` 会被直接采信。
 """
 
 from __future__ import annotations
@@ -69,16 +82,21 @@ class RetrievalSignals:
     fetch_failures: tuple[FetchFailure, ...] = field(default_factory=tuple)
     scope_blocked: bool = False
     tool_result_unknown: bool = False
+    # 已明确站住的核心结论。**不是候选片段** —— 是"哪些结论已有充分支撑"。
+    # 首版恒为空（没有冻结的标注集可用），因此有缺口时状态一律 insufficient。
+    supported_claim_refs: tuple[str, ...] = ()
 
 
 def _derive_state(signals: RetrievalSignals, issues: list[EvidenceIssue]) -> EvidenceState:
-    """状态是 issues 的函数，不是独立判断。"""
+    """状态是 issues 与已支持结论的函数，不是独立判断。"""
     if not issues:
         return EvidenceState.SUPPORTED
-    if signals.candidate_count > 0:
-        # 有候选、也有缺口 —— 能隔离「已支持结论」与「缺口」。
+    if signals.supported_claim_refs:
+        # 能明确指出"哪些结论站住了、哪些没站住" —— 这才是部分支持。
         return EvidenceState.PARTIALLY_SUPPORTED
-    # 一条候选都没有。
+    # 有缺口，又说不出哪些核心结论已站住。
+    # ⚠️ 这里**不能**因为 candidate_count > 0 就升级成 partially_supported：
+    # 有候选片段不代表任何核心结论得到支持，那只是"检索返回了点东西"。
     return EvidenceState.INSUFFICIENT
 
 
@@ -94,9 +112,9 @@ def assess_retrieval(signals: RetrievalSignals) -> EvidenceAssessment:
         issues.append(
             EvidenceIssue(
                 code=EvidenceIssueCode.SCOPE_BLOCKED,
-                # ⚠️ 只说"范围受限"，绝不说"该资源存在但你无权访问"。
-                # 后者会泄露未授权资源的存在性，把权限边界变成信息探针。
-                detail="本次检索范围受权限限制，未能覆盖全部候选来源",
+                # detail 刻意留空：文案由 EvidenceIssue 固定填入 SCOPE_BLOCKED_SAFE_DETAIL。
+                # 这里若能自由写文案，就会有人写出「该资源存在但你无权访问」——
+                # 那等于把权限边界变成存在性探针。
                 retryable=False,
                 next_action="request_scope",
             )
@@ -157,4 +175,8 @@ def assess_retrieval(signals: RetrievalSignals) -> EvidenceAssessment:
             )
         )
 
-    return EvidenceAssessment(state=_derive_state(signals, issues), issues=tuple(issues))
+    return EvidenceAssessment(
+        state=_derive_state(signals, issues),
+        issues=tuple(issues),
+        supported_claim_refs=signals.supported_claim_refs,
+    )

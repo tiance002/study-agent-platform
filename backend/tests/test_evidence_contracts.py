@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import pytest
+from app.core.errors import ErrorCode, PlatformError, deny
 from app.core.evidence_issues import (
+    EvidenceAssessment,
     EvidenceIssue,
     EvidenceIssueCode,
     EvidenceState,
@@ -122,8 +124,16 @@ def test_low_relevance_is_reported():
 
 
 @pytest.mark.invariant
-def test_candidates_with_gap_is_partially_supported():
-    """有候选、也有缺口 → partially_supported（能隔离已支持结论与缺口）。"""
+def test_candidates_with_gap_is_not_partially_supported():
+    """**只有候选片段、没有结论覆盖关系时，不得返回 `partially_supported`。**
+
+    这是上一版的缺陷：`if signals.candidate_count > 0: return PARTIALLY_SUPPORTED`
+    把「检索返回了点东西」当成「部分结论已站住」。02 号规格 §4 的前提是
+    「可明确隔离已支持结论与缺口」——候选与结论之间还差一层覆盖关系。
+
+    覆盖不了的时候正确状态是 `insufficient`：宁可说"证据不足"，
+    也不要用"部分支持"把不确定性讲小。
+    """
     assessment = assess_retrieval(
         RetrievalSignals(
             candidate_count=2,
@@ -131,8 +141,44 @@ def test_candidates_with_gap_is_partially_supported():
             fetch_failures=(FetchFailure(source_ref="u", error_code="EGRESS", retryable=True),),
         )
     )
-    assert assessment.state is EvidenceState.PARTIALLY_SUPPORTED
+    assert assessment.state is EvidenceState.INSUFFICIENT
     assert assessment.issues[0].code is EvidenceIssueCode.SOURCE_FETCH_FAILED
+
+
+@pytest.mark.invariant
+def test_partially_supported_requires_explicit_supported_claims():
+    """给出已支持结论时才允许 `partially_supported`，且该结论必须被带进结果。"""
+    assessment = assess_retrieval(
+        RetrievalSignals(
+            candidate_count=2,
+            top_score=3,
+            fetch_failures=(FetchFailure(source_ref="u", error_code="EGRESS", retryable=True),),
+            supported_claim_refs=("claim.tool_calling_loop",),
+        )
+    )
+    assert assessment.state is EvidenceState.PARTIALLY_SUPPORTED
+    assert assessment.supported_claim_refs == ("claim.tool_calling_loop",)
+    assert assessment.issues, "部分支持必须同时列出缺口，否则等于只报喜"
+
+
+@pytest.mark.invariant
+def test_unknown_and_low_relevance_do_not_upgrade_state_by_having_candidates():
+    """审查列出的两个具体场景：有候选也不得升级。
+
+    - 工具结果未知，但缓存里碰巧有候选；
+    - 候选相关度低于下限。
+    """
+    unknown_case = assess_retrieval(
+        RetrievalSignals(candidate_count=3, top_score=5, tool_result_unknown=True)
+    )
+    low_case = assess_retrieval(
+        RetrievalSignals(candidate_count=3, top_score=0, relevance_floor=2)
+    )
+    assert unknown_case.state is EvidenceState.INSUFFICIENT
+    assert low_case.state is EvidenceState.INSUFFICIENT
+
+
+# --------------------------------------------------------------- 状态判定
 
 
 @pytest.mark.invariant
@@ -141,7 +187,7 @@ def test_incomplete_required_steps_blocks_supported():
     assessment = assess_retrieval(
         RetrievalSignals(candidate_count=5, top_score=9, required_steps_completed=False)
     )
-    assert assessment.state is EvidenceState.PARTIALLY_SUPPORTED
+    assert assessment.state is EvidenceState.INSUFFICIENT
     assert assessment.issues[0].code is EvidenceIssueCode.MISSING_SUPPORT
 
 
@@ -164,6 +210,30 @@ def test_scope_blocked_does_not_leak_existence():
     detail = blocked[0].detail
     for leak in ("存在", "该资源", "exists", "但不", "无权"):
         assert leak not in detail, f"detail 泄露了存在性信息：{leak!r}"
+
+
+@pytest.mark.invariant
+def test_scope_blocked_rejects_custom_detail():
+    """`SCOPE_BLOCKED` 不接受自定义 detail —— 文案由模型固定填入。
+
+    上一版把这条写在注释里。只写注释等于没有约束：判定器不违规，
+    不代表其他调用方和未来的反序列化路径不违规。
+    """
+    with pytest.raises(ValueError) as exc:
+        EvidenceIssue(
+            code=EvidenceIssueCode.SCOPE_BLOCKED,
+            detail="资源 X 存在，但你无权访问",
+        )
+    assert "自定义 detail" in str(exc.value)
+
+
+@pytest.mark.invariant
+def test_scope_blocked_fixed_detail_is_applied_by_model():
+    """留空时由模型填入固定安全文案，调用方不需要也不应该自己写。"""
+    from app.core.evidence_issues import SCOPE_BLOCKED_SAFE_DETAIL
+
+    issue = EvidenceIssue(code=EvidenceIssueCode.SCOPE_BLOCKED)
+    assert issue.detail == SCOPE_BLOCKED_SAFE_DETAIL
 
 
 @pytest.mark.invariant
@@ -331,3 +401,147 @@ def test_retrieval_with_failed_fetch_is_not_supported(platform, tenant_ctx):
     codes = {issue["code"] for issue in output["issues"]}
     assert "SOURCE_FETCH_FAILED" in codes
     assert "unresolved" not in output, "输出不得再带自然语言 unresolved 字段"
+
+
+# --------------------------------------------------------------- 约束由类型强制
+
+
+@pytest.mark.invariant
+def test_supported_state_cannot_carry_issues():
+    """`state=supported` 与「有缺口」在结构上不能共存。
+
+    「状态说 supported 但 issues 非空」是一句自相矛盾的话。
+    上一版只在 docstring 里说"难以产生"，这里把它变成"构造即失败"。
+    """
+    issue = EvidenceIssue(code=EvidenceIssueCode.NO_CANDIDATES)
+    with pytest.raises(ValueError) as exc:
+        EvidenceAssessment(state=EvidenceState.SUPPORTED, issues=(issue,))
+    assert "不得携带任何 issue" in str(exc.value)
+
+
+@pytest.mark.invariant
+def test_unsupported_state_must_cite_at_least_one_issue():
+    """非支持状态必须可解释：说不出缺口的"不足"是不可审计的。"""
+    with pytest.raises(ValueError) as exc:
+        EvidenceAssessment(state=EvidenceState.INSUFFICIENT)
+    assert "至少携带一条 issue" in str(exc.value)
+
+
+@pytest.mark.invariant
+def test_partially_supported_requires_supported_claim_refs():
+    """`partially_supported` 必须能指名已支持的结论。
+
+    这条是本次审查的核心：`candidate_count > 0` 不能当作"部分结论已支持"。
+    """
+    issue = EvidenceIssue(code=EvidenceIssueCode.SOURCE_FETCH_FAILED)
+    with pytest.raises(ValueError) as exc:
+        EvidenceAssessment(state=EvidenceState.PARTIALLY_SUPPORTED, issues=(issue,))
+    assert "supported_claim_refs" in str(exc.value)
+
+
+@pytest.mark.invariant
+def test_insufficient_cannot_carry_supported_claims():
+    """`insufficient` 不得同时声称有结论站住 —— 那是"部分支持"。"""
+    issue = EvidenceIssue(code=EvidenceIssueCode.NO_CANDIDATES)
+    with pytest.raises(ValueError) as exc:
+        EvidenceAssessment(
+            state=EvidenceState.INSUFFICIENT,
+            issues=(issue,),
+            supported_claim_refs=("claim.x",),
+        )
+    assert "partially_supported" in str(exc.value)
+
+
+@pytest.mark.invariant
+def test_unknown_issue_cannot_be_marked_retryable():
+    """`TOOL_RESULT_UNKNOWN` + `retryable=True` 必须被模型拒绝。
+
+    上一版这条只写在注释里，任意调用方仍能构造出"未知但可重试"这条
+    会引发第二次副作用的问题。
+    """
+    with pytest.raises(ValueError) as exc:
+        EvidenceIssue(
+            code=EvidenceIssueCode.TOOL_RESULT_UNKNOWN,
+            retryable=True,
+            next_action="reconcile",
+        )
+    assert "不得标记为可重试" in str(exc.value)
+
+
+@pytest.mark.invariant
+def test_unknown_issue_next_action_must_be_reconcile():
+    with pytest.raises(ValueError) as exc:
+        EvidenceIssue(
+            code=EvidenceIssueCode.TOOL_RESULT_UNKNOWN,
+            retryable=False,
+            next_action="retry",
+        )
+    assert "next_action" in str(exc.value)
+
+
+# --------------------------------------------------------------- 对账不可自动重试
+
+
+@pytest.mark.invariant
+def test_reconciliation_error_cannot_be_marked_retryable():
+    """平台错误层同样不允许把「结果未知」标成可自动重试。
+
+    证据层管住了 `TOOL_RESULT_UNKNOWN`，但同一件事在平台错误层还有第二个出口：
+    `RECONCILIATION_REQUIRED`。上一版正是这里漏了 —— 证据层 retryable=False，
+    平台层却给了 retryable=True，API 客户端据此会直接重放整个请求。
+    """
+    with pytest.raises(ValueError) as exc:
+        PlatformError(
+            code=ErrorCode.RECONCILIATION_REQUIRED,
+            message="x",
+            retryable=True,
+        )
+    assert "不得标记为可自动重试" in str(exc.value)
+
+
+@pytest.mark.invariant
+def test_reconciliation_error_exposes_reconcile_next_action():
+    """`next_action` 由 code 推导，不靠 raise 点手工填写。"""
+    error = deny(ErrorCode.RECONCILIATION_REQUIRED, "结果未知")
+    assert error.retryable is False
+    assert error.next_action == "reconcile"
+    assert error.to_payload()["next_action"] == "reconcile"
+
+
+@pytest.mark.invariant
+def test_ordinary_error_has_no_next_action():
+    """普通拒绝不编造 next_action —— 只登记真实会产生的取值。"""
+    error = deny(ErrorCode.POLICY_DENIED, "策略拒绝")
+    assert error.next_action == ""
+
+
+@pytest.mark.invariant
+def test_reconciliation_result_has_distinct_status(platform, tenant_ctx):
+    """未知结果既不是 denied、也不是可重试的 failed，必须是独立状态。
+
+    否则客户端只看到 `retryable=false`，会把未知当成终态直接放弃 ——
+    永远不会去对账，而未知动作永远悬在那里。
+
+    这里直接驱动失败映射（`_fail`），因为当前没有公共路径能产生
+    "工具结果未知"（需要真实外部系统的超时），而这条映射本身必须被守住。
+    """
+    request = InteractionRequest(
+        request_id="r_recon",
+        tenant_id=tenant_ctx.tenant_id,
+        principal_id=tenant_ctx.principal_id,
+        learning_project_id=tenant_ctx.project_id,
+        node_id="retrieve_material",
+        user_input="x",
+    )
+
+    unknown = platform.runtime._fail(  # noqa: SLF001 — 见上方 docstring 说明
+        request, deny(ErrorCode.RECONCILIATION_REQUIRED, "工具结果未知")
+    )
+    assert unknown.status == "reconciliation_required"
+    assert unknown.error["retryable"] is False
+    assert unknown.error["next_action"] == "reconcile"
+
+    plain = platform.runtime._fail(  # noqa: SLF001
+        request, deny(ErrorCode.POLICY_DENIED, "策略拒绝")
+    )
+    assert plain.status == "denied"
