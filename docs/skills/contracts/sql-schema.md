@@ -7,8 +7,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:e6d4de1828d2679d35da5036a0fefb4a32685b6cc165150f71764eaeb41396dd, generated_at=2026-09-18T05:46:26Z -->
-> 生成时间：2026-09-18T05:46:26Z
+<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:e22d00c7e6260b76726f8540cd6457a7eb2c80d6d355f17fca070f7cd6cc3b69, generated_at=2026-09-18T06:58:32Z -->
+> 生成时间：2026-09-18T06:58:32Z
 
 > 由 `tools/skills/gen_contracts.py` 从代码扫描导出，请勿手工编辑本区。
 > **注意**：这是**代码层实体**，不是 PostgreSQL 表。迁移落地后应改由 alembic 导出 DDL。
@@ -23,8 +23,14 @@
 | `ChildEnvelope` | `app.execution.child_run` | 6 | — | — |
 | `Claim` | `app.execution.child_run` | 3 | — | — |
 | `SpawnedChild` | `app.execution.child_run` | 4 | — | — |
+| `ConfirmationRecord` | `app.execution.confirmation` | 10 | 是 | — |
+| `ConfirmationStore` | `app.execution.confirmation` | 1 | — | — |
 | `ToolOutcome` | `app.execution.outbox` | 7 | — | — |
 | `LogicalAction` | `app.execution.state_machine` | 9 | 是 | — |
+| `MembershipStore` | `app.identity.membership` | 3 | — | — |
+| `ProjectRecord` | `app.identity.membership` | 3 | 是 | — |
+| `Principal` | `app.identity.models` | 4 | 是 | — |
+| `SessionToken` | `app.identity.session` | 8 | 是 | — |
 | `Chunk` | `app.knowledge.retrieval` | 9 | 是 | 是 |
 | `ScoredChunk` | `app.knowledge.retrieval` | 2 | — | — |
 | `ComponentVerdict` | `app.learning.evidence` | 7 | — | — |
@@ -32,7 +38,7 @@
 | `EvidenceEvent` | `app.learning.evidence` | 11 | 是 | — |
 | `ComponentMastery` | `app.learning.projector` | 7 | — | — |
 | `MasteryProjection` | `app.learning.projector` | 6 | — | — |
-| `PlatformState` | `app.main` | 11 | — | — |
+| `PlatformState` | `app.main` | 15 | — | — |
 | `ExecutorCapabilities` | `app.policy.gateway` | 1 | — | — |
 | `PolicyDecision` | `app.policy.gateway` | 7 | — | — |
 | `PolicyInput` | `app.policy.gateway` | 16 | 是 | — |
@@ -43,11 +49,11 @@
 | `NodeSpec` | `app.registry.models` | 16 | — | — |
 | `ToolSpec` | `app.registry.models` | 15 | — | — |
 | `TenantContext` | `app.tenancy.context` | 3 | 是 | — |
-| `NodeContext` | `app.workflow.context` | 4 | — | — |
+| `NodeContext` | `app.workflow.context` | 8 | 是 | — |
 | `InteractionRequest` | `app.workflow.runtime` | 8 | 是 | 是 |
 | `InteractionResult` | `app.workflow.runtime` | 10 | — | — |
 
-合计 31 个实体。
+合计 37 个实体。
 <!-- END GENERATED -->
 
 ## 2. 手写区 · 不可协商的数据库约束

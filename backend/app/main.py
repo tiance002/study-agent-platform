@@ -27,7 +27,11 @@ from app.audit.sink import AuditSink
 from app.budget.ledger import BudgetLedger
 from app.core.clock import SystemClock
 from app.core.errors import PlatformError
+from app.execution.confirmation import ConfirmationStore
 from app.execution.state_machine import ActionStateMachine
+from app.identity.auth import AuthProvider, BearerSessionAuthProvider
+from app.identity.membership import MembershipStore
+from app.identity.session import SessionIssuer
 from app.knowledge.retrieval import ChunkIndex
 from app.learning.evidence import EvidenceLog
 from app.learning.projector import Projector
@@ -40,6 +44,13 @@ from app.workflow.runtime import InteractionRuntime
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = REPO_ROOT / "frontend"
 VAR_DIR = REPO_ROOT / "var"
+
+# 开箱可用的演示租户与项目。
+# 注意：这是**服务端种子数据**，不是客户端可以声称的值 —— 调用方必须持有
+# 该租户成员的有效会话令牌才能访问。
+DEMO_TENANT = "tenant_demo"
+DEMO_PRINCIPAL = "user_demo"
+DEMO_PROJECT = "proj_demo"
 
 
 @dataclass
@@ -55,6 +66,12 @@ class PlatformState:
     chunk_index: ChunkIndex
     evidence_log: EvidenceLog
     runtime: InteractionRuntime
+    # 身份与授权
+    sessions: SessionIssuer
+    membership: MembershipStore
+    auth: AuthProvider
+    # 服务端确认记录
+    confirmations: ConfirmationStore
 
 
 def build_platform(
@@ -77,6 +94,15 @@ def build_platform(
     chunk_index = ChunkIndex()
     evidence_log = EvidenceLog()
     audit = AuditSink(base / "audit", available=audit_available)
+    confirmations = ConfirmationStore()
+
+    # 身份与授权。签名密钥生产必须来自 KMS/Secret Manager。
+    sessions = SessionIssuer(
+        secret=os.environ.get("STUDY_PLATFORM_SESSION_SECRET", "dev-only-session-secret-change-me")
+    )
+    membership = MembershipStore()
+    _seed_demo_membership(membership)
+    auth = BearerSessionAuthProvider(issuer=sessions, clock=clock)
 
     runtime = InteractionRuntime(
         registry=registry,
@@ -89,6 +115,7 @@ def build_platform(
         clock=clock,
         chunk_index=chunk_index,
         evidence_log=evidence_log,
+        confirmations=confirmations,
     )
     return PlatformState(
         registry=registry,
@@ -102,7 +129,21 @@ def build_platform(
         chunk_index=chunk_index,
         evidence_log=evidence_log,
         runtime=runtime,
+        sessions=sessions,
+        membership=membership,
+        auth=auth,
+        confirmations=confirmations,
     )
+
+
+def _seed_demo_membership(membership: MembershipStore) -> None:
+    """建立演示租户、项目与成员关系。
+
+    这是**服务端种子**：它决定"谁属于哪个项目"。
+    客户端无法通过任何请求字段改变这些关系 —— 这正是与「自报租户」的本质区别。
+    """
+    membership.create_project(DEMO_PROJECT, tenant_id=DEMO_TENANT, name="演示学习项目")
+    membership.grant_project(DEMO_TENANT, DEMO_PRINCIPAL, DEMO_PROJECT)
 
 
 def create_app(*, platform: PlatformState | None = None) -> FastAPI:

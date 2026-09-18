@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.core.artifacts import ArtifactRef, DisplayPolicy
-from app.policy.taint import TaintSource, TaintedValue, mark_tainted
+from app.policy.taint import TaintedValue, TaintSource, mark_tainted
 from app.tenancy.context import current
 
 

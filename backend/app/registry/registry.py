@@ -16,7 +16,6 @@ from app.registry.models import (
     IDEMPOTENT_ENOUGH_FOR_WRITE,
     Authority,
     Exclusivity,
-    IdempotencyLevel,
     NodeSpec,
     ToolSpec,
 )

@@ -8,7 +8,6 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-
 from app.core.clock import ClockViolation, FixedClock, SystemClock, projection_scope, utc
 from app.core.errors import ErrorCode, PlatformError
 from app.execution.child_run import (
@@ -241,7 +240,7 @@ def test_same_input_produces_identical_projection():
 
 def _runtime() -> ChildRunRuntime:
     return ChildRunRuntime(
-        tokens=TokenIssuer(secret="test-secret"),
+        tokens=TokenIssuer(secret="dev-only-test-secret"),
         clock=FixedClock(NOW),
         registry=build_registry(),
     )

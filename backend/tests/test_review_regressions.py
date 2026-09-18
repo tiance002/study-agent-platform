@@ -7,8 +7,6 @@
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
-
 from app.audit.sink import AuditSink, RiskLevel
 from app.budget.ledger import BudgetLedger, Dimension
 from app.core.clock import utc
@@ -25,6 +23,7 @@ from app.learning.evidence import (
 from app.main import build_platform, create_app
 from app.policy.taint import TaintSource
 from app.tenancy.context import TenantContext, tenant_scope
+from fastapi.testclient import TestClient
 
 TENANT = "tenant_demo"
 PROJECT = "proj_demo"
@@ -37,78 +36,44 @@ def client(tmp_path):
     return TestClient(create_app(platform=build_platform(var_dir=tmp_path)))
 
 
-def _interaction_body(project: str, node_id: str = "intake_goal") -> dict:
-    return {
-        "tenant_id": TENANT,
-        "principal_id": "user_demo",
-        "learning_project_id": project,
-        "node_id": node_id,
-        "user_input": "Agent harness 怎么学",
-        "params": {"targets": ["agent.harness"]},
-    }
-
-
-# ------------------------------------------------- 1. 项目 ID 路径与请求体一致性
+# ------------------------------------- 1. 身份不再由请求体承载（比上一轮更彻底）
 
 
 @pytest.mark.invariant
-def test_body_project_must_match_path(client):
-    """审查发现：路径用 path-a、请求体用 path-b 时接口仍返回 200。
+def test_request_body_carries_no_identity_fields():
+    """身份的载体已从请求体彻底移除。
 
-    修法：**路径是权威来源**，不一致直接拒绝。
-    对外呈现为 404 —— 不暴露「该项目是否存在」。
+    这比「校验请求体与路径一致」更彻底：**没有字段可填，就没有伪造空间**。
+    上一轮修的是"不一致就拒绝"，这一轮修的是"根本不给填的机会"。
     """
-    response = client.post("/projects/path-a/interactions", json=_interaction_body("path-b"))
-    assert response.status_code == 404, response.text
+    from app.api.routes import ConfirmationBody, IngestBody, InteractionBody
+
+    for model in (InteractionBody, IngestBody, ConfirmationBody):
+        fields = set(model.model_fields)
+        for forbidden in ("tenant_id", "principal_id", "learning_project_id", "confirmed_tools"):
+            assert forbidden not in fields, f"{model.__name__} 不应接受 {forbidden}"
+
+
+@pytest.mark.invariant
+def test_cross_tenant_path_access_is_rejected(client, auth_headers, platform):
+    """用 A 租户的令牌访问 B 租户的项目 → 404（不暴露存在性）。"""
+    platform.membership.create_project("proj_of_tenant_b", tenant_id="tenant_b")
+    response = client.get(
+        "/projects/proj_of_tenant_b/mastery", headers=auth_headers(tenant_id="tenant_a")
+    )
+    assert response.status_code == 404
     assert response.json()["code"] == "NOT_FOUND"
 
 
 @pytest.mark.invariant
-def test_body_project_must_match_path_for_ingestion(client):
-    """摄取路径同样以路径为准，且不留下部分写入。"""
+def test_matching_project_is_accepted(client, auth_headers):
     response = client.post(
-        "/projects/path-a/sources",
-        json={
-            "tenant_id": TENANT,
-            "learning_project_id": "path-b",
-            "source_id": "s1",
-            "chunks": ["内容"],
-        },
+        f"/projects/{PROJECT}/interactions",
+        json={"node_id": "intake_goal", "user_input": "x", "params": {}},
+        headers=auth_headers(),
     )
-    assert response.status_code == 404, response.text
-
-
-@pytest.mark.invariant
-def test_matching_project_is_accepted(client):
-    response = client.post(f"/projects/{PROJECT}/interactions", json=_interaction_body(PROJECT))
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "ok"
-
-
-@pytest.mark.invariant
-def test_ingested_material_does_not_leak_across_projects(client):
-    """摄取归属路径项目；另一个项目检索不到。"""
-    client.post(
-        f"/projects/{PROJECT}/sources",
-        json={
-            "tenant_id": TENANT,
-            "learning_project_id": PROJECT,
-            "source_id": "s1",
-            "chunks": ["Agent harness 负责编排工具调用与循环退出条件"],
-        },
-    )
-
-    mine = client.post(
-        f"/projects/{PROJECT}/interactions",
-        json=_interaction_body(PROJECT, node_id="retrieve_material"),
-    ).json()
-    assert mine["citations"], "本项目应能检索到自己摄取的内容"
-
-    other = client.post(
-        "/projects/proj_other/interactions",
-        json=_interaction_body("proj_other", node_id="retrieve_material"),
-    ).json()
-    assert other["citations"] == [], "其他项目不得检索到本项目资料"
 
 
 # ------------------------------------------------------- 2. 审计读取按作用域过滤
@@ -145,21 +110,24 @@ def test_tenant_scope_is_covered_by_hash_chain(tmp_path):
 
 
 @pytest.mark.invariant
-def test_audit_api_is_scoped_by_tenant(client):
+def test_audit_api_is_scoped_to_authenticated_tenant(client, auth_headers):
+    """审计读取的作用域来自**认证身份**，不来自查询参数。
+
+    查询参数里已经没有 tenant_id 可传 —— 就算硬塞一个也不会改变身份。
+    """
+    headers = auth_headers()
     client.post(
         f"/projects/{PROJECT}/sources",
-        json={
-            "tenant_id": TENANT,
-            "learning_project_id": PROJECT,
-            "source_id": "s1",
-            "chunks": ["内容"],
-        },
+        json={"source_id": "s1", "chunks": ["内容"]},
+        headers=headers,
     )
-    mine = client.get(f"/projects/{PROJECT}/audit?tenant_id={TENANT}").json()
+    mine = client.get(f"/projects/{PROJECT}/audit", headers=headers).json()
     assert mine["records"] > 0
 
-    other = client.get(f"/projects/{PROJECT}/audit?tenant_id=tenant_other").json()
-    assert other["records"] == 0, "其他租户不得读到本租户的审计记录"
+    spoofed = client.get(
+        f"/projects/{PROJECT}/audit?tenant_id=tenant_other", headers=headers
+    ).json()
+    assert spoofed == mine, "查询参数不能改变认证身份"
 
 
 # --------------------------------------------------------- 3. 预算预留的原子性
@@ -213,14 +181,20 @@ def test_child_account_inherits_scope_from_parent():
 
 
 @pytest.mark.invariant
-def test_budget_api_is_scoped_by_tenant(client):
+def test_budget_api_is_scoped_to_authenticated_tenant(client, auth_headers):
+    headers = auth_headers()
     client.post(
         f"/projects/{PROJECT}/interactions",
-        json=_interaction_body(PROJECT, node_id="diagnose_prerequisites"),
+        json={
+            "node_id": "diagnose_prerequisites",
+            "user_input": "x",
+            "params": {"targets": ["agent.harness"]},
+        },
+        headers=headers,
     )
-    other = client.get(f"/projects/{PROJECT}/budget?tenant_id=tenant_other").json()
-    assert other["open_reservations"] == []
-    assert other["needs_reconciliation"] == []
+    body = client.get(f"/projects/{PROJECT}/budget", headers=headers).json()
+    assert body["open_reservations"] == []
+    assert body["needs_reconciliation"] == []
 
 
 # ------------------------------------------------- 4. 精确回读不得绕过作用域

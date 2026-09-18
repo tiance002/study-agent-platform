@@ -22,13 +22,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 
 from app.audit.sink import AuditSink, RiskLevel
 from app.budget.ledger import BudgetLedger, Dimension
 from app.core.clock import Clock
 from app.core.errors import ErrorCode, PlatformError, deny
 from app.core.hashing import content_hash
+from app.execution.confirmation import ConfirmationStore
 from app.execution.outbox import ToolDispatcher
 from app.execution.state_machine import ActionStateMachine
 from app.knowledge.retrieval import ChunkIndex
@@ -44,8 +44,8 @@ from app.policy.token import CapabilityToken, TokenIssuer
 from app.registry.models import Authority, NodeSpec
 from app.registry.registry import Registry
 from app.tenancy.context import TenantContext, current, tenant_scope
-from app.workflow.context import NodeContext
 from app.workflow import tools_impl
+from app.workflow.context import NodeContext
 
 MAX_INPUT_CHARS = 8_000
 
@@ -68,10 +68,9 @@ class InteractionRequest:
     node_id: str
     user_input: str
     params: dict = field(default_factory=dict)
-    # 已确认的工具集合。
-    # ⚠️ 本版为演示做的简化：真实系统中确认必须由**服务端确认记录**驱动，
-    #    绝不能由客户端自报，否则 A2/A3 的确认环节等于不存在。
-    confirmed_tools: tuple[str, ...] = ()
+    # 服务端确认记录的 id（由 `POST /projects/{id}/confirmations` 创建）。
+    # 客户端只能**引用**一条已存在的确认，不能声明「我确认过了」。
+    confirmation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,7 +116,8 @@ class ToolInvoker:
         run_account_id: str,
         tool_context: NodeContext,
         audit_event_ids: list[str],
-        confirmed_tools: frozenset[str] = frozenset(),
+        principal_id: str,
+        confirmation_id: str | None = None,
     ) -> None:
         self._runtime = runtime
         self._token = token
@@ -125,7 +125,8 @@ class ToolInvoker:
         self._run_account_id = run_account_id
         self._ctx = tool_context
         self._audit_event_ids = audit_event_ids
-        self._confirmed_tools = confirmed_tools
+        self._principal_id = principal_id
+        self._confirmation_id = confirmation_id
         self.calls: list[str] = []
 
     @property
@@ -153,11 +154,34 @@ class ToolInvoker:
         runtime = self._runtime
         now = runtime.clock.now()
 
+        # 高影响动作必须由**服务端确认记录**驱动。
+        # 这一步要在构造策略输入之前完成 —— 因为「是否已确认」本身就是策略输入的一部分。
+        # 请求体里没有任何字段能声明确认，所以这条路径无法被客户端伪造。
+        confirmation_recorded = False
+        if spec.min_authority >= Authority.A2:
+            if self._confirmation_id is None:
+                raise deny(
+                    ErrorCode.POLICY_DENIED,
+                    f"工具 {tool_id} 属于 {spec.min_authority.label} 高影响动作，"
+                    f"必须携带服务端确认记录；请求体无法声明确认",
+                    tool_id=tool_id,
+                )
+            runtime.confirmations.consume(
+                self._confirmation_id,
+                tenant_id=self._token.tenant_id,
+                project_id=self._token.project_id,
+                principal_id=self._principal_id,
+                tool_id=tool_id,
+                params=params,
+                now=now,
+            )
+            confirmation_recorded = True
+
         # 策略决策：每个工具调用一次，输入为不可变快照。
         decision = runtime.gateway.decide(
             PolicyInput(
                 request_id=self._token.run_id,
-                principal_id=self._token.audience,
+                principal_id=self._principal_id,
                 tenant_id=self._token.tenant_id,
                 project_id=self._token.project_id,
                 node_id=self._node_spec.node_id,
@@ -168,7 +192,7 @@ class ToolInvoker:
                 data_labels=frozenset({"external_content"}) if spec.returns_external_content else frozenset(),
                 budget_available=True,
                 audit_available=runtime.audit.available,
-                confirmation_recorded=tool_id in self._confirmed_tools,
+                confirmation_recorded=confirmation_recorded,
                 is_high_impact=spec.min_authority >= Authority.A2,
                 needs_egress=bool(spec.network_domains),
             )
@@ -273,6 +297,7 @@ class InteractionRuntime:
         clock: Clock,
         chunk_index: ChunkIndex,
         evidence_log: EvidenceLog,
+        confirmations: ConfirmationStore,
         capabilities: ExecutorCapabilities | None = None,
     ) -> None:
         self.registry = registry
@@ -285,6 +310,7 @@ class InteractionRuntime:
         self.clock = clock
         self.chunk_index = chunk_index
         self.evidence_log = evidence_log
+        self.confirmations = confirmations
         self.capabilities = capabilities or ExecutorCapabilities(SUPPORTED_OBLIGATIONS)
         self.dispatcher = ToolDispatcher(
             registry=registry,
@@ -361,6 +387,10 @@ class InteractionRuntime:
             chunk_index=self.chunk_index,
             evidence_log=self.evidence_log,
             audit=self.audit,
+            clock=self.clock,
+            tenant_id=context.tenant_id,
+            project_id=context.require_project(),
+            principal_id=context.principal_id,
         )
         invoker = ToolInvoker(
             runtime=self,
@@ -369,7 +399,8 @@ class InteractionRuntime:
             run_account_id=run_account_id,
             tool_context=tool_context,
             audit_event_ids=audit_event_ids,
-            confirmed_tools=frozenset(request.confirmed_tools),
+            principal_id=request.principal_id,
+            confirmation_id=request.confirmation_id,
         )
 
         # 5) 执行。所有工具调用都经受控入口。
@@ -612,31 +643,16 @@ def _handle_validate_and_record(
             "citations": [],
         }
 
-    recorded = invoker.call(
-        "append_project_evidence",
-        {
-            "tenant_id": request.tenant_id,
-            "project_id": request.learning_project_id,
-            "kind": "learning",
-            "task_id": request.params.get("task_id", request.request_id),
-            "contract_id": request.params.get("contract_id"),
-            "mapping_version": request.params.get("mapping_version"),
-            "graph_version": request.params.get("graph_version", "graph/v1"),
-            "occurred_at": ctx.scratch.get("now") or _now_from(invoker),
-            "verdicts": request.params.get("verdicts", []),
-        },
-    )
+    # 参数**原样透传用户提交的内容**（无关键会被工具实现忽略）。
+    # 这样客户端创建确认时提交的 params 与执行时的参数完全一致，确认绑定才成立。
+    # 若这里再拼装字段或补默认值，两边永远对不上，确认会静默失效。
+    recorded = invoker.call("append_project_evidence", dict(request.params))
     return {
         "passed": True,
         "evidence_event_id": recorded.get("event_id"),
         "evidence_seq": recorded.get("seq"),
         "citations": [],
     }
-
-
-def _now_from(invoker: ToolInvoker) -> datetime:
-    """从运行时取当前时间。投影过程不会走到这里（投影不需要当前时间）。"""
-    return invoker._runtime.clock.now()  # noqa: SLF001 — handler 需要时间源
 
 
 _HANDLERS = {

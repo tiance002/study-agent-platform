@@ -153,7 +153,7 @@ class PolicyGateway:
             return self._build(
                 snapshot_hash,
                 Verdict.DENY,
-                deny_reasons=("policy_gateway_unavailable",),
+                deny_reasons=["policy_gateway_unavailable"],
             )
 
         reasons: list[str] = []

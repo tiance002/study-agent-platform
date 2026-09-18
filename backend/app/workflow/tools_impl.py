@@ -163,7 +163,14 @@ def run_in_sandbox(ctx: NodeContext, params: dict) -> dict:
 
 
 def append_project_evidence(ctx: NodeContext, params: dict) -> dict:
-    """追加证据事实。追加即幂等，因此可以安全重试。"""
+    """追加证据事实。追加即幂等，因此可以安全重试。
+
+    **参数只含用户可见字段**：租户、项目、时间这类环境信息一律从 `ctx` 取。
+
+    这不是风格问题。服务端确认记录绑定的是**参数哈希**，只要参数里混入任何
+    环境值（当前时间、请求 id、租户 id），哈希每次都不同，确认就永远匹配不上 ——
+    确认机制会静默失效，而表面上一切正常。
+    """
     from app.learning.evidence import (
         ComponentVerdict,
         Direction,
@@ -189,14 +196,14 @@ def append_project_evidence(ctx: NodeContext, params: dict) -> dict:
         raise ValueError("append_project_evidence 需要至少一个组件级裁决")
 
     event = ctx.evidence_log.append(
-        tenant_id=params["tenant_id"],
-        project_id=params["project_id"],
+        tenant_id=ctx.tenant_id,
+        project_id=ctx.project_id,
         kind=EvidenceKind(params.get("kind", "learning")),
-        task_id=str(params.get("task_id", "task")),
+        task_id=str(params.get("task_id", "assessment")),
         contract_id=params.get("contract_id"),
         mapping_version=params.get("mapping_version"),
         graph_version=str(params.get("graph_version", "graph/v1")),
-        occurred_at=params["occurred_at"],
+        occurred_at=ctx.clock.now(),
         verdicts=verdicts,
     )
     return {"cost_units": 1, "event_id": event.event_id, "seq": event.seq}

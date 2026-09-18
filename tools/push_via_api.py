@@ -23,7 +23,6 @@ import argparse
 import base64
 import json
 import subprocess
-import sys
 import time
 from pathlib import Path
 

@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:d19444e2a24d6472895a855e0cf6414f302132c7e2909b44d95db6e0c860185d, generated_at=2026-09-18T05:46:26Z -->
-> 生成时间：2026-09-18T05:46:26Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:5a2260f76aa176e6a3af40b2591b2020938742725503058bf9c70f2541ce60b3, generated_at=2026-09-18T06:58:32Z -->
+> 生成时间：2026-09-18T06:58:32Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -16,8 +16,10 @@
 | 路径 | 方法 | 说明 |
 |---|---|---|
 | `/healthz` | GET | Healthz |
+| `/me` | GET | Me |
 | `/projects/{project_id}/audit` | GET | Audit View |
 | `/projects/{project_id}/budget` | GET | Budget View |
+| `/projects/{project_id}/confirmations` | POST | Create Confirmation |
 | `/projects/{project_id}/interactions` | POST | Interact |
 | `/projects/{project_id}/mastery` | GET | Mastery |
 | `/projects/{project_id}/sources` | POST | Ingest |

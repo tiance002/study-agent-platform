@@ -18,8 +18,9 @@
 
 | 未实现项 | 本版现状 | 后果 |
 |---|---|---|
-| PostgreSQL + RLS | 进程内适配器，租户过滤在**应用层** | **没有数据库级隔离**，不能多租户部署 |
-| 认证与授权 | `tenant_id` 由请求体提供 | 客户端可自报租户，等于没有隔离 |
+| **PostgreSQL 接入应用** | 数据库已就绪、RLS 已验证生效，但应用仍走进程内适配器 | 隔离目前靠应用层，尚无数据库兜底 |
+| ~~认证与授权~~ | **已实现**：签名会话令牌 + 项目归属校验；请求体不含任何身份字段 | 令牌签发的生产替代（OIDC / SAML）待接入 |
+| ~~客户端自报确认~~ | **已实现**：确认是服务端记录，绑定主体 / 项目 / 工具 / 参数 / 有效期，单次消费 | 批量确认与确认疲劳限流未实现 |
 | KMS / Secret Manager | 环境变量 + 开发密钥 | 密钥管理与轮换缺失 |
 | 隔离沙箱（gVisor/Firecracker） | `run_in_sandbox` 为占位，**不执行任何代码** | 无代码执行能力 |
 | Fetcher / Package Proxy | 仅域名白名单示意，**不真的出网** | 无 SSRF 防护实现 |
@@ -36,21 +37,69 @@
 
 ## 快速开始
 
+### 1. 安装依赖（Python 3.11+）
+
 ```bash
-# 1. 安装（Python 3.11+）
 python -m venv .venv
-.venv/Scripts/python -m pip install -e ".[dev]"     # Windows
+.venv/Scripts/python -m pip install -e ".[dev]"        # Windows
 # source .venv/bin/activate && pip install -e ".[dev]"  # macOS / Linux
+```
 
-# 2. 跑测试（全部为不变量证明）
+### 2. 跑测试
+
+```bash
 .venv/Scripts/python -m pytest -q
+```
 
-# 3. 启动演示
-.venv/Scripts/python -m uvicorn app.main:app --app-dir backend --reload
-# 打开 http://127.0.0.1:8000/
+### 3. 启动数据库（可选）
 
-# 4. 校验设计知识索引
+PostgreSQL 16.4 已装在本机 `E:\pgsql`。**必须在你自己的终端里启动** ——
+由自动化工具启动的进程会在命令结束时被清理，无法常驻。
+
+```bat
+scripts\pg_start.cmd
+```
+
+它会启动数据库并打印连接串。停止用 `scripts\pg_stop.cmd`。
+
+> 应用目前**还没有连接这个数据库**（仍是进程内适配器）。数据库已经就绪、RLS 也已验证生效，
+> 但正式接入属于下一步工作，见文末「下一步」。
+
+### 4. 启动控制面
+
+```bat
+scripts\dev.cmd
+```
+
+或手动：
+
+```bash
+set PYTHONPATH=backend
+.venv/Scripts/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+### 5. 签发会话令牌
+
+**这一步是必须的**：所有接口都要求认证，而页面上刻意没有「登录」按钮 ——
+那会退化成"客户端自报身份"。签发是运维动作，只能在服务端做。
+
+新开一个终端：
+
+```bash
+.venv/Scripts/python tools/issue_session.py --tenant tenant_demo --principal user_demo
+```
+
+复制输出的令牌，打开 **http://127.0.0.1:8000/** ，粘贴到第一个输入框，点「验证身份」。
+
+开箱可用的演示数据：租户 `tenant_demo` / 主体 `user_demo` / 项目 `proj_demo`。
+
+### 6. 校验设计知识索引与契约
+
+```bash
 .venv/Scripts/python tools/skills/check_manifest.py docs/skills/manifest.yaml
+.venv/Scripts/python tools/skills/gen_contracts.py --all --check
+.venv/Scripts/python tools/security/scan_secrets.py
+.venv/Scripts/python -m ruff check backend tools
 ```
 
 **红线：** `.env` 已在 `.gitignore` 中排除，密钥不进仓库。请从 `.env.example` 复制后再填写。

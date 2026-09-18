@@ -21,6 +21,22 @@ markers = [
     "invariant: 直接对应一条系统不变量的机械证明测试",
 ]
 
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+exclude = ["var", ".venv", "node_modules"]
+
+[tool.ruff.lint]
+# 只启用能发现**真实缺陷**的规则集。
+# 不做纯风格约束 —— 风格交给 formatter，lint 只该拦 bug 与不一致。
+select = ["E", "F", "W", "I", "B"]
+ignore = [
+    "E501",  # 行长度：交给 formatter，不在 lint 里制造噪音
+]
+
+[tool.ruff.lint.per-file-ignores]
+"backend/tests/*" = ["B011"]  # 允许测试里出现 assert False 之类的写法
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

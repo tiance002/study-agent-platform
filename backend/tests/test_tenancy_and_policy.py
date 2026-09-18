@@ -8,7 +8,6 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-
 from app.core.clock import utc
 from app.core.errors import ErrorCode, PlatformError
 from app.policy.gateway import (
@@ -169,7 +168,7 @@ def test_skill_declaration_does_not_affect_authorization():
 @pytest.mark.invariant
 def test_capability_token_can_only_shrink():
     """不变量 #4：capability token 只能收缩，扩权必须重新评估签发。"""
-    issuer = TokenIssuer(secret="test-secret")
+    issuer = TokenIssuer(secret="dev-only-test-secret")
     now = utc(2026, 9, 18)
     parent = issuer.issue(
         tenant_id="tenant_a",
@@ -196,7 +195,7 @@ def test_capability_token_can_only_shrink():
 @pytest.mark.invariant
 def test_capability_token_cannot_outlive_parent():
     """派生 token 的过期时间不得晚于父 token。"""
-    issuer = TokenIssuer(secret="test-secret")
+    issuer = TokenIssuer(secret="dev-only-test-secret")
     now = utc(2026, 9, 18)
     parent = issuer.issue(
         tenant_id="tenant_a",
@@ -222,7 +221,7 @@ def test_tampered_token_fails_verification():
     """token 任一字段被改动即验签失败。"""
     from dataclasses import replace
 
-    issuer = TokenIssuer(secret="test-secret")
+    issuer = TokenIssuer(secret="dev-only-test-secret")
     now = utc(2026, 9, 18)
     token = issuer.issue(
         tenant_id="tenant_a",
@@ -247,7 +246,7 @@ def test_tampered_token_fails_verification():
 @pytest.mark.invariant
 def test_revocation_epoch_invalidates_old_tokens():
     """广播撤销后，旧 token 立即作废。"""
-    issuer = TokenIssuer(secret="test-secret")
+    issuer = TokenIssuer(secret="dev-only-test-secret")
     now = utc(2026, 9, 18)
     token = issuer.issue(
         tenant_id="tenant_a",

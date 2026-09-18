@@ -17,7 +17,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
-from app.core.artifacts import ArtifactRef, DisplayPolicy
+# 谱系引用契约（ArtifactRef / DisplayPolicy）定义在 `core/artifacts.py`，
+# 在此再导出供外部导入。`noqa` 是必要的：ruff 会把它当作"未使用的导入"删掉，
+# 而那会破坏对外的导入契约（这个文件被 import 时应当能拿到这两个类型）。
+from app.core.artifacts import ArtifactRef, DisplayPolicy  # noqa: F401
 from app.core.clock import Clock
 from app.core.errors import ErrorCode, deny
 from app.policy.token import CapabilityToken, TokenIssuer
