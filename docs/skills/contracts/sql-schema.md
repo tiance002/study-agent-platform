@@ -7,8 +7,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:53d8a7b0ad12fa0db043580bc8efb83823c49f6ffe0433e04dab7c22ab411aa7, generated_at=2026-09-18T08:44:38Z -->
-> 生成时间：2026-09-18T08:44:38Z
+<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:53d8a7b0ad12fa0db043580bc8efb83823c49f6ffe0433e04dab7c22ab411aa7, generated_at=2026-09-18T08:45:59Z -->
+> 生成时间：2026-09-18T08:45:59Z
 
 > 由 `tools/skills/gen_contracts.py` 从代码扫描导出，请勿手工编辑本区。
 > **注意**：这是**代码层实体**，不是 PostgreSQL 表。迁移落地后应改由 alembic 导出 DDL。

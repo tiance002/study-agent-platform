@@ -303,7 +303,12 @@ def write_generated(contract_path: Path, body: str, digest: str, source_label: s
     )
     new_body = f"> 生成时间：{stamp}\n\n{body}\n"
     contract_path.write_text(
-        content[:start] + new_header + new_body + content[end:], encoding="utf-8"
+        content[:start] + new_header + new_body + content[end:],
+        encoding="utf-8",
+        # 显式写 \n：Windows 上 Path.write_text 默认把 \n 转成 \r\n，
+        # 而 .gitattributes 要求文本用 LF。不指定的话，每次生成都会产生
+        # 整文件的行尾 diff 噪音，把真正的契约变更淹没掉。
+        newline="\n",
     )
 
 
