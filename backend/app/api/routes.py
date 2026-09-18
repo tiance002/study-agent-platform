@@ -21,12 +21,14 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.audit.sink import RiskLevel
+from app.budget.ledger import Dimension
 from app.core.authority import Authority
 from app.core.errors import ErrorCode, PlatformError, deny
 from app.core.ids import new_request_id
+from app.execution.confirmation import BudgetCeiling
 from app.identity.models import Principal
 from app.knowledge.retrieval import Chunk
 from app.policy.taint import TaintSource
@@ -37,10 +39,19 @@ router = APIRouter()
 
 
 # --------------------------------------------------------------------- 请求模型
+#
 # 注意这些模型里**没有** tenant_id / principal_id / learning_project_id。
+#
+# 三个模型都设 `extra="forbid"`：pydantic 默认会**静默忽略**未知字段。
+# 静默忽略在这里是有害的 —— 它让「旧客户端以为自己在设置身份」和
+# 「有人正拿 tenant_id 字段做探测」这两种情况看起来都像正常请求。
+# 身份只能来自令牌，那类字段出现在请求体里就应该当场被拒，
+# 而不是"安全地"丢掉（丢掉本身没错，错的是悄无声息）。
 
 
 class InteractionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     node_id: str
     user_input: str
     params: dict = Field(default_factory=dict)
@@ -49,12 +60,16 @@ class InteractionBody(BaseModel):
 
 
 class IngestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     source_id: str
     chunks: list[str]
     origin: str = str(TaintSource.UPLOADED_SOURCE)
 
 
 class ConfirmationBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     tool_id: str
     params: dict = Field(default_factory=dict)
 
@@ -216,7 +231,15 @@ def create_confirmation(request: Request, project_id: str, body: ConfirmationBod
             principal_id=principal.principal_id,
             tool_id=body.tool_id,
             params=body.params,
-            budget_ceiling={"source": "node_declared_limit"},
+            # 成本上界必须是**具体数值**，不能是一句说明。
+            # 用户点确认时同意的是这个数；执行时会拿实际预留与它比对，超出即拒绝
+            # （见 ConfirmationStore.consume 的 reserved_budget 参数）。
+            # 少了这个数，确认就成了一张金额留空的支票。
+            budget_ceiling=BudgetCeiling(
+                dimension=str(Dimension.CURRENCY_MICROS),
+                amount=max(1, spec.max_cost_units),
+                note=f"{spec.tool_id} 单次调用的成本上界（工具声明值）",
+            ),
             issued_at=state.clock.now(),
         )
 

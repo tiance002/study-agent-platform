@@ -7,8 +7,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:e22d00c7e6260b76726f8540cd6457a7eb2c80d6d355f17fca070f7cd6cc3b69, generated_at=2026-09-18T06:58:32Z -->
-> 生成时间：2026-09-18T06:58:32Z
+<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:53d8a7b0ad12fa0db043580bc8efb83823c49f6ffe0433e04dab7c22ab411aa7, generated_at=2026-09-18T08:44:38Z -->
+> 生成时间：2026-09-18T08:44:38Z
 
 > 由 `tools/skills/gen_contracts.py` 从代码扫描导出，请勿手工编辑本区。
 > **注意**：这是**代码层实体**，不是 PostgreSQL 表。迁移落地后应改由 alembic 导出 DDL。
@@ -23,8 +23,9 @@
 | `ChildEnvelope` | `app.execution.child_run` | 6 | — | — |
 | `Claim` | `app.execution.child_run` | 3 | — | — |
 | `SpawnedChild` | `app.execution.child_run` | 4 | — | — |
+| `BudgetCeiling` | `app.execution.confirmation` | 3 | — | — |
 | `ConfirmationRecord` | `app.execution.confirmation` | 10 | 是 | — |
-| `ConfirmationStore` | `app.execution.confirmation` | 1 | — | — |
+| `ConfirmationStore` | `app.execution.confirmation` | 2 | — | — |
 | `ToolOutcome` | `app.execution.outbox` | 7 | — | — |
 | `LogicalAction` | `app.execution.state_machine` | 9 | 是 | — |
 | `MembershipStore` | `app.identity.membership` | 3 | — | — |
@@ -53,7 +54,7 @@
 | `InteractionRequest` | `app.workflow.runtime` | 8 | 是 | 是 |
 | `InteractionResult` | `app.workflow.runtime` | 10 | — | — |
 
-合计 37 个实体。
+合计 38 个实体。
 <!-- END GENERATED -->
 
 ## 2. 手写区 · 不可协商的数据库约束

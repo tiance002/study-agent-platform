@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 PROJECT = "proj_demo"
 
 # 执行 validate_and_record 时提交的参数。
@@ -120,8 +122,14 @@ def test_identity_comes_from_token_not_request(client, auth_headers):
     assert body["tenant_id"] == "tenant_demo"
 
 
-def test_body_has_no_tenant_or_principal_fields(client, auth_headers):
-    """请求模型里不存在 tenant_id / principal_id —— 传了也会被忽略。"""
+def test_body_fields_impersonating_identity_are_rejected(client, auth_headers):
+    """请求体里出现身份字段必须**被拒绝**，而不是被静默忽略。
+
+    pydantic 默认 `extra="ignore"`，会把 `tenant_id` 一声不响地丢掉。
+    那样"安全"确实安全 —— 身份改不了 —— 但两种本该被看见的情况会一起消失：
+    旧客户端以为自己在设置身份，以及有人正拿这个字段做探测。
+    所以这里是 422，不是 200：**丢弃不等于拒绝，静默不等于安全。**
+    """
     response = client.post(
         f"/projects/{PROJECT}/interactions",
         json={
@@ -132,9 +140,35 @@ def test_body_has_no_tenant_or_principal_fields(client, auth_headers):
         },
         headers=auth_headers(),
     )
-    assert response.status_code == 200, response.text
-    # 身份仍是令牌里的那个：交互正常完成，且未因自报字段改变租户
-    assert response.json()["status"] == "ok"
+    assert response.status_code == 422, response.text
+
+
+@pytest.mark.invariant
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        (
+            "/projects/{project}/interactions",
+            {"node_id": "intake_goal", "user_input": "x", "tenant_id": "t"},
+        ),
+        (
+            "/projects/{project}/sources",
+            {"source_id": "s1", "chunks": ["x"], "learning_project_id": "p"},
+        ),
+        (
+            "/projects/{project}/confirmations",
+            {"tool_id": "append_project_evidence", "params": {}, "principal_id": "u"},
+        ),
+    ],
+)
+def test_all_request_models_forbid_unknown_fields(client, auth_headers, path, payload):
+    """三个请求模型都必须拒绝未知字段 —— 只改一个等于没改。"""
+    response = client.post(
+        path.format(project=PROJECT),
+        json=payload,
+        headers=auth_headers(),
+    )
+    assert response.status_code == 422, response.text
 
 
 # ------------------------------------------------------------------ 项目归属

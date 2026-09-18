@@ -155,9 +155,14 @@ class ToolInvoker:
         now = runtime.clock.now()
 
         # 高影响动作必须由**服务端确认记录**驱动。
-        # 这一步要在构造策略输入之前完成 —— 因为「是否已确认」本身就是策略输入的一部分。
         # 请求体里没有任何字段能声明确认，所以这条路径无法被客户端伪造。
-        confirmation_recorded = False
+        #
+        # 这里只**校验**（peek），不消费 —— 顺序很讲究：
+        #   「是否已确认」是策略输入的一部分，所以必须在策略判定之前就能回答；
+        #   但确认不能在策略、预算、意图就绪之前就被消费掉，否则策略一拒绝，
+        #   用户的确认已经作废 —— 他什么都没执行，却得重新确认一次。
+        # 真正的原子占用放在下面所有前置步骤都通过之后。
+        confirmation_id: str | None = None
         if spec.min_authority >= Authority.A2:
             if self._confirmation_id is None:
                 raise deny(
@@ -166,7 +171,7 @@ class ToolInvoker:
                     f"必须携带服务端确认记录；请求体无法声明确认",
                     tool_id=tool_id,
                 )
-            runtime.confirmations.consume(
+            runtime.confirmations.peek(
                 self._confirmation_id,
                 tenant_id=self._token.tenant_id,
                 project_id=self._token.project_id,
@@ -175,7 +180,8 @@ class ToolInvoker:
                 params=params,
                 now=now,
             )
-            confirmation_recorded = True
+            confirmation_id = self._confirmation_id
+        confirmation_recorded = confirmation_id is not None
 
         # 策略决策：每个工具调用一次，输入为不可变快照。
         decision = runtime.gateway.decide(
@@ -231,6 +237,33 @@ class ToolInvoker:
                 f"工具 {tool_id} 没有可用实现",
                 tool_id=tool_id,
             )
+
+        # 前置步骤全部通过，到这里才**原子占用**确认。
+        #
+        # 为什么必须是原子的一步：如果「判断是否已消费」和「标记已消费」分成两步，
+        # 两个并发请求会同时通过判断，同一张确认被执行两次 —— 这是被复现过的缺陷。
+        # 内存实现用锁把两步合进同一临界区；PostgreSQL 实现应改为
+        # `UPDATE ... WHERE consumed_at IS NULL RETURNING`。
+        # ⚠️ 进程内锁在多 worker 部署下等于不存在，所以数据库那条路径不能省。
+        #
+        # 失败时释放刚预留的额度并拒绝：宁可让用户重新确认一次，
+        # 也不能在没有有效确认的情况下执行高影响动作。
+        if confirmation_id is not None:
+            try:
+                runtime.confirmations.consume(
+                    confirmation_id,
+                    tenant_id=self._token.tenant_id,
+                    project_id=self._token.project_id,
+                    principal_id=self._principal_id,
+                    tool_id=tool_id,
+                    params=params,
+                    now=now,
+                    # 实际预留必须落在用户确认时看到的上界之内。
+                    reserved_budget={str(Dimension.CURRENCY_MICROS): cost.amount},
+                )
+            except PlatformError:
+                self._release_quietly(runtime, counter, cost)
+                raise
 
         try:
             outcome = runtime.dispatcher.dispatch(

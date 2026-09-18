@@ -26,6 +26,46 @@ from app.identity.models import Principal
 
 DEFAULT_TTL = timedelta(hours=8)
 
+# 令牌长度上限。解析要解码并构造对象，让调用方随手递一个 10MB 的字符串进来
+# 是不必要的开销，所以先卡长度，再解码。
+MAX_TOKEN_BYTES = 8192
+
+
+def _require_str(data: dict, key: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{key} 缺失或不是非空字符串")
+    return value
+
+
+def _optional_str(data: dict, key: str) -> str:
+    value = data.get(key, "")
+    if not isinstance(value, str):
+        raise ValueError(f"{key} 必须是字符串")
+    return value
+
+
+def _optional_str_tuple(data: dict, key: str) -> tuple[str, ...]:
+    value = data.get(key, ())
+    if not isinstance(value, (list, tuple)) or any(not isinstance(item, str) for item in value):
+        raise ValueError(f"{key} 必须是字符串序列")
+    return tuple(value)
+
+
+def _require_aware_datetime(data: dict, key: str) -> datetime:
+    """取一个**带时区**的时间戳。
+
+    必须带时区：否则后面 `now >= expires_at` 会变成 aware 与 naive 比较，
+    抛出的 `TypeError` 同样会逃出 `AUTH_REQUIRED` 的边界、变成 500。
+    """
+    raw = data.get(key)
+    if not isinstance(raw, str):
+        raise ValueError(f"{key} 缺失或不是字符串")
+    value = datetime.fromisoformat(raw)
+    if value.tzinfo is None:
+        raise ValueError(f"{key} 必须带时区")
+    return value
+
 
 @dataclass(frozen=True)
 class SessionToken:
@@ -112,22 +152,46 @@ class SessionIssuer:
         return f"{body.rstrip('=')}.{token.signature}"
 
     def parse(self, raw: str) -> SessionToken:
+        """把紧凑字符串解析成会话令牌。
+
+        **整个解析过程都在同一个异常边界里。** 早期版本只包住了 base64 与
+        JSON 解码，字段读取和 `datetime.fromisoformat()` 留在了外面 ——
+        于是发一个内容为 `{}` 的合法编码令牌会抛 `KeyError`，对外变成 500。
+
+        这不只是"少了个 catch"：攻击者只要构造畸形令牌就能把「认证失败」
+        变成「服务器错误」，既污染错误指标，也绕开了统一的错误码契约。
+
+        字段类型与时间有效性也在这里校验，原因同上 —— 任何漏出去的异常
+        都会变成 500，而 500 和 401 对攻击者是两种完全不同的信号。
+        """
+        if len(raw.encode("utf-8", errors="ignore")) > MAX_TOKEN_BYTES:
+            raise deny(ErrorCode.AUTH_REQUIRED, "会话令牌超出长度上限")
+
         try:
             body, signature = raw.rsplit(".", 1)
             padded = body + "=" * (-len(body) % 4)
             data = json.loads(base64.urlsafe_b64decode(padded))
-        except Exception as exc:  # 格式错与签名错对外不做区分
+            if not isinstance(data, dict):
+                raise ValueError("载荷不是 JSON 对象")
+
+            token = SessionToken(
+                token_id=_require_str(data, "token_id"),
+                principal_id=_require_str(data, "principal_id"),
+                tenant_id=_require_str(data, "tenant_id"),
+                display_name=_optional_str(data, "display_name"),
+                roles=_optional_str_tuple(data, "roles"),
+                issued_at=_require_aware_datetime(data, "issued_at"),
+                expires_at=_require_aware_datetime(data, "expires_at"),
+                signature=signature,
+            )
+        except Exception as exc:
+            # 格式错、字段错、时间错对外一律同一句话：
+            # 不区分原因，免得把「这个令牌哪里不对」当成信息泄露出去。
             raise deny(ErrorCode.AUTH_REQUIRED, "会话令牌格式无效") from exc
-        return SessionToken(
-            token_id=data["token_id"],
-            principal_id=data["principal_id"],
-            tenant_id=data["tenant_id"],
-            display_name=data.get("display_name", ""),
-            roles=tuple(data.get("roles", ())),
-            issued_at=datetime.fromisoformat(data["issued_at"]),
-            expires_at=datetime.fromisoformat(data["expires_at"]),
-            signature=signature,
-        )
+
+        if token.expires_at <= token.issued_at:
+            raise deny(ErrorCode.AUTH_REQUIRED, "会话令牌的有效期不合法")
+        return token
 
     # ------------------------------------------------------------------ 校验
 

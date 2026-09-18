@@ -53,9 +53,14 @@ jobs:
           python tools/skills/gen_contracts.py --target tool-catalog --check
 
       - name: 数据库迁移校验
+        # ⚠️ 接入 Alembic 之后，这里必须加上 --require-active。
+        # 否则本门在「尚未引入 Alembic」时输出 SKIP 并以 0 退出，
+        # CI 一路绿灯，而它其实什么都没校验 —— 一条永远通过的门比没有门更危险。
         run: python tools/migrations/check_migrations.py
 
       - name: 依赖许可证扫描
+        # 策略：强 copyleft（GPL/AGPL/LGPL）阻塞；弱 copyleft（MPL/EPL）提示但不阻塞；
+        # **无法判定一律阻塞** —— 无法判定不等于安全，那必须被处理一次。
         run: python tools/security/scan_licenses.py
 
       - name: 秘密扫描（文件名 + 内容）
