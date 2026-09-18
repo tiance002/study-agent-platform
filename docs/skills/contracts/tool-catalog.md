@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=tool_registry, source_hash=sha256:4094fc2fd645d60a77a81fab8c241db17eb09d2a87db9bd9868f824c472c9aaf, generated_at=2026-09-18T08:45:59Z -->
-> 生成时间：2026-09-18T08:45:59Z
+<!-- BEGIN GENERATED: source=tool_registry, source_hash=sha256:7bab83edf1bb067bf9e1cfefae60acd5086ba6e262983e042b0c51f0aec1042f, generated_at=2026-09-18T09:27:44Z -->
+> 生成时间：2026-09-18T09:27:44Z
 
 > 由 `tools/skills/gen_contracts.py` 从 tool registry 导出，请勿手工编辑本区。
 > registry 是机器真相源，本区是它的生成视图；**禁止双写**。

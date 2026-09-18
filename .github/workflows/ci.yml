@@ -1,14 +1,15 @@
 name: ci
 
 # 机械门清单（对应实施计划任务 1 与 06 号规格 §4.2）：
-#   1. 不变量测试（含 import 方向门、工具重叠门、预算与审计门）
+#   1. 不变量测试（含 import 方向门、工具重叠门、预算与审计门、PostgreSQL 适配器组）
 #   2. 静态检查（ruff）—— 只启用能发现真实缺陷的规则集
 #   3. 类型检查（mypy）
 #   4. 设计知识索引校验（结构 / 依赖方向 / 体积预算 / 到期复审）
 #   5. 契约生成区一致性（重新渲染比对内容，不只比哈希）
-#   6. 数据库迁移校验（当前 [SKIP]，未引入 Alembic；跳过 ≠ 通过）
-#   7. 依赖许可证扫描（copyleft 会带来分发义务，必须当场知道）
+#   6. 数据库迁移校验（--require-active：Alembic 已引入，跳过即失败）
+#   7. 依赖许可证扫描（copyleft 阻塞 / 弱 copyleft 提示 / 无法判定阻塞）
 #   8. 秘密扫描（文件名 + 内容，内容扫描才是主门）
+#   9. PostgreSQL 真实验证：空库升级 + 应用角色权限 + RLS + 确认的跨连接原子性
 #
 # 门禁必须机械判定，不依赖"记得检查"。
 
@@ -20,6 +21,29 @@ on:
 jobs:
   gates:
     runs-on: ubuntu-latest
+
+    services:
+      # 真实 PostgreSQL 服务：让迁移与 RLS 在 CI 里被真实验证，
+      # 而不是只在"看起来正确"的层面通过。
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: study_platform
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # 迁移与应用使用**不同的角色** —— 角色分离本身是被验证的安全边界之一。
+      STUDY_PLATFORM_MIGRATION_DSN: postgresql://postgres:postgres@127.0.0.1:5432/study_platform
+      STUDY_PLATFORM_DSN: postgresql://study_app:ci-app-password@127.0.0.1:5432/study_platform
+
     steps:
       - uses: actions/checkout@v4
 
@@ -34,7 +58,19 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
-      - name: 不变量测试
+      - name: 准备数据库（应用角色 + 迁移）
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # 应用角色由运维脚本创建，密码经变量传入，不落仓库（项目红线）。
+          psql -h 127.0.0.1 -U postgres -d study_platform \
+            -v app_password='ci-app-password' \
+            -f scripts/sql/create_app_role.sql
+          # 空库升级：验证迁移可以在全新库上完整执行。
+          python -m alembic upgrade head
+
+      - name: 不变量测试（含 PostgreSQL 适配器组）
+        # 数据库服务在跑，postgres 标记的测试会被执行而不是跳过。
         run: python -m pytest -q -p no:warnings
 
       - name: 静态检查（ruff）
@@ -53,10 +89,9 @@ jobs:
           python tools/skills/gen_contracts.py --target tool-catalog --check
 
       - name: 数据库迁移校验
-        # ⚠️ 接入 Alembic 之后，这里必须加上 --require-active。
-        # 否则本门在「尚未引入 Alembic」时输出 SKIP 并以 0 退出，
-        # CI 一路绿灯，而它其实什么都没校验 —— 一条永远通过的门比没有门更危险。
-        run: python tools/migrations/check_migrations.py
+        # --require-active：Alembic 已引入，「跳过」从此视为失败 ——
+        # 这道门必须真正生效，不能永远停在提示状态。
+        run: python tools/migrations/check_migrations.py --require-active
 
       - name: 依赖许可证扫描
         # 策略：强 copyleft（GPL/AGPL/LGPL）阻塞；弱 copyleft（MPL/EPL）提示但不阻塞；

@@ -18,27 +18,23 @@
 | 有效期 | 三个月前的确认仍然有效 |
 | 单次消费 | 一条确认被执行多次 |
 
+## 两种适配器，一套校验
+
+`validate_binding()` 是**模块级**函数而不是某个实现类的私有方法：
+内存适配器（`ConfirmationStore`）与 PostgreSQL 适配器必须跑**完全相同**的校验。
+校验逻辑各自维护，迟早漂移成「内存版拦截、数据库版放行」——
+那是最危险的一种不一致，因为它只在生产环境出现。
+
 ## 并发正确性（2026-09-18 审查修复）
 
-原实现是「读 → 判断 → 写」，中间没有任何互斥。FastAPI 的同步路由运行在线程池里，
-所以两个请求真的会同时进入 `consume()`：两个线程都读到 `consumed_at is None`，
-都通过检查，都写入 —— **一条确认被消费两次**。这不是理论问题，是被复现过的。
+原实现是「读 → 判断 → 写」，中间没有互斥。FastAPI 的同步路由运行在线程池里，
+两个请求真的会同时进入 `consume()`：两个线程都读到 `consumed_at is None`，
+都通过检查，都写入 —— **一条确认被消费两次**。
 
-内存实现用进程内锁把「校验 + 占用」放进同一临界区。
-
-**PostgreSQL 实现不应照抄这把锁**，而应改用条件更新 + `RETURNING`：
-
-```sql
-UPDATE confirmations
-   SET consumed_at = $2
- WHERE confirmation_id = $1
-   AND consumed_at IS NULL
-RETURNING *;
-```
-
-零行返回即「已被消费」—— 判断和占用是同一条语句，天然原子，且跨进程有效
-（进程内锁在多 worker 部署下形同不存在）。这两种实现的**语义必须一致**，
-所以本文件把校验逻辑单独抽成 `_validate()`，供两种适配器共用。
+- 内存适配器：进程内锁把「校验 + 占用」放进同一临界区。
+- PostgreSQL 适配器：`UPDATE ... WHERE consumed_at IS NULL RETURNING` ——
+  判断和占用是同一条语句，天然原子，**且跨进程有效**
+  （进程内锁在多 worker 部署下形同不存在）。
 """
 
 from __future__ import annotations
@@ -116,13 +112,79 @@ class ConfirmationRecord:
         }
 
 
+def validate_binding(
+    record: ConfirmationRecord,
+    *,
+    tenant_id: str,
+    project_id: str,
+    principal_id: str,
+    tool_id: str,
+    params: dict,
+    now: datetime,
+) -> None:
+    """全部绑定项逐一核对 —— **不做「部分匹配就放行」**。只读，不改状态。
+
+    模块级函数：内存适配器与 PostgreSQL 适配器共用，保证语义一致。
+    """
+    if record.consumed:
+        raise deny(
+            ErrorCode.POLICY_DENIED,
+            "该确认记录已被使用；确认是一次性的，不能重复执行",
+            confirmation_id=record.confirmation_id,
+        )
+    if now >= record.expires_at:
+        raise deny(
+            ErrorCode.POLICY_DENIED,
+            f"确认记录已于 {record.expires_at.isoformat()} 过期",
+            confirmation_id=record.confirmation_id,
+        )
+    if record.principal_id != principal_id:
+        raise deny(
+            ErrorCode.POLICY_DENIED,
+            "确认记录不属于当前用户；确认不能转让",
+            confirmation_id=record.confirmation_id,
+        )
+    if record.tenant_id != tenant_id or record.project_id != project_id:
+        raise deny(
+            ErrorCode.POLICY_DENIED,
+            "确认记录不属于当前租户或项目；确认不能跨项目复用",
+            confirmation_id=record.confirmation_id,
+        )
+    if record.tool_id != tool_id:
+        raise deny(
+            ErrorCode.POLICY_DENIED,
+            f"确认记录针对的是 {record.tool_id}，不是 {tool_id}",
+            confirmation_id=record.confirmation_id,
+        )
+    if record.params_hash != content_hash(params):
+        raise deny(
+            ErrorCode.POLICY_DENIED,
+            "本次参数与确认时的参数不一致；确认只对当时展示的参数有效",
+            confirmation_id=record.confirmation_id,
+        )
+
+
+def assert_within_ceiling(ceiling: BudgetCeiling, reserved: dict[str, int]) -> None:
+    """实际预留不得超过用户确认的上界。"""
+    actual = reserved.get(ceiling.dimension, 0)
+    if actual > ceiling.amount:
+        raise deny(
+            ErrorCode.BUDGET_EXCEEDED,
+            f"本次执行需要 {actual} {ceiling.dimension}，"
+            f"超出用户确认的上界 {ceiling.amount}；"
+            f"确认不能覆盖未向用户展示的成本",
+            dimension=ceiling.dimension,
+            confirmed_ceiling=ceiling.amount,
+            requested=actual,
+        )
+
+
 @dataclass
 class ConfirmationStore:
-    """确认记录存储。
+    """确认记录存储（内存适配器）。
 
-    内存适配器。生产由 PostgreSQL 承载并受 RLS 保护 —— 届时
-    `consume()` 的临界区应换成 `UPDATE ... WHERE consumed_at IS NULL RETURNING`，
-    其余校验逻辑不变。
+    生产由 PostgreSQL 承载（`app.db.confirmation_store.PostgresConfirmationStore`），
+    并受 RLS 保护。两种适配器共用 `validate_binding` / `assert_within_ceiling`。
     """
 
     _records: dict[str, ConfirmationRecord] = field(default_factory=dict)
@@ -199,7 +261,7 @@ class ConfirmationStore:
         的原子性兜住：并发的第二个请求会在占用时失败，动作不执行（fail-closed）。
         """
         record = self.get(confirmation_id)
-        self._validate(
+        validate_binding(
             record,
             tenant_id=tenant_id,
             project_id=project_id,
@@ -234,7 +296,7 @@ class ConfirmationStore:
         """
         with self._lock:
             record = self.get(confirmation_id)
-            self._validate(
+            validate_binding(
                 record,
                 tenant_id=tenant_id,
                 project_id=project_id,
@@ -244,73 +306,7 @@ class ConfirmationStore:
                 now=now,
             )
             if reserved_budget is not None:
-                self._assert_within_ceiling(record.budget_ceiling, reserved_budget)
+                assert_within_ceiling(record.budget_ceiling, reserved_budget)
             consumed = replace(record, consumed_at=now)
             self._records[confirmation_id] = consumed
             return consumed
-
-    # ------------------------------------------------------------------ 内部
-
-    @staticmethod
-    def _validate(
-        record: ConfirmationRecord,
-        *,
-        tenant_id: str,
-        project_id: str,
-        principal_id: str,
-        tool_id: str,
-        params: dict,
-        now: datetime,
-    ) -> None:
-        """全部绑定项逐一核对 —— **不做「部分匹配就放行」**。只读，不改状态。"""
-        if record.consumed:
-            raise deny(
-                ErrorCode.POLICY_DENIED,
-                "该确认记录已被使用；确认是一次性的，不能重复执行",
-                confirmation_id=record.confirmation_id,
-            )
-        if now >= record.expires_at:
-            raise deny(
-                ErrorCode.POLICY_DENIED,
-                f"确认记录已于 {record.expires_at.isoformat()} 过期",
-                confirmation_id=record.confirmation_id,
-            )
-        if record.principal_id != principal_id:
-            raise deny(
-                ErrorCode.POLICY_DENIED,
-                "确认记录不属于当前用户；确认不能转让",
-                confirmation_id=record.confirmation_id,
-            )
-        if record.tenant_id != tenant_id or record.project_id != project_id:
-            raise deny(
-                ErrorCode.POLICY_DENIED,
-                "确认记录不属于当前租户或项目；确认不能跨项目复用",
-                confirmation_id=record.confirmation_id,
-            )
-        if record.tool_id != tool_id:
-            raise deny(
-                ErrorCode.POLICY_DENIED,
-                f"确认记录针对的是 {record.tool_id}，不是 {tool_id}",
-                confirmation_id=record.confirmation_id,
-            )
-        if record.params_hash != content_hash(params):
-            raise deny(
-                ErrorCode.POLICY_DENIED,
-                "本次参数与确认时的参数不一致；确认只对当时展示的参数有效",
-                confirmation_id=record.confirmation_id,
-            )
-
-    @staticmethod
-    def _assert_within_ceiling(ceiling: BudgetCeiling, reserved: dict[str, int]) -> None:
-        """实际预留不得超过用户确认的上界。"""
-        actual = reserved.get(ceiling.dimension, 0)
-        if actual > ceiling.amount:
-            raise deny(
-                ErrorCode.BUDGET_EXCEEDED,
-                f"本次执行需要 {actual} {ceiling.dimension}，"
-                f"超出用户确认的上界 {ceiling.amount}；"
-                f"确认不能覆盖未向用户展示的成本",
-                dimension=ceiling.dimension,
-                confirmed_ceiling=ceiling.amount,
-                requested=actual,
-            )

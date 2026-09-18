@@ -21,6 +21,7 @@ pythonpath = ["backend", "."]
 addopts = "-q --strict-markers"
 markers = [
     "invariant: 直接对应一条系统不变量的机械证明测试",
+    "postgres: 需要本地 PostgreSQL 运行；不可达时整组跳过（scripts\\pg_start.cmd）",
 ]
 
 [tool.ruff]
