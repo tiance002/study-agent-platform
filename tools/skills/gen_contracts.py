@@ -349,6 +349,19 @@ def run_target(target: Target, *, check: bool) -> int:
         print(f"[ok]   {target.name}: 生成区与源码一致（{digest[:19]}…）")
         return 0
 
+    # 内容与哈希都没变时**不写文件**。
+    #
+    # 否则每次重新生成都会重写 `generated_at`，于是三个契约文件总是同时出现在
+    # diff 里 —— 时间戳噪音会把真正的契约变更淹没。这与行尾噪音（见
+    # `write_generated` 里的 `newline="\n"`）是同一类问题，而且更隐蔽：
+    # 行尾噪音一眼能认出，时间戳噪音看起来像"生成过，应该没问题"。
+    #
+    # 顺带让语义更准确：`generated_at` 变成「该视图最近一次**变化**的时刻」，
+    # 而不是「最近一次跑脚本的时刻」—— 后者对读文档的人没有信息量。
+    if normalize(recorded_body) == normalize(rendered) and recorded_hash == digest:
+        print(f"[ok]   {target.name}: 内容未变化，未改动文件（{digest[:19]}…）")
+        return 0
+
     write_generated(target.contract_path, rendered, digest, target.source_label)
     print(f"[ok]   {target.name}: 已写入生成区（{digest[:19]}…）")
     return 0

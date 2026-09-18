@@ -19,11 +19,27 @@ def test_contracts_are_in_sync_with_sources(name):
     assert gc.run_target(gc.TARGETS[name], check=True) == 0
 
 
-@pytest.mark.invariant
-def test_check_detects_hand_edited_generated_block(tmp_path):
-    """手工改动生成区必须被发现，否则这道门形同虚设。"""
-    original = gc.TARGETS["tool-catalog"]
-    copy_path = tmp_path / "tool-catalog.md"
+def _tamper_generated_region(path, old: str, new: str) -> None:
+    """只在**生成区**内替换文本。
+
+    不能用整文件的 `str.replace`：同一个词在手写区也可能出现
+    （例如 `retrieve_chunk` 同时是 `intent_tag` 的文档示例）。
+    整文件替换会连手写区一起改，让"验证生成区被改动"的测试变得名不副实 ——
+    它测的就成了"文件里任何地方变了"。
+    """
+    content = path.read_text(encoding="utf-8")
+    start = content.index(gc.BEGIN_MARKER)
+    end = content.index(gc.END_MARKER)
+    region = content[start:end]
+    assert old in region, f"生成区里没有 {old!r}，测试前提不成立"
+    path.write_text(
+        content[:start] + region.replace(old, new) + content[end:], encoding="utf-8"
+    )
+
+
+def _copy_of(name: str, tmp_path) -> tuple[gc.Target, "object"]:
+    original = gc.TARGETS[name]
+    copy_path = tmp_path / f"{name}.md"
     copy_path.write_text(original.contract_path.read_text(encoding="utf-8"), encoding="utf-8")
     target = gc.Target(
         name=original.name,
@@ -32,16 +48,54 @@ def test_check_detects_hand_edited_generated_block(tmp_path):
         renderer=original.renderer,
         source_label=original.source_label,
     )
+    return target, copy_path
+
+
+@pytest.mark.invariant
+def test_check_detects_hand_edited_generated_block(tmp_path):
+    """手工改动生成区必须被发现，否则这道门形同虚设。"""
+    target, copy_path = _copy_of("tool-catalog", tmp_path)
 
     assert gc.run_target(target, check=True) == 0, "复制后应当是一致的"
 
-    copy_path.write_text(
-        copy_path.read_text(encoding="utf-8").replace(
-            "retrieve_chunk", "retrieve_chunk_tampered"
-        ),
-        encoding="utf-8",
-    )
+    _tamper_generated_region(copy_path, "retrieve_chunk", "retrieve_chunk_tampered")
     assert gc.run_target(target, check=True) == 1, "生成区被手改后必须报错"
+
+
+@pytest.mark.invariant
+def test_regeneration_does_not_touch_files_when_nothing_changed(tmp_path):
+    """内容没变时不重写文件 —— 否则时间戳噪音会把真正的契约变更淹没。
+
+    修复前的行为是：每次 `--all` 都重写 `generated_at`，于是三个契约文件
+    总是同时出现在 diff 里。这类噪音比行尾噪音更隐蔽 ——
+    行尾噪音一眼能认出，时间戳噪音看起来像"生成过，应该没问题"。
+    """
+    target, copy_path = _copy_of("tool-catalog", tmp_path)
+    before = copy_path.read_text(encoding="utf-8")
+    mtime_before = copy_path.stat().st_mtime_ns
+
+    assert gc.run_target(target, check=False) == 0
+
+    assert copy_path.read_text(encoding="utf-8") == before, "内容未变却改写了文件"
+    assert copy_path.stat().st_mtime_ns == mtime_before, "内容未变却触碰了文件"
+
+
+@pytest.mark.invariant
+def test_regeneration_still_repairs_a_hand_edited_block(tmp_path):
+    """内容真的变了就必须写入。
+
+    这条是上一条的对照：没有它，"跳过写入"可能退化成"永远不写"，
+    而"永远不写"同样能让上一条测试通过 —— 那才是最难发现的坏状态。
+    """
+    target, copy_path = _copy_of("tool-catalog", tmp_path)
+
+    _tamper_generated_region(copy_path, "retrieve_chunk", "retrieve_chunk_tampered")
+
+    assert gc.run_target(target, check=False) == 0
+
+    restored = copy_path.read_text(encoding="utf-8")
+    assert "retrieve_chunk_tampered" not in restored, "被改坏的生成区没有被修复"
+    assert gc.run_target(target, check=True) == 0
 
 
 @pytest.mark.invariant
