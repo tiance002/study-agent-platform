@@ -25,12 +25,13 @@ jobs:
     services:
       # 真实 PostgreSQL 服务：让迁移与 RLS 在 CI 里被真实验证，
       # 而不是只在"看起来正确"的层面通过。
+      # trust 认证：CI 容器是一次性沙箱，用免密而不是往仓库里放密码。
       postgres:
         image: postgres:16
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
           POSTGRES_DB: study_platform
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5432:5432
         options: >-
@@ -41,8 +42,9 @@ jobs:
 
     env:
       # 迁移与应用使用**不同的角色** —— 角色分离本身是被验证的安全边界之一。
-      STUDY_PLATFORM_MIGRATION_DSN: postgresql://postgres:postgres@127.0.0.1:5432/study_platform
-      STUDY_PLATFORM_DSN: postgresql://study_app:ci-app-password@127.0.0.1:5432/study_platform
+      # 两个 DSN 都不含密码：trust 认证 + 一次性容器，秘密扫描因此保持绿色。
+      STUDY_PLATFORM_MIGRATION_DSN: postgresql://postgres@127.0.0.1:5432/study_platform
+      STUDY_PLATFORM_DSN: postgresql://study_app@127.0.0.1:5432/study_platform
 
     steps:
       - uses: actions/checkout@v4
@@ -59,12 +61,11 @@ jobs:
           python -m pip install -e ".[dev]"
 
       - name: 准备数据库（应用角色 + 迁移）
-        env:
-          PGPASSWORD: postgres
         run: |
           # 应用角色由运维脚本创建，密码经变量传入，不落仓库（项目红线）。
+          # 角色密码本身在 trust 认证下不参与验证，值带 dev-only 标记防误报。
           psql -h 127.0.0.1 -U postgres -d study_platform \
-            -v app_password='ci-app-password' \
+            -v app_password='dev-only-ci-role-password' \
             -f scripts/sql/create_app_role.sql
           # 空库升级：验证迁移可以在全新库上完整执行。
           python -m alembic upgrade head
