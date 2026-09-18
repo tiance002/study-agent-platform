@@ -30,7 +30,7 @@
 1. ChildRun 是 `WorkflowRun` 的下级执行单元，**不是新的授权主体**。
 2. capability token 从父 run 派生，只减不增；默认只持 A0/A1；A2/A3 必须回主对话走确认流程。
 3. 不可递归 spawn，**首版深度硬上限 1**；放宽需新 ADR。
-4. 回传必须为结构化信封：`artifacts[]`（含 `content_hash`）、`claims[]`（含 `evidence_refs` 与 `kind: sourced|inference`）、`taint`、`status`、`unresolved[]`。自然语言只能是 `claims[].text`。
+4. 回传必须为结构化信封：`artifacts[]`（含 `content_hash`）、`claims[]`（含 `evidence_refs` 与 `kind: sourced|inference`）、`taint`、`status`、`issues[]`。`issues[].code` 使用 knowledge 域闭集 `EvidenceIssueCode`，并携带 claim/source 引用、可重试性与下一动作；自然语言只能是 `claims[].text`。
 5. **上下文隔离 ≠ 证据隔离 ≠ 审计隔离 ≠ 预算隔离**：只隔离主对话上下文，其余三者旁路。
 6. 不下放的场景：需多轮澄清、需实时确认的副作用、需连续上下文的教学对话、延迟敏感路径。预计任务本身消耗低于约 3k token 时不下放。
 

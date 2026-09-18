@@ -181,6 +181,28 @@ set PYTHONPATH=backend
 
 **红线：** `.env` 已在 `.gitignore` 中排除，密钥不进仓库。请从 `.env.example` 复制后再填写。
 
+#### 环境变量一览
+
+| 变量 | 用途 | 默认值（仅限本地开发） |
+|---|---|---|
+| `STUDY_PLATFORM_DSN` | 应用连接串 | `postgresql://study_app@127.0.0.1:5432/study_platform` |
+| `STUDY_PLATFORM_MIGRATION_DSN` | Alembic 迁移连接串 | `postgresql+psycopg://postgres@127.0.0.1:5432/study_platform` |
+| `STUDY_PLATFORM_SESSION_SECRET` | 会话令牌签名密钥 | `dev-only-session-secret-change-me` |
+| `STUDY_PLATFORM_TOKEN_SECRET` | capability token 签名密钥 | `dev-only-placeholder-change-me` |
+| `STUDY_PLATFORM_PYTHON` | `dev.cmd` 的解释器覆盖 | 未设置时按 `.venv` → `PATH` 探测 |
+
+两条铁律：
+
+- **应用 DSN 与迁移 DSN 必须是不同的角色。** 迁移需要 DDL 权限，应用角色绝不能有
+  —— 拿到 DDL 就能 `ALTER TABLE ... DISABLE ROW LEVEL SECURITY`，
+  租户隔离会从「数据库强制」退化成「应用自觉」。
+- **两个签名密钥必须分离**（会话令牌 ≠ capability token），
+  生产环境由 KMS / Secret Manager 分别注入。
+
+依赖锁定：`requirements.lock.txt` 记录当前已验证的精确版本组合
+（`pip install -r requirements.lock.txt`），权威约束仍是 `pyproject.toml`；
+PostgreSQL 相关依赖在 `postgres` extra 里（`pip install -e ".[dev,postgres]"`）。
+
 ---
 
 ## 目录结构

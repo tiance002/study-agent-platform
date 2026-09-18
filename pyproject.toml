@@ -14,6 +14,14 @@ dependencies = [
 # ruff 与 mypy 放在 dev extras 里，而不是只装在 CI 上：
 # 本地跑不通的门禁，等推到 CI 才发现就已经晚了。
 dev = ["pytest>=8.3", "httpx>=0.27", "ruff>=0.6", "mypy>=1.11"]
+# PostgreSQL 持久化。内存适配器模式不需要这组 —— 核心域保持可独立安装。
+# ⚠️ psycopg 是 LGPL-3.0：引入决策与理由记录在
+#    tools/security/license_allowlist.txt，许可证扫描门据此放行。
+postgres = [
+    "psycopg[binary]>=3.2",
+    "alembic>=1.13",
+    "SQLAlchemy>=2.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]

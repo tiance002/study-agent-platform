@@ -86,3 +86,11 @@
 - 首发使用 PostgreSQL durable task table；消息系统、专用向量库、Temporal、GPU 推理服务和 GraphRAG 均设置客观升级触发条件。
 - 能力档位 L0/L1/L2 与权限 A0-A3 分轴；教学影响度 D0-D3 再单独控制证据与复核强度。
 - 正式文档已通过链接、占位符和关键不变量扫描；未发现缺失链接或占位符。
+
+## 2026-09-18 · RAG、工具校验与拒答策略复核
+
+- 文档来源不能另造 `external_fetch` / `agent_generated` 词汇；安全来源复用 `TaintSource[]`，获取方式与派生谱系分别记录。
+- `derive()` 不是模型专用：它也用于确定性值变化后使旧 endorsement 失效。模型产生新内容时必须显式增加 `MODEL_OUTPUT`，不能无条件污染所有派生值。
+- 模型输出修正、已派发工具调用、同一逻辑动作的执行尝试是三种不同预算。格式或 schema 校验失败发生在 Policy Gateway 和派发前，不占 `max_tool_calls`，但消耗 token 与 step。
+- 证据不足、冲突等属于 knowledge 域状态，不应塞入平台 `ErrorCode`；结构化问题使用独立闭集 `EvidenceIssueCode`。只有工具执行类问题的可重试性可由 `ToolOutcome` 映射。
+- 现有 `unresolved` 已体现“工具失败不等于没有候选”的正确方向，但自然语言列表不可统计、不可稳定驱动状态，需升级为结构化 `issues[]`。

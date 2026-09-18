@@ -91,13 +91,15 @@
 
 **步骤：**
 
-- [ ] 实现 Source、ACL、ProjectSourceGrant、PlatformContentRelease 和索引 provenance 字段。
+- [ ] 实现统一 `DocumentProcessor`、Source、ACL、ProjectSourceGrant、PlatformContentRelease 和索引 provenance；标题路径、父子章节、原文 span 与切块版本必须可回溯。
 - [ ] Fetcher 固定 DNS 解析结果并在连接层拒绝私网/元数据 IP；限制重定向、响应大小、解压后大小、文件数、路径穿越和符号链接。
 - [ ] 沙箱默认无网络；依赖只经白名单包代理，禁用 lifecycle scripts，结果只能经 broker 回传。
-- [ ] 实现片段级 taint、source span、参数级 lineage 和 sink-specific endorsement；ACL 收窄时重算索引可见性并失效缓存。
-- [ ] 先用外部分词 + `tsvector`；建立中文查询分层基准和 BM25-like/RRF/向量融合评测，索引与词典版本化并支持双写回填。
+- [ ] 实现片段级 `TaintSource[]`、独立 `acquisition_method`、`derived_from[]`、source span、参数级 lineage 和 sink-specific endorsement；模型派生显式增加 `MODEL_OUTPUT`，ACL 收窄时重算索引可见性并失效缓存。
+- [ ] 先用标题路径 + 外部分词 + `tsvector`；标题/章节粗召回不得成为全局片段召回的必经门。建立中文查询分层基准和 BM25-like/RRF/向量融合评测，索引与词典版本化并支持双写回填。
+- [ ] 将 `unresolved[]` 升级为 knowledge 域闭集 `EvidenceIssueCode` 驱动的 `issues[]`，按相关性、核心结论覆盖、冲突、新鲜度和必需步骤完成度计算四级证据状态。
+- [ ] 冻结查询—文档—片段—核心结论标注集；只有分层指标证明无关键回归后才启用 reranker。
 
-**退出门：** SSRF、DNS rebinding、解压炸弹、路径逃逸和依赖外传测试均拒绝；检索结果在数据库层强制项目过滤；索引可由版本化源重新构建。
+**退出门：** SSRF、DNS rebinding、解压炸弹、路径逃逸和依赖外传测试均拒绝；检索结果在数据库层强制项目过滤；索引可由版本化源重新构建；标题召回失败时全局片段兜底仍可命中；reranker 未通过冻结评测集不得上线；证据问题可按稳定 code 统计且不泄露未授权资源存在性。
 
 ### 任务 5：工作流、预算、策略和外部执行
 
@@ -108,12 +110,15 @@
 **步骤：**
 
 - [ ] 实现 typed node registry、节点实例 ID、capability token、PolicyDecision 快照和撤销 epoch/facts version。
+- [ ] 为每个工具填写闭合参数 schema；在 Policy Gateway 和预算之前完成 JSON 信封、node 工具白名单、参数 schema 与字段语义校验。
 - [ ] 实现树形 BudgetAccount 与原子 reservation；昂贵工具事前扣费，廉价工具按规则结算，父节点保留 completion reserve。
+- [ ] 分别实现 `max_generation_repairs`、`max_tool_calls`、`max_execution_attempts`；格式修正不占工具调用但必须消耗 token/step/货币预算。
 - [ ] 实现 ActionIntent → 幂等 dispatch → ToolOutcome；幂等键由客户端 request id、run、node instance 和 tool 规范化生成，不含 attempt/时间/随机 UUID。
 - [ ] 实现 `unknown` 对账、补偿语义标记、确认 UI 所需的确切参数/资源/可撤销性展示和确认疲劳限流。
+- [ ] 实现版本化 `ToolCallFallbackStrategy`；修正耗尽或无合法工具时显式澄清、无工具回答、暂停或终止，并记录策略版本与未完成事项。
 - [ ] 审计正文写独立对象锁/WORM sink；主库只保存索引引用，sink 不可用时高影响动作拒绝。
 
-**退出门：** 未授权工具、未注册节点、越权参数和预算耗尽均拒绝且无外部副作用；重复投递不重复执行；审计 sink 故障矩阵测试通过。
+**退出门：** 畸形 JSON、未知工具、额外字段、越界参数、未授权工具、未注册节点和预算耗尽均在副作用前拒绝；格式修正最多两次且与工具/执行次数分别记账；已派发写操作不能由模型盲目重试；重复投递不重复执行；降级结果可审计且不伪装成功；审计 sink 故障矩阵测试通过。
 
 ### 任务 6：模型路由、验证器与教学工作流
 

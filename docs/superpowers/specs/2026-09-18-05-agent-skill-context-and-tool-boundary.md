@@ -177,7 +177,10 @@ L0 常驻 ──→ L1 契约 ──→ L2 手册
       "endorsement_scope": null }
   ],
   "taint": { "inherited": true, "new_sources": ["web"] },
-  "unresolved": ["..."]
+  "issues": [
+    { "code": "SOURCE_FETCH_FAILED", "claim_refs": [0], "source_refs": [],
+      "retryable": true, "next_action": "retry_fetch" }
+  ]
 }
 ```
 
@@ -186,7 +189,7 @@ L0 常驻 ──→ L1 契约 ──→ L2 手册
 1. 自然语言只能是 `claims[].text`，且必须挂 `evidence_refs`；
 2. 无来源的推断必须标 `kind: inference`，且不得进入 `LearningEvidence`；
 3. `taint` 只能增加，不能因为「子 agent 看过了」而清除；
-4. `status: unknown` 时主对话不得推断结果，必须走对账。
+4. `status: unknown` 时主对话不得推断结果，必须走对账；`issues[].code` 使用 knowledge 域 `EvidenceIssueCode` 闭集并携带 claim/source 引用、可重试性和下一动作，平台执行错误仍使用 `core.ErrorCode`，两者不得混用。
 
 **一句话记住：上下文可以丢，谱系不能丢。**
 

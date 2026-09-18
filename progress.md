@@ -151,3 +151,16 @@
 2. **`subprocess.run(capture_output=True)` 调 `pg_ctl` 会挂死**：`pg_ctl` 启起的 postgres
    继承了管道写端，Python 的 `communicate()` 永远等不到 EOF，整条命令被外部 SIGTERM 杀掉。
    现象是「无输出 + 信号终止」，**极易误判成脚本本身有问题**。修法：输出重定向到文件句柄。
+
+## 2026-09-18 · 分层 RAG、工具校验与证据状态规格收敛
+
+- 用户批准采用“回改现有权威规格”方案，不新增平行的 07 号规格。
+- 已复核两处关键歧义：坏格式在派发前被拦截时不占 `max_tool_calls`；通用 `derive()` 不得无条件增加 `MODEL_OUTPUT`。
+- 正在同步 00/02/03/05 号规格、ADR-014 与实施计划任务 4/5。
+- 首次同步补丁因 05 号规格段落标题与预期不一致而未应用；重新读取原文后按实际结构精确修改，未重复使用失败补丁。
+- 首次完整 pytest 因默认临时目录 `C:\Users\22088\AppData\Local\Temp\pytest-of-22088` 无访问权限而在 fixture setup 阶段报错；该结果不能用于判断测试成败，改用工作区内独立 `--basetemp` 并禁用不可写的 cacheprovider 后重跑。
+- 首版一致性脚本把 02 号规格中的“从 `unresolved[]` 迁移”说明误报为残留契约；收窄为检查 03/05/ADR 的信封定义。
+- 工作区 `--basetemp` 下完整测试通过（10 项 PostgreSQL 条件测试跳过），Markdown 围栏与信封契约检查通过。首次单独运行 manifest 校验时漏传必需路径参数，按脚本 CLI 补参重跑。
+- manifest 校验补参后通过；`gen_contracts.py` 还要求 `--target` 或 `--all`，最终使用 `--all --check` 校验全部生成契约。
+- 规格同步完成：00/02/03/05/06、ADR-014 与实施计划任务 4/5 已统一；完整 pytest 通过，10 项 PostgreSQL 条件测试跳过；manifest、三份生成契约、Markdown 围栏、旧信封字段和 `git diff --check` 全部通过。
+- 提交时工作区禁止创建 `.git/index.lock`；升级授权的自动审批服务首次返回 503（不是安全拒绝），文件变更与验证结果不受影响。
