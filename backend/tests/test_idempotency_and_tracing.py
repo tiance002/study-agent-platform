@@ -121,6 +121,64 @@ def test_tracing_id_alone_never_dedupes(platform, demo):
     assert first is not second
 
 
+@pytest.mark.invariant
+def test_audit_events_carry_the_same_tracing_id(platform, demo):
+    """审计事件必须带**本次请求**的追踪 id。
+
+    这条测试的来历值得记：我曾在 README 与提交说明里断言"响应头、响应体、错误体、
+    审计同一个值"，而实测审计事件里**根本没有 `request_id`** ——
+    成功路径只带 `run_id`（由 request_id 与 node_id 哈希而来，**不可逆**）。
+    也就是说"错误响应 → 审计事件"之间没有可用的关联键，
+    而全链路追踪正是追踪 id 存在的唯一理由。
+
+    **写下的断言也是断言，必须实测。**
+    """
+    result = platform.runtime.run(_request(demo, request_id="req_trace_audit"))
+    assert result.status == "ok", result.error
+
+    records = platform.audit.read_all()
+    assert records, "本次交互应当产生审计事件"
+    assert [r["request_id"] for r in records] == ["req_trace_audit"] * len(records)
+
+
+@pytest.mark.invariant
+def test_idempotency_key_binds_confirmation_id(platform, demo):
+    """同一幂等键 + 不同确认记录 = 不同请求，必须拒绝。
+
+    这是一次自查发现的缺口：指纹绑了租户、项目、主体、node、输入与参数，
+    唯独漏了 `confirmation_id`。漏掉它的后果不是"少一层校验"，而是
+    **第二条确认永远不会被消费**，而客户端以为自己的第二次授权生效了。
+    """
+    platform.runtime.run(
+        _request(demo, idempotency_key="k1", confirmation_id="conf_A")
+    )
+    conflicting = platform.runtime.run(
+        _request(demo, request_id="t2", idempotency_key="k1", confirmation_id="conf_B")
+    )
+    assert conflicting.status == "denied"
+    assert conflicting.error is not None
+    assert conflicting.error["code"] == str(ErrorCode.IDEMPOTENCY_VIOLATION)
+
+
+@pytest.mark.invariant
+def test_idempotency_key_is_bounded_in_length(client, auth_headers):
+    """幂等键必须有长度上限。
+
+    它由客户端提供、会被长期保留 —— 没有上限就是一个内存放大入口。
+    同类字段（`user_input`）早有 `MAX_INPUT_CHARS`，这里不该成为例外。
+    """
+    response = client.post(
+        "/projects/proj_demo/interactions",
+        json={
+            "node_id": "intake_goal",
+            "user_input": "x",
+            "idempotency_key": "k" * 10_000,
+        },
+        headers=auth_headers(),
+    )
+    assert response.status_code == 422, response.text
+
+
 # --------------------------------------------------------------- 追踪 id 一致
 
 

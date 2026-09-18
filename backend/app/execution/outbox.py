@@ -112,8 +112,14 @@ class ToolDispatcher:
         tool: Callable[[dict], dict],
         params: dict,
         is_high_impact: bool = False,
+        request_id: str | None = None,
     ) -> ToolOutcome:
-        """执行一次工具调用。任何前置条件不满足都在**产生副作用之前**失败。"""
+        """执行一次工具调用。任何前置条件不满足都在**产生副作用之前**失败。
+
+        `request_id` 会写进本次派发产生的每一条审计事件。这不是可有可无的装饰：
+        **没有它就无法从一次错误响应反查到对应的审计事件** ——
+        而全链路追踪正是追踪 id 存在的唯一理由。
+        """
         # 1) 策略必须放行
         decision.require_allowed()
         # 2) 执行器必须支持全部 obligation
@@ -170,6 +176,7 @@ class ToolDispatcher:
             risk=RiskLevel.HIGH if (is_high_impact or spec.requires_audit) else RiskLevel.LOW,
             tenant_id=token.tenant_id,
             project_id=token.project_id,
+            request_id=request_id,
         )
         self._machine.transition(action, ActionState.INTENT_PERSISTED)
 
@@ -191,6 +198,7 @@ class ToolDispatcher:
                 risk=RiskLevel.HIGH,
                 tenant_id=token.tenant_id,
                 project_id=token.project_id,
+                request_id=request_id,
             )
             return ToolOutcome(
                 logical_action_id=action.logical_action_id,
@@ -211,6 +219,7 @@ class ToolDispatcher:
                 risk=RiskLevel.LOW,
                 tenant_id=token.tenant_id,
                 project_id=token.project_id,
+                request_id=request_id,
             )
             return ToolOutcome(
                 logical_action_id=action.logical_action_id,
@@ -237,6 +246,7 @@ class ToolDispatcher:
             risk=RiskLevel.LOW,
             tenant_id=token.tenant_id,
             project_id=token.project_id,
+            request_id=request_id,
         )
         return ToolOutcome(
             logical_action_id=action.logical_action_id,
@@ -256,8 +266,14 @@ class ToolDispatcher:
         reservation_id: str,
         resolved: OutcomeStatus,
         actual: int = 0,
+        request_id: str | None = None,
     ) -> LogicalAction:
-        """对账 `unknown` 状态。只有对账之后才可能再次执行。"""
+        """对账 `unknown` 状态。只有对账之后才可能再次执行。
+
+        `request_id` 通常由对账作业（而非 HTTP 请求）传入：对账是异步重活，
+        它处理的动作来自**更早的某次请求**，因此不能靠请求上下文兜底 ——
+        显式传入才是正确的关联方式。
+        """
         if action.state is not ActionState.UNKNOWN:
             raise deny(
                 ErrorCode.ILLEGAL_STATE_TRANSITION,
@@ -288,5 +304,6 @@ class ToolDispatcher:
             risk=RiskLevel.HIGH,
             tenant_id=action.tenant_id,
             project_id=action.project_id,
+            request_id=request_id,
         )
         return action

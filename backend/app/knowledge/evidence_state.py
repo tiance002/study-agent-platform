@@ -225,16 +225,23 @@ def assess_retrieval(signals: RetrievalSignals) -> EvidenceAssessment:
         # 「必需结论覆盖未知」与「步骤没跑完」共用 MISSING_SUPPORT：
         # 它们都是"核心结论缺少支撑"，闭集里没有更细的码。
         # 不能因为"没有更精确的码"就放过 —— 那会让 supported 失去正向证明。
+        #
+        # `retryable` 必须与 `next_action` 自洽：**重试能修好的才标可重试**。
+        # 「没给必需结论集合」重试一万次也一样 —— 它要的是补标注集，不是重试。
+        # 标成可重试会让编排层白白重跑一遍检索，还把真实原因（缺输入）盖过去。
+        retryable = bool(required) and (
+            bool(missing) or not signals.required_steps_completed
+        )
         issues.append(
             EvidenceIssue(
                 code=EvidenceIssueCode.MISSING_SUPPORT,
                 detail="；".join(support_gaps),
                 claim_refs=missing,
-                retryable=True,
+                retryable=retryable,
                 next_action=(
                     "run_required_steps"
                     if not signals.required_steps_completed
-                    else ("supply_required_claims" if not required else "expand_query")
+                    else ("expand_query" if required else "supply_required_claims")
                 ),
             )
         )

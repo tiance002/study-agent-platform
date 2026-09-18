@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:eddb2dac9d3ac81af50014ff8e67c1618cebd558c11ad333a4bc1dbc8417d2ad, generated_at=2026-09-18T16:55:58Z -->
-> 生成时间：2026-09-18T16:55:58Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:39679788c7d5f285e8c1d19431877be0af4aaaf4643fe5322cb22ddb1429cc2f, generated_at=2026-09-18T17:46:13Z -->
+> 生成时间：2026-09-18T17:46:13Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -153,8 +153,14 @@ planned → intent_persisted → dispatched
 
 | 字段 | 来源 | 用途 |
 |---|---|---|
-| `request_id`（响应头 `X-Request-Id` 同值） | 服务端每请求生成 | 全链路追踪。响应头、响应体、错误体、审计必须是同一个值 |
-| `idempotency_key`（请求体可选） | **客户端**提供 | 表达"这是我上一次那个请求的重试"。绑定主体 + 项目 + 请求内容；同键不同内容 → `IDEMPOTENCY_VIOLATION` |
+| `request_id`（响应头 `X-Request-Id` 同值） | 服务端每请求生成 | 全链路追踪。响应头、响应体、错误体、**审计记录**必须是同一个值 |
+| `idempotency_key`（请求体可选，≤ 200 字符） | **客户端**提供 | 表达"这是我上一次那个请求的重试"。绑定主体 + 项目 + 请求内容 + 确认记录；同键不同内容 → `IDEMPOTENCY_VIOLATION` |
+
+⚠️ 审计记录带 `request_id` 并纳入链哈希（记录格式 `schema_version=2`）。
+在此之前审计只带 `run_id`（由 `request_id` 与 `node_id` 哈希而来，**不可逆**），
+也就是说**从一次错误响应无法反查到对应的审计事件** —— 而全链路追踪正是它存在的理由。
+链校验用 `verify_chain_report()`：它区分 `LEGACY_FORMAT` / `BROKEN_LINK` / `HASH_MISMATCH`，
+不要用只返回布尔的入口排障。
 
 重放时响应带 `output.idempotent_replay: true`（**重放必须可观测**，否则客户端分不清
 「重试没生效」和「命中了缓存」），且 `request_id` 仍是本次请求的。

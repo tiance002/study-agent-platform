@@ -38,6 +38,9 @@ from app.workflow.runtime import InteractionRequest
 
 router = APIRouter()
 
+# 幂等键长度上限。见 `InteractionBody.idempotency_key` 的说明。
+IDEMPOTENCY_KEY_MAX_CHARS = 200
+
 
 # --------------------------------------------------------------------- 请求模型
 #
@@ -61,7 +64,11 @@ class InteractionBody(BaseModel):
     # 幂等键：**由客户端提供**，用于表达"这是我上一次那个请求的重试"。
     # 与追踪 id 分工明确 —— 后者由服务端每请求生成，客户端拿不到稳定值，
     # 所以它做不了幂等键（见 `InteractionRequest` 的注释）。
-    idempotency_key: str | None = None
+    #
+    # 长度上限不可省：这个值会被长期保留在幂等记录里，不设界就是一个
+    # 由客户端控制的内存放大入口。同类字段（`user_input`）早有上限，
+    # 这里不该成为例外。超限由 pydantic 直接拒为 422。
+    idempotency_key: str | None = Field(default=None, max_length=IDEMPOTENCY_KEY_MAX_CHARS)
 
 
 class IngestBody(BaseModel):

@@ -142,6 +142,34 @@ def test_partial_claim_coverage_is_partially_supported():
 
 
 @pytest.mark.invariant
+def test_missing_support_retryable_matches_its_next_action():
+    """`retryable` 必须与 `next_action` 自洽：**重试能修好的才标可重试**。
+
+    「没给必需结论集合」重试一万次也一样 —— 它要的是补标注集，不是重试。
+    标成可重试会让编排层白白重跑一遍检索，还把真实原因（缺输入）盖过去。
+    一个字段说"重试"，另一个字段说"去补数据"，两者不可能都对。
+    """
+    unknown_coverage = assess_retrieval(RetrievalSignals(candidate_count=3, top_score=2))
+    issue = unknown_coverage.issues[0]
+    assert issue.next_action == "supply_required_claims"
+    assert issue.retryable is False, "补标注集不是重试能解决的"
+
+    expandable = assess_retrieval(
+        RetrievalSignals(
+            candidate_count=3,
+            top_score=2,
+            required_claim_refs=("claim.a", "claim.b"),
+            supported_claim_refs=("claim.a",),
+        )
+    )
+    partial = [
+        i for i in expandable.issues if i.code is EvidenceIssueCode.MISSING_SUPPORT
+    ][0]
+    assert partial.next_action == "expand_query"
+    assert partial.retryable is True, "换查询能补上缺口 —— 这时才该标可重试"
+
+
+@pytest.mark.invariant
 def test_retrieval_health_is_separate_from_evidence_state():
     """过程健康度独立于证据状态。
 

@@ -7,15 +7,16 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:ff957194503239d863df087460998ac5ee7ff7361ff13edee0638e76198996f4, generated_at=2026-09-18T16:55:58Z -->
-> 生成时间：2026-09-18T16:55:58Z
+<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:62fae27f45c3a6e579ce6a32211178ba20884ea72a3b6e67e9c3b5dca80e22a4, generated_at=2026-09-18T17:46:13Z -->
+> 生成时间：2026-09-18T17:46:13Z
 
 > 由 `tools/skills/gen_contracts.py` 从代码扫描导出，请勿手工编辑本区。
 > **注意**：这是**代码层实体**，不是 PostgreSQL 表。迁移落地后应改由 alembic 导出 DDL。
 
 | 实体 | 定义模块 | 字段数 | 含 tenant_id | 含 learning_project_id |
 |---|---|---:|---|---|
-| `AuditRecord` | `app.audit.sink` | 9 | 是 | — |
+| `AuditRecord` | `app.audit.sink` | 11 | 是 | — |
+| `ChainVerification` | `app.audit.sink` | 5 | — | — |
 | `Account` | `app.budget.ledger` | 8 | 是 | — |
 | `Reservation` | `app.budget.ledger` | 7 | — | — |
 | `ArtifactRef` | `app.core.artifacts` | 5 | — | — |
@@ -58,7 +59,7 @@
 | `InteractionRequest` | `app.workflow.runtime` | 9 | 是 | 是 |
 | `InteractionResult` | `app.workflow.runtime` | 10 | — | — |
 
-合计 42 个实体。
+合计 43 个实体。
 <!-- END GENERATED -->
 
 ## 2. 手写区 · 不可协商的数据库约束

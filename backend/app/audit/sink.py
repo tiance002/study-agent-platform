@@ -8,6 +8,15 @@
 3. **不提供删除接口** —— 应用层根本没有删除能力（不是"约定不删"）；
 4. sink 不可用时：高影响动作 fail-closed；低风险事件只进有界缓冲，超限即拒绝。
 
+外加两条在后续审查中补上的：
+
+5. 记录带 `request_id`，与响应头 `X-Request-Id` / 响应体 `request_id` **同值**。
+   此前审计只带 `run_id`（由 request_id 与 node_id 哈希而来，**不可逆**），
+   也就是"错误响应"和"审计事件"之间没有可用的关联键 ——
+   而全链路追踪正是追踪 id 存在的唯一理由。
+6. 记录带 `schema_version` 并纳入哈希。原因见 `AUDIT_SCHEMA_VERSION` 的说明：
+   哈希公式一变更，旧记录会整体校验失败，而布尔校验分不清"旧格式"和"被篡改"。
+
 本版用本地 JSONL 文件实现；生产应替换为对象锁 / WORM 存储，接口不变。
 """
 
@@ -21,8 +30,19 @@ from pathlib import Path
 from app.core.errors import ErrorCode, deny
 from app.core.hashing import content_hash, hash_chain
 from app.core.ids import new_id
+from app.core.request_context import current_request_id
 
 DEFAULT_BUFFER_CAPACITY = 256
+
+# 审计记录格式版本。
+#
+# 存在的理由是一次真实的教训：`entry_hash` 覆盖记录结构本身，所以**公式一变，
+# 此前写入的记录会全部校验失败**，而 `verify_chain()` 只返回布尔值 ——
+# 分不清「这是旧格式记录」和「记录被篡改」。生产里一次代码升级就能让整条链报
+# 「无效」，真正的篡改会淹没在噪音里。
+#
+# v2 起记录自带版本号并纳入哈希，校验据此**区分**两种情况并指出第一处坏点。
+AUDIT_SCHEMA_VERSION = 2
 
 
 class RiskLevel(StrEnum):
@@ -30,6 +50,40 @@ class RiskLevel(StrEnum):
 
     LOW = "low"
     HIGH = "high"
+
+
+class ChainProblem(StrEnum):
+    """链校验失败的**原因**。布尔值不够用，见 `AUDIT_SCHEMA_VERSION` 的说明。"""
+
+    LEGACY_FORMAT = "legacy_format"      # 旧格式记录：不可用当前公式校验，且**不等于被篡改**
+    BROKEN_LINK = "broken_link"          # `previous_hash` 与上一条对不上
+    HASH_MISMATCH = "hash_mismatch"      # 内容与自身 `entry_hash` 不符（被改过）
+
+
+# 给人看的原因说明。运维看到 `False` 时第一个要问的就是"是格式问题还是被改了"。
+_CHAIN_PROBLEM_LABELS: dict[ChainProblem, str] = {
+    ChainProblem.LEGACY_FORMAT: "旧格式记录（不是篡改，需按旧公式或迁移后重验）",
+    ChainProblem.BROKEN_LINK: "前序哈希断链（记录被删/插/换过）",
+    ChainProblem.HASH_MISMATCH: "内容与哈希不符（疑似被改动）",
+}
+
+
+@dataclass(frozen=True)
+class ChainVerification:
+    """链校验结果。失败时给出**位置与原因**，而不是一个孤零零的 `False`。"""
+
+    ok: bool
+    checked: int
+    bad_index: int | None = None
+    problem: ChainProblem | None = None
+    legacy_count: int = 0
+
+    def describe(self) -> str:
+        if self.ok:
+            return f"链完整（{self.checked} 条）"
+        if self.problem is None:
+            return f"第 {self.bad_index} 条失败：原因未知"
+        return f"第 {self.bad_index} 条失败：{_CHAIN_PROBLEM_LABELS[self.problem]}"
 
 
 @dataclass(frozen=True)
@@ -50,6 +104,12 @@ class AuditRecord:
     entry_hash: str
     tenant_id: str | None = None
     project_id: str | None = None
+    # 追踪 id。与响应头 `X-Request-Id`、响应体 `request_id`、错误体 `request_id`
+    # **必须同值** —— 否则「按 id 检索服务端日志」这句话在审计上是空的。
+    # 早先审计事件只带 `run_id`（由 request_id 与 node_id 哈希而来，不可逆），
+    # 也就是说错误响应与审计事件之间**没有可用的关联键**。
+    request_id: str | None = None
+    schema_version: int = AUDIT_SCHEMA_VERSION
 
     def to_line(self) -> str:
         return json.dumps(
@@ -63,6 +123,8 @@ class AuditRecord:
                 "entry_hash": self.entry_hash,
                 "tenant_id": self.tenant_id,
                 "project_id": self.project_id,
+                "request_id": self.request_id,
+                "schema_version": self.schema_version,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -77,6 +139,8 @@ class AuditRecord:
             "payload": self.payload,
             "tenant_id": self.tenant_id,
             "project_id": self.project_id,
+            "request_id": self.request_id,
+            "schema_version": self.schema_version,
         }
 
 
@@ -131,16 +195,23 @@ class AuditSink:
         risk: RiskLevel = RiskLevel.HIGH,
         tenant_id: str | None = None,
         project_id: str | None = None,
+        request_id: str | None = None,
     ) -> str:
         """追加一条审计事件，返回 `event_id`。
 
         `tenant_id` / `project_id` 用于**隔离读取**：只有带租户标记的事件才能被
         按租户查询到；不带标记的视为系统级事件，不对项目接口暴露。
 
+        `request_id` 用于**全链路关联**：显式传入优先；不传时取当前请求上下文里
+        中间件绑定的那个（HTTP 请求内自动成立）。两者都没有则记为 `None` ——
+        不编造 id：假的可检索 id 比没有更糟。
+
         sink 不可用时的处置严格按风险分级，不做「静默丢日志」。
         """
         if event_type.strip() == "":
             raise ValueError("event_type 不能为空")
+
+        effective_request_id = request_id or current_request_id()
 
         if not self._available:
             if risk is RiskLevel.HIGH:
@@ -155,11 +226,15 @@ class AuditSink:
                     f"审计缓冲已达上限 {self._buffer_capacity}，低风险事件也不再接收",
                     event_type=event_type,
                 )
-            record = self._build_record(event_type, payload, risk, tenant_id, project_id)
+            record = self._build_record(
+                event_type, payload, risk, tenant_id, project_id, effective_request_id
+            )
             self._buffer.append(record)
             return record.event_id
 
-        record = self._build_record(event_type, payload, risk, tenant_id, project_id)
+        record = self._build_record(
+            event_type, payload, risk, tenant_id, project_id, effective_request_id
+        )
         self._write(record)
         return record.event_id
 
@@ -170,10 +245,11 @@ class AuditSink:
         risk: RiskLevel,
         tenant_id: str | None,
         project_id: str | None,
+        request_id: str | None,
     ) -> AuditRecord:
         """构造记录并计算链哈希。
 
-        哈希覆盖租户与项目字段，因此**不能事后补写**这两个字段 ——
+        哈希覆盖租户、项目、追踪 id 与格式版本，因此**不能事后补写**这些字段 ——
         补写会直接破坏链校验。
         """
         seq = self._seq + 1
@@ -187,6 +263,7 @@ class AuditSink:
             entry_hash="",
             tenant_id=tenant_id,
             project_id=project_id,
+            request_id=request_id,
         )
         entry_hash = hash_chain(self._last_hash, content_hash(draft.hash_material()))
         record = replace(draft, entry_hash=entry_hash)
@@ -206,15 +283,38 @@ class AuditSink:
 
     # ------------------------------------------------------------------ 校验
 
-    def verify_chain(self) -> bool:
-        """重算整条哈希链。任一记录被篡改即返回 False。"""
-        if not self._path.exists():
-            return True
+    def verify_chain_report(self) -> ChainVerification:
+        """重算整条哈希链，失败时给出**位置与原因**。
+
+        `verify_chain()` 的布尔值不够用：它分不清「旧格式记录」与「被篡改」，
+        于是**一次格式升级就会让整条链报无效**，真正的篡改淹没在噪音里。
+        这也是 `schema_version` 存在的理由。
+        """
+        records = self.read_all()
+        legacy = sum(
+            1
+            for raw in records
+            if int(raw.get("schema_version", 1)) != AUDIT_SCHEMA_VERSION
+        )
+
         previous: str | None = None
-        for line in self._path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            raw = json.loads(line)
+        for index, raw in enumerate(records):
+            if int(raw.get("schema_version", 1)) != AUDIT_SCHEMA_VERSION:
+                return ChainVerification(
+                    ok=False,
+                    checked=index,
+                    bad_index=index,
+                    problem=ChainProblem.LEGACY_FORMAT,
+                    legacy_count=legacy,
+                )
+            if raw.get("previous_hash") != previous:
+                return ChainVerification(
+                    ok=False,
+                    checked=index,
+                    bad_index=index,
+                    problem=ChainProblem.BROKEN_LINK,
+                    legacy_count=legacy,
+                )
             expected = hash_chain(
                 previous,
                 content_hash(
@@ -224,13 +324,29 @@ class AuditSink:
                         "payload": raw["payload"],
                         "tenant_id": raw.get("tenant_id"),
                         "project_id": raw.get("project_id"),
+                        "request_id": raw.get("request_id"),
+                        "schema_version": raw.get("schema_version"),
                     }
                 ),
             )
-            if expected != raw["entry_hash"] or raw["previous_hash"] != previous:
-                return False
+            if expected != raw["entry_hash"]:
+                return ChainVerification(
+                    ok=False,
+                    checked=index,
+                    bad_index=index,
+                    problem=ChainProblem.HASH_MISMATCH,
+                    legacy_count=legacy,
+                )
             previous = raw["entry_hash"]
-        return True
+        return ChainVerification(ok=True, checked=len(records), legacy_count=legacy)
+
+    def verify_chain(self) -> bool:
+        """链是否完整。等价于 `verify_chain_report().ok`。
+
+        保留布尔入口给只需要结论的调用方；**排障请用 `verify_chain_report()`**，
+        否则看到 `False` 时无法判断是格式演进还是真的被改过。
+        """
+        return self.verify_chain_report().ok
 
     def read_all(self) -> list[dict]:
         """只读遍历。sink 是审计事实的载体，只有读与追加两个出口。"""

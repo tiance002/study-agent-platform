@@ -129,6 +129,7 @@ class ToolInvoker:
         audit_event_ids: list[str],
         principal_id: str,
         confirmation_id: str | None = None,
+        request_id: str | None = None,
     ) -> None:
         self._runtime = runtime
         self._token = token
@@ -138,6 +139,8 @@ class ToolInvoker:
         self._audit_event_ids = audit_event_ids
         self._principal_id = principal_id
         self._confirmation_id = confirmation_id
+        # 追踪 id 一路带到 dispatch：审计事件必须能按它与错误响应关联。
+        self._request_id = request_id
         self.calls: list[str] = []
 
     @property
@@ -286,6 +289,7 @@ class ToolInvoker:
                 tool=lambda p: impl(self._ctx, p),
                 params=params,
                 is_high_impact=spec.min_authority >= Authority.A2,
+                request_id=self._request_id,
             )
         except BaseException:
             # 前置校验失败：调用没有真正发生，两个预留都释放。
@@ -475,6 +479,7 @@ class InteractionRuntime:
             audit_event_ids=audit_event_ids,
             principal_id=request.principal_id,
             confirmation_id=request.confirmation_id,
+            request_id=request.request_id,
         )
 
         # 5) 执行。所有工具调用都经受控入口。
@@ -488,7 +493,7 @@ class InteractionRuntime:
                 tenant_id=request.tenant_id,
                 project_id=request.learning_project_id,
             )
-            self._close_run_quietly(run_account_id)
+            self._close_run_quietly(run_account_id, request_id=request.request_id)
             return self._fail(request, exc, node_spec=node_spec, token=token)
 
         # 6) 证据判定**只有** node handler 返回的结构化 assessment 一个权威来源。
@@ -500,7 +505,7 @@ class InteractionRuntime:
         # 该字段已删除，不再提供兼容投影：它不是历史契约，而是一个错误判定的遗迹。
 
         # 回收本次 run 的额度，避免授予额度泄漏到父账户。
-        self._close_run_quietly(run_account_id)
+        self._close_run_quietly(run_account_id, request_id=request.request_id)
 
         result = InteractionResult(
             request_id=request.request_id,
@@ -549,6 +554,11 @@ class InteractionRuntime:
           —— 那等于把幂等缓存变成跨租户读取通道。
         - **绑内容**：否则同一个 key 换个参数复用会静默返回上一次的结果，
           客户端以为自己发了新请求。
+
+        ⚠️ `confirmation_id` 也要绑：它是请求语义的一部分（哪一条授权、覆盖哪些参数）。
+        漏掉它的话，「同键 + 换一条确认记录」会被当成重放 ——
+        第二条确认**永远不会被消费**，而客户端以为自己的第二次授权生效了。
+        这是一次自查发现的缺口：五个字段都绑了，唯独漏了这个。
         """
         return content_hash(
             {
@@ -558,6 +568,7 @@ class InteractionRuntime:
                 "node_id": request.node_id,
                 "user_input": request.user_input,
                 "params": request.params,
+                "confirmation_id": request.confirmation_id,
             }
         )
 
@@ -614,7 +625,7 @@ class InteractionRuntime:
             )
         return run_account
 
-    def _close_run_quietly(self, run_account_id: str) -> None:
+    def _close_run_quietly(self, run_account_id: str, *, request_id: str | None = None) -> None:
         """交互结束后回收 run 账户的额度，避免授予额度泄漏到父账户。
 
         若仍有未结预留（例如存在 `unknown` 动作），这里只记录、不强行释放 ——
@@ -634,6 +645,7 @@ class InteractionRuntime:
                 risk=RiskLevel.LOW,
                 tenant_id=account.tenant_id if account else None,
                 project_id=account.project_id if account else None,
+                request_id=request_id,
             )
 
     def _deny(
