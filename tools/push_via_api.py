@@ -67,6 +67,15 @@ def head_commit_author() -> tuple[str, str]:
     return name, email
 
 
+def branch_exists(repo: str, branch: str) -> bool:
+    result = subprocess.run(
+        ["gh", "api", f"/repos/{repo}/git/ref/heads/{branch}"],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
 def tracked_files() -> list[str]:
     """列出当前提交跟踪的文件。用 NUL 分隔，避免中文路径被截断。"""
     raw = run_git("ls-files", "-z")
@@ -94,6 +103,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"       {path}")
         print("       ...")
         return 0
+
+    # 0) 空仓库无法直接使用 Git Data API：blob 接口会返回 409 "Git Repository is empty"。
+    #    先用 Contents API 落一个初始提交把分支建起来，随后的完整树会覆盖它。
+    if not branch_exists(args.repo, args.branch):
+        print(f"[info] 仓库为空，先建立分支 {args.branch}")
+        gh_api(
+            "PUT",
+            f"/repos/{args.repo}/contents/.gitkeep",
+            {
+                "message": "chore: 初始化仓库",
+                "content": base64.b64encode(b"\n").decode("ascii"),
+                "branch": args.branch,
+            },
+        )
 
     # 1) 逐个上传 blob
     tree_entries: list[dict] = []
@@ -130,18 +153,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"[info] commit={commit['sha']}")
 
-    # 4) 更新分支引用。空仓库没有该分支，需要先创建。
-    existing = subprocess.run(
-        ["gh", "api", f"/repos/{args.repo}/git/ref/heads/{args.branch}"],
+    # 4) 更新分支引用。优先 PATCH（分支已存在），失败再尝试创建。
+    #    用 force=True：本脚本产出的提交没有 parent（是快照式推送），不是快进。
+    patched = subprocess.run(
+        [
+            "gh", "api", "--method", "PATCH",
+            f"/repos/{args.repo}/git/refs/heads/{args.branch}",
+            "--input", "-",
+        ],
+        input=json.dumps({"sha": commit["sha"], "force": True}),
         capture_output=True,
         text=True,
     )
-    if existing.returncode == 0:
-        gh_api(
-            "PATCH",
-            f"/repos/{args.repo}/git/refs/heads/{args.branch}",
-            {"sha": commit["sha"], "force": False},
-        )
+    if patched.returncode == 0:
         print(f"[info] 已更新分支 {args.branch}")
     else:
         gh_api(
