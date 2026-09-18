@@ -11,7 +11,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3", "httpx>=0.27"]
+# ruff 与 mypy 放在 dev extras 里，而不是只装在 CI 上：
+# 本地跑不通的门禁，等推到 CI 才发现就已经晚了。
+dev = ["pytest>=8.3", "httpx>=0.27", "ruff>=0.6", "mypy>=1.11"]
 
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]

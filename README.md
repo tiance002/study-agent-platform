@@ -39,11 +39,35 @@
 
 ### 1. 安装依赖（Python 3.11+）
 
-```bash
+> ⚠️ **本项目目录下的 `.venv` 目前不存在。** 调试过程中它被 pip 弄成了半安装状态
+> （有 `python.exe`、没有任何包），已删除。请在你自己的终端里重建——大概一两分钟。
+
+```bat
+cd E:\codex_workspace\study-plan
 python -m venv .venv
-.venv/Scripts/python -m pip install -e ".[dev]"        # Windows
-# source .venv/bin/activate && pip install -e ".[dev]"  # macOS / Linux
+.venv\Scripts\python -m pip install -e ".[dev]"
 ```
+
+`[dev]` 里除了 pytest/httpx，还包含 **ruff 与 mypy** —— 本地跑不通的门禁，
+等推到 CI 才发现就已经晚了。
+
+> ⚠️ **`.venv` 处于半安装状态时，不要原地修，直接删掉重建。**
+> 「有 `python.exe` 但没有依赖」是最常见的坏状态，增量修复只会失败得更隐晦。
+>
+> ```bat
+> rmdir /s /q .venv            :: cmd
+> Remove-Item -Recurse -Force .venv   # PowerShell
+> ```
+
+> ⚠️ **如果 editable 安装（`-e`）反复失败**：本项目是通过 `PYTHONPATH` 加载自己的代码的，
+> **并不需要**把项目本身装进环境。可以直接装依赖绕过 `-e`：
+>
+> ```bat
+> .venv\Scripts\python -m pip install fastapi uvicorn pydantic PyYAML pytest httpx ruff mypy
+> ```
+>
+> 换机器或想用 conda 环境时，也可以用 `STUDY_PLATFORM_PYTHON` 指定解释器，
+> 见下一节 `scripts\dev.cmd` 的说明。
 
 ### 2. 跑测试
 
@@ -62,12 +86,44 @@ scripts\pg_start.cmd
 
 它会启动数据库并打印连接串。停止用 `scripts\pg_stop.cmd`。
 
+两个脚本都是**幂等**的：重复启动会提示「已在运行」，重复停止会提示「未运行」，不会报错。
+
+> ⚠️ **改 `scripts/*.cmd` 时必须保持纯 ASCII，这条不能破。**
+>
+> cmd.exe 是按**系统代码页**（中文 Windows 为 GBK）**逐字节**解析批处理文件的。
+> 文件里一旦出现 UTF-8 中文，解析偏移就会错位，cmd 会开始把字节残片当作命令名执行，
+> 报出 `'竻鐞嗭紝...' 不是内部或外部命令` / `'t' 不是...` 这类完全看不懂的错误。
+>
+> **在文件开头写 `chcp 65001` 救不了** —— 错位发生在这一行生效之前。
+> 所以脚本里只用英文提示，中文说明一律放在这份 README 里。行尾统一 CRLF。
+
 > 应用目前**还没有连接这个数据库**（仍是进程内适配器）。数据库已经就绪、RLS 也已验证生效，
 > 但正式接入属于下一步工作，见文末「下一步」。
 
 ### 4. 启动控制面
 
 ```bat
+scripts\dev.cmd
+```
+
+脚本会按这个顺序挑选解释器：
+
+1. `%STUDY_PLATFORM_PYTHON%`（显式指定，例如想用 conda 环境）
+2. `.venv\Scripts\python.exe`
+3. `PATH` 上的 `python.exe`
+
+挑中之后它会**先自检关键依赖**（`fastapi` / `uvicorn` / `pydantic` / `yaml`），
+缺任何一个就直接报错退出并给出修复命令。
+
+> 为什么要多做这一步：一个半安装的 venv **有 `python.exe` 但没有包**，
+> 「文件存在就放行」的检查会通过，然后服务在 uvicorn 里炸出
+> `ModuleNotFoundError` —— 那个报错完全指不出问题在环境上。
+> 这类失败应该在门口就拦住，而不是等到容器里才暴露。
+
+用 conda 环境（或任意其它解释器）时：
+
+```bat
+set STUDY_PLATFORM_PYTHON=D:\Drivers\anaconda\envs\langchain1.2\python.exe
 scripts\dev.cmd
 ```
 
@@ -196,7 +252,15 @@ L5 事实  tenancy/ports.py 定义的适配器
   关闭时只把**实际消耗**计入父账户，不是把授予额度整体算作消耗。
 - **工具重叠门的能力边界**：它只能拦「同一 `intent_tag` 的重复实现」，
   **拦不住「语义相近但标签不同」的歧义**（例如召回与精确回读）。后者依赖 when-to-use 表与人工复查。
-- **确认流程**：本版用请求参数模拟「用户已确认」，真实系统必须由服务端确认记录驱动。
+- **确认流程**：已改为服务端 `ConfirmationRecord` —— 绑定主体 / 项目 / 工具 / **规范化参数哈希** /
+  有效期，且单次消费；客户端只能引用 `confirmation_id`，无法声明确认。仍缺的是**确认 UI**
+  （本版只能通过接口创建确认记录）。
+- **审计链的格式演进缺口**（端到端验证时发现，尚未修）：`entry_hash` 覆盖了记录结构本身
+  （含 `tenant_id` / `project_id`），所以**哈希公式一变更，此前写入的记录会全部校验失败**。
+  而 `verify_chain()` 只返回 `true` / `false`，**分不清「这是旧格式记录」和「记录被篡改」**。
+  在生产里这很危险：一次代码升级就能让整条链报「无效」，真正的篡改会淹没在噪音里。
+  待办修法 = 给记录加 `schema_version` 并纳入哈希 + 让校验返回第一处坏点的位置与原因。
+  本地开发时若看到 `chain_valid: false`，先看 `var/audit/` 里是否混了旧格式记录。
 
 以下四条来自一轮代码审查（详见 `progress.md` 的修复记录），都已修并补了回归测试：
 

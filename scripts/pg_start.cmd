@@ -1,43 +1,67 @@
 @echo off
-chcp 65001 >nul
+setlocal
 REM ============================================================
-REM  启动 PostgreSQL 16.4（数据目录 E:\pgsql\data）
+REM  Start PostgreSQL 16.4   (data directory: E:\pgsql\data)
 REM
-REM  为什么需要这个脚本：
-REM  由自动化工具启动的进程会在命令结束时被清理，无法常驻。
-REM  数据库必须在**你自己的终端**里启动。
+REM  Why this file exists:
+REM    Processes started by an automation tool are killed when the
+REM    tool's command returns, so the database cannot stay resident.
+REM    PostgreSQL must be started from YOUR OWN terminal.
+REM
+REM  Why there is no Chinese text in this file:
+REM    cmd.exe parses .cmd files using the system code page (GBK on
+REM    zh-CN Windows). A UTF-8 Chinese comment gets mis-decoded into
+REM    garbage, the parser's read offset drifts, and cmd then tries to
+REM    execute byte fragments as commands. Keep this file PURE ASCII.
+REM    (Chinese instructions live in README.md instead.)
 REM ============================================================
 
-set PGBIN=E:\pgsql\bin
-set PGDATA=E:\pgsql\data
+set "PGBIN=E:\pgsql\bin"
+set "PGDATA=E:\pgsql\data"
+set "PGLOG=E:\pgsql\server.log"
 
 if not exist "%PGBIN%\postgres.exe" (
-    echo [错误] 找不到 PostgreSQL：%PGBIN%\postgres.exe
+    echo [ERROR] PostgreSQL not found at %PGBIN%\postgres.exe
     exit /b 1
+)
+
+REM Exit code of "pg_ctl status": 0 = running, 3 = not running, 4 = bad data dir.
+"%PGBIN%\pg_ctl.exe" -D "%PGDATA%" status >nul 2>&1
+if not errorlevel 1 (
+    echo [INFO] PostgreSQL is already running. Nothing to do.
+    echo        Stop it with: scripts\pg_stop.cmd
+    exit /b 0
 )
 
 if exist "%PGDATA%\postmaster.pid" (
-    echo [提示] 检测到 postmaster.pid，可能已在运行。
-    echo        若确认未运行，请先删除：%PGDATA%\postmaster.pid
+    echo [WARN] Found a stale postmaster.pid while no server is running.
+    echo        This is normal after an unclean shutdown; pg_ctl recovers
+    echo        from it. If startup fails below, delete that file first.
+    echo.
 )
 
-echo 正在启动 PostgreSQL...
-"%PGBIN%\pg_ctl.exe" -D "%PGDATA%" -l "E:\pgsql\server.log" -w start
+echo Starting PostgreSQL...
+echo.
+"%PGBIN%\pg_ctl.exe" -D "%PGDATA%" -l "%PGLOG%" -w start
 if errorlevel 1 (
     echo.
-    echo [失败] 启动未成功。最近的日志：
-    powershell -NoProfile -Command "Get-Content -Tail 15 'E:\pgsql\server.log'"
+    echo [FAILED] Startup did not succeed. Last lines of the log:
+    echo ------------------------------------------------------------
+    powershell -NoProfile -Command "Get-Content -Tail 20 '%PGLOG%'"
+    echo ------------------------------------------------------------
     exit /b 1
 )
 
 echo.
 echo ============================================================
-echo  启动成功
+echo   PostgreSQL is up
 echo ============================================================
-echo  数据库：   study_platform
-echo  超级用户： postgres（本地 trust 认证，仅开发用）
-echo  应用角色： study_app（NOSUPERUSER / NOBYPASSRLS —— RLS 生效的前提）
-echo  连接串：   postgresql://study_app:dev-only-app-password@127.0.0.1:5432/study_platform
+echo   Database  : study_platform
+echo   Superuser : postgres   (local trust auth - development only)
+echo   App role  : study_app  (NOSUPERUSER / NOBYPASSRLS - needed for RLS)
+echo   DSN       : postgresql://study_app:dev-only-app-password@127.0.0.1:5432/study_platform
 echo.
-echo  停止：scripts\pg_stop.cmd
-echo  日志：E:\pgsql\server.log
+echo   Stop : scripts\pg_stop.cmd
+echo   Log  : %PGLOG%
+echo.
+endlocal

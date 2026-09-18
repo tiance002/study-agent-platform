@@ -24,6 +24,12 @@ var/
 *.sqlite3
 *.sqlite3-journal
 
+# ===== 测试报告产物（可随时重新生成，不入库）=====
+# 用 / 锚定仓库根，避免误伤子目录里同名的东西。
+/output.json
+/pytest_html_report.html
+/archive/
+
 # ===== Node / 前端 =====
 node_modules/
 dist/
