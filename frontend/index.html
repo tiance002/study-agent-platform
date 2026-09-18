@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent 工程学习规划平台 · 开发演示页</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --line: #e3e6ea;
+    --text: #1f2328;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --ok: #15803d;
+    --warn: #b45309;
+    --danger: #b91c1c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  header {
+    padding: 18px 24px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 17px; margin: 0 0 4px; font-weight: 500; }
+  header p { margin: 0; color: var(--muted); font-size: 12px; }
+  .wrap {
+    display: grid;
+    grid-template-columns: 380px 1fr;
+    gap: 16px;
+    padding: 16px 24px 40px;
+    align-items: start;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .panel + .panel { margin-top: 16px; }
+  h2 { font-size: 13px; margin: 0 0 12px; font-weight: 500; color: var(--muted); }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input, select, textarea {
+    width: 100%;
+    padding: 7px 9px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: inherit;
+    background: #fff;
+    color: var(--text);
+  }
+  textarea { min-height: 64px; resize: vertical; }
+  button {
+    margin-top: 12px;
+    padding: 8px 12px;
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: inherit;
+    width: 100%;
+  }
+  button.secondary {
+    background: #fff;
+    color: var(--accent);
+    margin-top: 8px;
+  }
+  button:hover { opacity: 0.9; }
+  pre {
+    margin: 0;
+    padding: 12px;
+    background: #fbfbfc;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-size: 12px;
+    line-height: 1.55;
+    overflow: auto;
+    max-height: 620px;
+    font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .note {
+    font-size: 12px;
+    color: var(--warn);
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+  }
+  .muted { color: var(--muted); font-size: 12px; }
+  code { background: #f0f1f3; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent 工程学习规划平台 · 开发演示页</h1>
+  <p>批次一最小闭环保留了策略、预算、幂等、审计、证据与子任务边界；持久化与沙箱为开发适配器</p>
+</header>
+
+<div class="wrap">
+  <div>
+    <div class="panel">
+      <h2>上下文</h2>
+      <label>租户（tenant）</label>
+      <input id="tenant" value="tenant_demo">
+      <label>学习者（principal）</label>
+      <input id="principal" value="user_demo">
+      <label>学习项目（learning project）</label>
+      <input id="project" value="proj_demo">
+    </div>
+
+    <div class="panel">
+      <h2>1. 摄取资料</h2>
+      <div class="note">摄取后才可以检索。片段在检索时按租户与项目强制过滤。</div>
+      <label>资料标识</label>
+      <input id="source" value="src_agent_basics">
+      <label>片段（每行一条）</label>
+      <textarea id="chunks">工具调用需要模型输出结构化参数，框架负责解析与执行。
+Agent harness 负责编排上下文、工具与循环退出条件。
+异步与并发决定 Agent 的吞吐上限。</textarea>
+      <button onclick="ingest()">摄取</button>
+    </div>
+
+    <div class="panel">
+      <h2>2. 执行一次交互</h2>
+      <label>node</label>
+      <select id="node">
+        <option value="intake_goal">intake_goal（不调工具，A0）</option>
+        <option value="diagnose_prerequisites">diagnose_prerequisites（读图谱，A1a）</option>
+        <option value="retrieve_material" selected>retrieve_material（检索，A1c）</option>
+        <option value="validate_and_record">validate_and_record（写证据，A2）</option>
+      </select>
+      <label>用户输入</label>
+      <textarea id="input">我想做一个能自动检索资料的 Agent</textarea>
+      <label>参数（JSON）</label>
+      <textarea id="params">{"targets": ["agent.harness"], "self_reported": ["llm.basics"]}</textarea>
+      <button onclick="interact()">运行</button>
+      <button class="secondary" onclick="showRegistry()">查看工具与 node 边界</button>
+      <button class="secondary" onclick="showMastery()">查看掌握投影</button>
+      <button class="secondary" onclick="showAudit()">查看审计链</button>
+      <button class="secondary" onclick="showBudget()">查看预算敞口</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>结果</h2>
+    <pre id="out">点击左侧按钮开始。第一次请先「摄取」再「运行」。</pre>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const base = () => "/projects/" + encodeURIComponent($("project").value);
+const qs = () => "?tenant_id=" + encodeURIComponent($("tenant").value);
+
+async function call(method, url, body) {
+  const res = await fetch(url, {
+    method: method,
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch (e) { data = { raw: text }; }
+  $("out").textContent = "HTTP " + res.status + "\n\n" + JSON.stringify(data, null, 2);
+}
+
+function ingest() {
+  const chunks = $("chunks").value.split("\n").map(s => s.trim()).filter(Boolean);
+  call("POST", base() + "/sources", {
+    tenant_id: $("tenant").value,
+    learning_project_id: $("project").value,
+    source_id: $("source").value,
+    chunks: chunks
+  });
+}
+
+function interact() {
+  let params = {};
+  try { params = JSON.parse($("params").value || "{}"); }
+  catch (e) { $("out").textContent = "参数不是合法 JSON：" + e.message; return; }
+  call("POST", base() + "/interactions", {
+    tenant_id: $("tenant").value,
+    principal_id: $("principal").value,
+    learning_project_id: $("project").value,
+    node_id: $("node").value,
+    user_input: $("input").value,
+    params: params
+  });
+}
+
+const showRegistry = () => call("GET", "/registry");
+const showMastery  = () => call("GET", base() + "/mastery" + qs());
+const showAudit    = () => call("GET", base() + "/audit");
+const showBudget   = () => call("GET", base() + "/budget");
+</script>
+</body>
+</html>

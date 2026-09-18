@@ -1,0 +1,184 @@
+# docs/skills 唯一索引。先读本文件，再按 triggers 决定读哪份条目。
+# 校验：python tools/skills/check_manifest.py docs/skills/manifest.yaml
+manifest_version: 1
+updated: 2026-09-18
+
+layers:
+  L0:
+    purpose: 每次开工必读的常驻层
+    budget_tokens: 1500
+  L1:
+    purpose: 领域契约，命中 triggers 时按需加载
+    budget_tokens_per_file: 4000
+  L2:
+    purpose: 任务手册，执行该类任务时加载
+    budget_tokens_per_file: 2000
+
+rules:
+  dependency_direction: [L0, L1, L2]   # 单向，禁止反向与成环
+  active_must_not_depend_on_planned: true
+  machine_derivable_must_be_generated: true
+  unknown_trigger_policy: 先读 L0，再向用户澄清，不得猜测条目
+
+entries:
+  # ---------- L0 常驻层 ----------
+  - id: invariants
+    layer: L0
+    status: active
+    path: L0/invariants.md
+    version: 1
+    size_estimate: 1300
+    triggers: [开工, 设计讨论, 实施前, 代码评审, 新增能力]
+    depends_on: []
+    expiry: 2027-03-01
+    note: 14 条不变量的压缩摘要；权威定义见 docs/superpowers/specs/2026-09-17-00-system-invariants-and-threat-model.md
+
+  - id: glossary
+    layer: L0
+    status: active
+    path: L0/glossary.md
+    version: 1
+    size_estimate: 900
+    triggers: [术语, 命名, 轴, 档位, 影响度, 混淆]
+    depends_on: []
+    expiry: 2027-03-01
+    note: 高频且易混用的术语速查；完整词汇表见 specs/2026-09-17-glossary.md
+
+  # ---------- L1 领域契约（首批三份，用于验证机制） ----------
+  - id: sql-schema
+    layer: L1
+    status: active
+    path: contracts/sql-schema.md
+    version: 0
+    size_estimate: 2600
+    triggers: [持久化, 建表, 查询, 迁移, RLS, 索引, 约束, 删除, 主键]
+    depends_on: []
+    generated_from: [alembic/versions/**, backend/app/**/models.py]
+    expiry: 2027-03-01
+    note: 首批验证机制三份之一。代表「数据库约束」类校验。RLS 细节后续拆到 tenancy-rules
+
+  - id: protocol
+    layer: L1
+    status: active
+    path: contracts/protocol.md
+    version: 0
+    size_estimate: 3000
+    triggers: [接口, API, SSE, 错误码, schema, 状态机, typed node, 事件]
+    depends_on: []
+    generated_from: [backend/app/api/**, backend/app/**/schemas.py, backend/app/workflow/nodes/**]
+    expiry: 2027-03-01
+    note: 首批验证机制三份之一。代表「接口契约」类校验
+
+  - id: tool-catalog
+    layer: L1
+    status: active
+    path: contracts/tool-catalog.md
+    version: 0
+    size_estimate: 2800
+    triggers: [工具, tool, 选错工具, 调用歧义, 权限档位, 幂等, MCP]
+    depends_on: []
+    generated_from: [backend/app/execution/registry/**, backend/app/policy/**]
+    expiry: 2027-03-01
+    note: 首批验证机制三份之一。代表「工具选择歧义」类校验。机器真相源是 tool registry，本文件是生成视图
+
+  # ---------- L1 领域契约（预留，机制验证通过后补写） ----------
+  - id: domain-model
+    layer: L1
+    status: planned
+    path: contracts/domain-model.md
+    version: 0
+    triggers: [新增实体, 修改实体, 实体关系, 生命周期, 租户级, 项目级]
+    depends_on: [sql-schema]
+    expiry: 2027-03-01
+    note: 待 sql-schema 机制验证通过后补写
+
+  - id: policy-matrix
+    layer: L1
+    status: planned
+    path: contracts/policy-matrix.md
+    version: 0
+    triggers: [授权, 权限裁剪, obligation, 失败方向, fail-closed, 确认]
+    depends_on: [tool-catalog]
+    expiry: 2027-03-01
+    note: 待 tool-catalog 机制验证通过后补写
+
+  - id: evidence-rules
+    layer: L1
+    status: planned
+    path: contracts/evidence-rules.md
+    version: 0
+    triggers: [掌握度, 证据, 投影, assessment, rubric, 复测]
+    depends_on: [protocol]
+    expiry: 2027-03-01
+    note: 待 protocol 机制验证通过后补写
+
+  - id: tenancy-rules
+    layer: L1
+    status: planned
+    path: contracts/tenancy-rules.md
+    version: 0
+    triggers: [RLS, SET LOCAL, 跨租户, 隔离测试, 缓存作用域]
+    depends_on: [sql-schema]
+    expiry: 2027-03-01
+    note: 从 sql-schema 拆出；待机制验证通过后补写
+
+  - id: egress-rules
+    layer: L1
+    status: planned
+    path: contracts/egress-rules.md
+    version: 0
+    triggers: [抓取, Fetcher, Package Proxy, SSRF, taint, endorsement, 出网]
+    depends_on: [policy-matrix]
+    expiry: 2027-03-01
+    note: 待 policy-matrix 补写后跟进
+
+  # ---------- L2 任务手册（预留） ----------
+  - id: add-a-tool
+    layer: L2
+    status: planned
+    path: playbooks/add-a-tool.md
+    triggers: [新增工具, 接入工具]
+    depends_on: [tool-catalog, sql-schema]
+    expiry: 2027-03-01
+    note: 含重叠检测与 schema 收窄步骤
+
+  - id: add-a-node
+    layer: L2
+    status: planned
+    path: playbooks/add-a-node.md
+    triggers: [新增 node, typed node]
+    depends_on: [protocol]
+    expiry: 2027-03-01
+
+  - id: add-a-migration
+    layer: L2
+    status: planned
+    path: playbooks/add-a-migration.md
+    triggers: [新增迁移, alembic, 表结构变更]
+    depends_on: [sql-schema]
+    expiry: 2027-03-01
+
+  - id: onboard-an-mcp-server
+    layer: L2
+    status: planned
+    path: playbooks/onboard-an-mcp-server.md
+    triggers: [接入 MCP, MCP server, 复用工具]
+    depends_on: [tool-catalog]
+    expiry: 2027-03-01
+    note: 含准入清单与包装层要求
+
+  - id: failure-drill
+    layer: L2
+    status: planned
+    path: playbooks/failure-drill.md
+    triggers: [故障演练, 注入, fail-closed 验证]
+    depends_on: [policy-matrix]
+    expiry: 2027-03-01
+
+  - id: release-a-batch
+    layer: L2
+    status: planned
+    path: playbooks/release-a-batch.md
+    triggers: [批次门, 发布, 回滚, canary]
+    depends_on: [policy-matrix]
+    expiry: 2027-03-01
