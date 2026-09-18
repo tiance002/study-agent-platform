@@ -7,8 +7,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:ec059013574defe83895f6cbc12f5ec032a83b6db9792b927e9495af54e4ab61, generated_at=2026-09-18T09:27:44Z -->
-> 生成时间：2026-09-18T09:27:44Z
+<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:33434efe05520ea86eaf399b7f8f11a195f1447b4f252c62a76c13c4b1c6ecc5, generated_at=2026-09-18T16:14:54Z -->
+> 生成时间：2026-09-18T16:14:54Z
 
 > 由 `tools/skills/gen_contracts.py` 从代码扫描导出，请勿手工编辑本区。
 > **注意**：这是**代码层实体**，不是 PostgreSQL 表。迁移落地后应改由 alembic 导出 DDL。
@@ -20,6 +20,8 @@
 | `Reservation` | `app.budget.ledger` | 7 | — | — |
 | `ArtifactRef` | `app.core.artifacts` | 5 | — | — |
 | `PlatformError` | `app.core.errors` | 5 | — | — |
+| `EvidenceAssessment` | `app.core.evidence_issues` | 2 | — | — |
+| `EvidenceIssue` | `app.core.evidence_issues` | 6 | — | — |
 | `ChildEnvelope` | `app.execution.child_run` | 6 | — | — |
 | `Claim` | `app.execution.child_run` | 3 | — | — |
 | `SpawnedChild` | `app.execution.child_run` | 4 | — | — |
@@ -32,6 +34,8 @@
 | `ProjectRecord` | `app.identity.membership` | 3 | 是 | — |
 | `Principal` | `app.identity.models` | 4 | 是 | — |
 | `SessionToken` | `app.identity.session` | 8 | 是 | — |
+| `FetchFailure` | `app.knowledge.evidence_state` | 3 | — | — |
+| `RetrievalSignals` | `app.knowledge.evidence_state` | 7 | — | — |
 | `Chunk` | `app.knowledge.retrieval` | 9 | 是 | 是 |
 | `ScoredChunk` | `app.knowledge.retrieval` | 2 | — | — |
 | `ComponentVerdict` | `app.learning.evidence` | 7 | — | — |
@@ -54,7 +58,7 @@
 | `InteractionRequest` | `app.workflow.runtime` | 8 | 是 | 是 |
 | `InteractionResult` | `app.workflow.runtime` | 10 | — | — |
 
-合计 38 个实体。
+合计 42 个实体。
 <!-- END GENERATED -->
 
 ## 2. 手写区 · 不可协商的数据库约束

@@ -79,24 +79,71 @@ def mark_tainted(value_ref: str, payload, source: TaintSource) -> TaintedValue:
     )
 
 
-def derive(parents: list[TaintedValue], new_value_ref: str, payload) -> TaintedValue:
+def derive(
+    parents: list[TaintedValue],
+    new_value_ref: str,
+    payload,
+    *,
+    new_sources: tuple[TaintSource, ...] = (),
+) -> TaintedValue:
     """派生新值：来源取并集，且旧 endorsement 不再适用。
 
     这是「模型摘要不能自动去污点」的实现点：摘要是一个派生动作，
     结果值的来源集合必然包含原值的全部来源。
+
+    ## `new_sources` 为什么必须显式传，且默认不增加
+
+    派生有两类，taint 语义**不同**（03 号规格 §3）：
+
+    | 派生类型 | 来源变化 |
+    |---|---|
+    | 确定性派生（解析、拼接、规范化） | 只继承父来源，**不新增** |
+    | 模型边界产生新内容 | **必须**显式增加 `MODEL_OUTPUT` |
+
+    早期实现只有「合并父来源」一种行为，于是模型生成的内容永远不会被标上
+    `MODEL_OUTPUT` —— 只要父值里没有这个来源，模型输出就会被当成普通派生值，
+    混进证据链。这是真实的漏标缺口，不是文档措辞问题。
+
+    默认值取空元组是刻意的：**默认安全**。模型边界必须由调用方显式声明
+    （推荐用 `derive_model_output()`，它把这件事变成一个可搜索的调用点），
+    而确定性派什么都不用做，也就不会误标。
     """
     if not parents:
         raise ValueError("derive 至少需要一个父值")
+
     seen: list[TaintSource] = []
     for parent in parents:
         for source in parent.sources:
             if source not in seen:
                 seen.append(source)
+    for source in new_sources:
+        if source not in seen:
+            seen.append(source)
+
     return TaintedValue(
         value_ref=new_value_ref,
         content_hash=content_hash(payload),
         sources=tuple(seen),
         derived_from=tuple(p.value_ref for p in parents),
+    )
+
+
+def derive_model_output(
+    parents: list[TaintedValue], new_value_ref: str, payload
+) -> TaintedValue:
+    """**模型边界**产生新内容时的派生：显式增加 `MODEL_OUTPUT` 并继承全部父来源。
+
+    单独提供一个入口，而不是让每个调用点自己记得传
+    `new_sources=(TaintSource.MODEL_OUTPUT,)`。理由是可审计性：
+    「哪些地方产生了模型内容」应该是一个可以直接搜索的函数名，
+    而不是散落各处的参数写法 —— 后者只要有人漏写一次，
+    模型输出就会被静默当成普通派生值。
+    """
+    return derive(
+        parents,
+        new_value_ref,
+        payload,
+        new_sources=(TaintSource.MODEL_OUTPUT,),
     )
 
 

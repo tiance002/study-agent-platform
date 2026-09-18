@@ -96,7 +96,14 @@
 - [ ] 沙箱默认无网络；依赖只经白名单包代理，禁用 lifecycle scripts，结果只能经 broker 回传。
 - [ ] 实现片段级 `TaintSource[]`、独立 `acquisition_method`、`derived_from[]`、source span、参数级 lineage 和 sink-specific endorsement；模型派生显式增加 `MODEL_OUTPUT`，ACL 收窄时重算索引可见性并失效缓存。
 - [ ] 先用标题路径 + 外部分词 + `tsvector`；标题/章节粗召回不得成为全局片段召回的必经门。建立中文查询分层基准和 BM25-like/RRF/向量融合评测，索引与词典版本化并支持双写回填。
-- [ ] 将 `unresolved[]` 升级为 knowledge 域闭集 `EvidenceIssueCode` 驱动的 `issues[]`，按相关性、核心结论覆盖、冲突、新鲜度和必需步骤完成度计算四级证据状态。
+- [x] 将 `unresolved[]` 升级为 knowledge 域闭集 `EvidenceIssueCode` 驱动的 `issues[]`，按相关性、核心结论覆盖、冲突、新鲜度和必需步骤完成度计算四级证据状态。
+      **部分完成（2026-09-19）**：闭集、`EvidenceIssue` 模型、四级状态与确定性判定器已落地
+      （`core/evidence_issues.py` + `knowledge/evidence_state.py`）；ChildRun 信封与检索 node
+      均已切换到 `issues[]`，旧的 `unresolved` 字段与 `bool(hits)` 判定已移除。
+      已产生 6 个码：`NO_CANDIDATES`、`LOW_RELEVANCE`、`SOURCE_FETCH_FAILED`、`SCOPE_BLOCKED`、
+      `TOOL_RESULT_UNKNOWN`、`MISSING_SUPPORT`（后者当前由"必需步骤未完成"触发）。
+      **`SOURCE_CONFLICT` 与 `FRESHNESS_UNKNOWN` 尚未产生** —— 判定它们需要冻结的核心结论标注集，
+      输入当前不存在。不假装实现：一个永不触发的码比缺失的码更糟，因为它看起来已经做好。
 - [ ] 冻结查询—文档—片段—核心结论标注集；只有分层指标证明无关键回归后才启用 reranker。
 
 **退出门：** SSRF、DNS rebinding、解压炸弹、路径逃逸和依赖外传测试均拒绝；检索结果在数据库层强制项目过滤；索引可由版本化源重新构建；标题召回失败时全局片段兜底仍可命中；reranker 未通过冻结评测集不得上线；证据问题可按稳定 code 统计且不泄露未授权资源存在性。
@@ -122,7 +129,11 @@
 
 ### 任务 6：模型路由、验证器与教学工作流
 
-**状态：** 少量完成 —— L/A/D 轴与 obligation 支持性校验、确定性契约验证、证据充分性判定已实现；prompt/model/retrieval 组合 registry、L1 准入校准、risk-coverage、canary、assessment 全流程与近/远迁移评测未实现。
+**状态：** 少量完成 —— L/A/D 轴与 obligation 支持性校验、确定性契约验证已实现；
+证据充分性判定已于 2026-09-19 按 02 号规格 §4 改造为**结构化**（四级状态 + 闭集 `issues[]`，
+取代原先的 `"supported" if hits else "insufficient"`），但「核心结论覆盖率 / 来源冲突 / 新鲜度」
+三项依赖冻结标注集，对应码尚未产生；prompt/model/retrieval 组合 registry、L1 准入校准、
+risk-coverage、canary、assessment 全流程与近/远迁移评测未实现。
 
 **文件：** `backend/app/routing/`、`backend/app/validators/`、`backend/app/prompts/`、`backend/app/teaching/`、`tests/routing/`、`tests/evaluation/`。
 

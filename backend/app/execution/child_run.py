@@ -23,6 +23,7 @@ from enum import StrEnum
 from app.core.artifacts import ArtifactRef, DisplayPolicy  # noqa: F401
 from app.core.clock import Clock
 from app.core.errors import ErrorCode, deny
+from app.core.evidence_issues import EvidenceIssue
 from app.policy.token import CapabilityToken, TokenIssuer
 from app.registry.models import Authority
 from app.registry.registry import Registry
@@ -79,7 +80,11 @@ class ChildEnvelope:
     artifacts: tuple[ArtifactRef, ...] = ()
     claims: tuple[Claim, ...] = ()
     taint_sources: tuple[str, ...] = ()
-    unresolved: tuple[str, ...] = ()
+    # 结构化证据问题。**不再是自然语言的 `unresolved[]`** ——
+    # 自然语言无法机械比较，拿它做判断会让"证据状态"退化成措辞的产物；
+    # 而且散文描述无法携带 claim/source 引用，也就断了谱系。
+    # 闭集见 `core/evidence_issues.py`（02 号规格 §4 / ADR-014）。
+    issues: tuple[EvidenceIssue, ...] = ()
 
     def to_dict(self) -> dict:
         return {
@@ -104,7 +109,7 @@ class ChildEnvelope:
                 for c in self.claims
             ],
             "taint": {"sources": list(self.taint_sources)},
-            "unresolved": list(self.unresolved),
+            "issues": [issue.to_dict() for issue in self.issues],
         }
 
 

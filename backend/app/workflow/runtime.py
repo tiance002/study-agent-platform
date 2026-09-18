@@ -31,6 +31,7 @@ from app.core.hashing import content_hash
 from app.execution.confirmation import ConfirmationStore
 from app.execution.outbox import ToolDispatcher
 from app.execution.state_machine import ActionStateMachine
+from app.knowledge.evidence_state import FetchFailure, RetrievalSignals, assess_retrieval
 from app.knowledge.retrieval import ChunkIndex
 from app.learning.evidence import EvidenceLog
 from app.learning.projector import MasteryProjection, Projector
@@ -637,26 +638,72 @@ def _handle_diagnose(invoker: ToolInvoker, request: InteractionRequest, ctx: Nod
     }
 
 
+# 关键词检索的相关度下限。
+# 当前检索是关键词命中计数（score = 命中的词数），所以 1 的含义是
+# 「至少命中一个词」。真正意义上的相关度门槛要等向量检索与 reranker
+# （阶段计划第 9 项），届时这里换成融合后的分数下限。
+RETRIEVAL_RELEVANCE_FLOOR = 1
+
+
 def _handle_retrieve(invoker: ToolInvoker, request: InteractionRequest, ctx: NodeContext) -> dict:
-    """检索资料。外部抓取作为可选步骤，失败记录为 unresolved 而不中断。"""
+    """检索资料。
+
+    外部抓取是**可选步骤**：失败不中断流程，但必须进入结构化 issues ——
+    「抓取失败」既不等于「没有结果」，也不等于「已支持」。
+
+    证据状态由 `assess_retrieval()` 依据候选数、相关度、抓取失败、权限截断与
+    必需步骤完成度计算，**不再由「是否存在命中」决定**（02 号规格 §4）。
+
+    原实现是 `"supported" if hits else "insufficient"`：只要有一条命中就声称
+    已支持，抓取失败、低相关、步骤未完成全都不影响状态。那是最危险的一类错误
+    —— 错误的 `insufficient` 会被用户追问后修正，错误的 `supported` 会被直接采信。
+    """
     retrieval = invoker.call("retrieve_project_chunks", {"query": request.user_input, "limit": 3})
     hits = retrieval.get("hits", [])
     citations = [hit["artifact"] for hit in hits]
 
-    unresolved: list[str] = []
+    failures: list[FetchFailure] = []
+    tool_result_unknown = False
+    required_steps_completed = True
+
     if request.params.get("also_fetch_external"):
+        external_url = str(request.params["also_fetch_external"])
         try:
-            external = invoker.call("fetch_external_url", {"url": request.params["also_fetch_external"]})
-            unresolved.append(f"外部内容已取回但未纳入引用：{external.get('url')}")
+            invoker.call("fetch_external_url", {"url": external_url})
+            # 取回成功，但本版尚未把外部内容并入引用 —— 这是一步**未完成的工作**，
+            # 必须反映到证据状态上，不能只在旁白里提一句就当作完成。
+            required_steps_completed = False
         except PlatformError as exc:
-            # 不静默降级：明确记录为未完成，并说明原因。
-            unresolved.append(f"外部抓取未完成：{exc.code}")
+            if exc.code is ErrorCode.RECONCILIATION_REQUIRED:
+                # 结果未知：**必须先对账**，不可自动重试 ——
+                # 未知状态下重试会产生第二次副作用，那不是恢复，是放大。
+                tool_result_unknown = True
+            else:
+                failures.append(
+                    FetchFailure(
+                        source_ref=external_url,
+                        error_code=str(exc.code),
+                        # 可重试性由错误策略给出，不在这里统一推导（02 号规格 §4）。
+                        retryable=exc.retryable,
+                    )
+                )
+
+    assessment = assess_retrieval(
+        RetrievalSignals(
+            candidate_count=len(hits),
+            top_score=float(hits[0]["score"]) if hits else 0.0,
+            relevance_floor=RETRIEVAL_RELEVANCE_FLOOR,
+            required_steps_completed=required_steps_completed,
+            fetch_failures=tuple(failures),
+            tool_result_unknown=tool_result_unknown,
+        )
+    )
 
     return {
         "hits": hits,
-        "evidence_state": "supported" if hits else "insufficient",
-        "unresolved": unresolved,
-        "note": "证据不足时不得通过升级模型解决（02 号规格 §4）",
+        "evidence_state": str(assessment.state),
+        "issues": [issue.to_dict() for issue in assessment.issues],
+        "note": "状态由 issues 推导，不由「是否存在命中」决定（02 号规格 §4）",
         "citations": citations,
     }
 
