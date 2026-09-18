@@ -43,7 +43,7 @@ from app.policy.gateway import (
 from app.policy.token import CapabilityToken, TokenIssuer
 from app.registry.models import Authority, NodeSpec
 from app.registry.registry import Registry
-from app.tenancy.context import TenantContext, tenant_scope
+from app.tenancy.context import TenantContext, current, tenant_scope
 from app.workflow.context import NodeContext
 from app.workflow import tools_impl
 
@@ -175,16 +175,17 @@ class ToolInvoker:
         )
         decision.require_allowed()
 
-        # 预算：两个维度**分别**预留，绝不能混用。
+        # 预算：两个维度必须**一次原子预留**，不能写成两次独立的 reserve。
+        # 若写成两次，第二次失败时第一次的预留会残留 —— 账户关不掉、敞口持续累积，
+        # 与「预留失败不得留下部分状态」的设计目标冲突。
         # - TOOL_CALLS 是调用计数：成功或失败都算一次，因为调用确实发生了；
         # - CURRENCY_MICROS 是成本：按工具声明的上界预留，结算时用实际值。
-        counter = runtime.ledger.reserve(
-            self._run_account_id, str(Dimension.TOOL_CALLS), 1
-        )
-        cost = runtime.ledger.reserve(
+        counter, cost = runtime.ledger.batch_reserve(
             self._run_account_id,
-            str(Dimension.CURRENCY_MICROS),
-            max(1, spec.max_cost_units),
+            {
+                str(Dimension.TOOL_CALLS): 1,
+                str(Dimension.CURRENCY_MICROS): max(1, spec.max_cost_units),
+            },
         )
 
         action = runtime.machine.plan(
@@ -379,6 +380,8 @@ class InteractionRuntime:
                 "interaction_rejected",
                 {"request_id": request.request_id, "code": str(exc.code), "message": exc.message},
                 risk=RiskLevel.HIGH if exc.code.value.startswith("POLICY") else RiskLevel.LOW,
+                tenant_id=request.tenant_id,
+                project_id=request.learning_project_id,
             )
             self._close_run_quietly(run_account_id)
             return self._fail(request, exc, node_spec=node_spec, token=token)
@@ -416,6 +419,7 @@ class InteractionRuntime:
         if tenant_account not in self.ledger._accounts:  # noqa: SLF001 — 内部编排访问
             self.ledger.open_account(
                 tenant_account,
+                tenant_id=request.tenant_id,
                 limits={
                     str(Dimension.CURRENCY_MICROS): 1_000_000_000,
                     str(Dimension.TOKENS): 100_000_000,
@@ -436,8 +440,12 @@ class InteractionRuntime:
                     str(Dimension.TOOL_CALLS): 10_000,
                     str(Dimension.SANDBOX_SECONDS): 10_000,
                 },
+                tenant_id=request.tenant_id,
+                project_id=request.learning_project_id,
             )
         if run_account not in self.ledger._accounts:  # noqa: SLF001
+            # run 账户不传租户/项目，从 project 账户继承 —— 靠继承而非重复声明，
+            # 避免"某处漏传导致账目脱离隔离范围"。
             self.ledger.grant_to_child(
                 project_account,
                 run_account,
@@ -460,6 +468,7 @@ class InteractionRuntime:
         try:
             self.ledger.close_account(run_account_id)
         except PlatformError as exc:
+            account = self.ledger._accounts.get(run_account_id)  # noqa: SLF001 — 运维观测
             self.audit.append(
                 "run_account_not_closed",
                 {
@@ -468,6 +477,8 @@ class InteractionRuntime:
                     "message": exc.message,
                 },
                 risk=RiskLevel.LOW,
+                tenant_id=account.tenant_id if account else None,
+                project_id=account.project_id if account else None,
             )
 
     def _deny(
@@ -514,8 +525,22 @@ class InteractionRuntime:
         )
 
     def projection(self, *, graph_version: str = "graph/v1") -> MasteryProjection:
-        """产出一份掌握投影。演示"证据可重建"这一性质。"""
-        return self.projector.project(self.evidence_log, graph_version=graph_version)
+        """产出**当前租户与项目**的掌握投影。
+
+        必须先按作用域过滤再投影。否则要么触发跨项目拒绝（报错），
+        要么在检查被放宽时产出混合投影 —— 而掌握度是最不能出错的数据。
+        """
+        context = current()
+        project_id = context.require_project()
+        events = self.evidence_log.events_scoped(
+            tenant_id=context.tenant_id, project_id=project_id
+        )
+        corrections = self.evidence_log.corrections_scoped(
+            event_ids={event.event_id for event in events}
+        )
+        return self.projector.project_from(
+            events=events, corrections=corrections, graph_version=graph_version
+        )
 
 
 # --------------------------------------------------------------------- handler

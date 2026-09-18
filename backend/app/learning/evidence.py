@@ -267,6 +267,23 @@ class EvidenceLog:
     def events(self) -> tuple[EvidenceEvent, ...]:
         return tuple(self._events)
 
+    def events_scoped(self, *, tenant_id: str, project_id: str) -> tuple[EvidenceEvent, ...]:
+        """按租户与项目过滤的事件。
+
+        **投影输入必须先过滤。** 把全部证据丢给投影器，要么触发跨项目拒绝（报错），
+        要么在检查被放宽时产出混合投影 —— 两者都不可接受。隔离是调用方的责任，
+        投影器只负责「怎么重建」，不负责「该重建谁」。
+        """
+        return tuple(
+            event
+            for event in self._events
+            if event.tenant_id == tenant_id and event.project_id == project_id
+        )
+
+    def corrections_scoped(self, *, event_ids: set[str]) -> tuple[EvidenceCorrection, ...]:
+        """只保留指向给定事件集合的裁决，避免把其他项目的裁决带进投影。"""
+        return tuple(c for c in self._corrections if c.target_event_id in event_ids)
+
     def corrections(self) -> tuple[EvidenceCorrection, ...]:
         return tuple(self._corrections)
 

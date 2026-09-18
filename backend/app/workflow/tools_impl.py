@@ -99,28 +99,27 @@ def retrieve_project_chunks(ctx: NodeContext, params: dict) -> dict:
 
 
 def read_source_span(ctx: NodeContext, params: dict) -> dict:
-    """按 source_id + span 精确回读。要求已知位置，不做召回。"""
+    """按 source_id + span 精确回读。要求已知位置，不做召回。
+
+    读取走 `ChunkIndex.read_span()`，**租户与项目过滤在那里强制**。
+    绝不在此处直接遍历内部列表 —— 那样会在某次后续改动里悄悄丢掉作用域判断，
+    而它已经注册在工具目录中，一旦启用就是跨租户读取的入口。
+    """
     source_id = params.get("source_id")
     span = params.get("span") or []
     if not source_id or len(span) != 2:
         raise ValueError("read_source_span 需要 source_id 与 span=[start, end]")
-    for chunk in ctx.chunk_index._chunks:  # noqa: SLF001 — 开发适配器内部访问
-        if chunk.source_id == source_id and list(chunk.span) == list(span):
-            value = chunk.artifact_ref()
-            return {
-                "cost_units": 1,
-                "found": True,
-                "text": chunk.text,
-                "artifact": {
-                    "source_id": value.source_id,
-                    "span": list(value.span),
-                    "content_hash": value.content_hash,
-                    "parser_version": value.parser_version,
-                    "display_policy": str(value.display_policy),
-                },
-                "tainted": True,
-            }
-    return {"cost_units": 1, "found": False, "source_id": source_id, "span": span}
+
+    chunk = ctx.chunk_index.read_span(source_id, (int(span[0]), int(span[1])))
+    if chunk is None:
+        return {"cost_units": 1, "found": False, "source_id": source_id, "span": span}
+    return {
+        "cost_units": 1,
+        "found": True,
+        "text": chunk.text,
+        "artifact": chunk.artifact_ref().to_dict(),
+        "tainted": True,
+    }
 
 
 def fetch_external_url(ctx: NodeContext, params: dict) -> dict:

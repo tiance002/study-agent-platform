@@ -6,9 +6,39 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=tool_registry, source_hash=PENDING, generated_at=PENDING -->
-> 待实施后导出：全部已注册工具的 id、参数 schema、网络/文件边界、幂等与补偿语义、审计级别、`min_authority`、`intent_tag`、`sink_class`、`exclusivity`。
-> CI 校验：导出结果与本区不一致即构建失败。
+<!-- BEGIN GENERATED: source=tool_registry, source_hash=sha256:238eadebd564112d8bfaa4f90190d76f51d0917acc812923926500e21d1b2bc0, generated_at=2026-09-18T05:46:26Z -->
+> 生成时间：2026-09-18T05:46:26Z
+
+> 由 `tools/skills/gen_contracts.py` 从 tool registry 导出，请勿手工编辑本区。
+> registry 是机器真相源，本区是它的生成视图；**禁止双写**。
+
+registry_version: `sha256:fd6f8b3966abfa8f44307a6d15e920d8c42dec5bd1cc3fad5c6a3076cbf1e4a5`
+
+### 工具
+
+| tool_id | intent_tag | sink_class | owner_module | min_authority | exclusivity | idempotency | 成本上界 | 网络边界 |
+|---|---|---|---|---|---|---|---|---|
+| `append_project_evidence` | `append_evidence` | fact | learning | A2 | exclusive | native | 1 | — |
+| `fetch_external_url` | `fetch_external` | context | knowledge | A1c | exclusive | native | 2 | docs.python.org, fastapi.tiangolo.com |
+| `query_competency_graph` | `read_graph` | context | learning | A1a | exclusive | native | 4 | — |
+| `read_source_span` | `read_source_span` | context | knowledge | A1a | exclusive | native | 1 | — |
+| `retrieve_project_chunks` | `retrieve_chunk` | context | knowledge | A1a | exclusive | native | 3 | — |
+| `run_in_sandbox` | `execute_code` | artifact | execution | A1d | exclusive | queryable | 1 | — |
+| `run_validator` | `validate_artifact` | context | learning | A1a | exclusive | native | 1 | — |
+
+### node
+
+| node_id | 允许工具 | 最低档位 | 权限上限 | 工具次数 | 循环 | 递归 | 并发 |
+|---|---|---|---|---:|---:|---:|---:|
+| `diagnose_prerequisites` | `query_competency_graph` | L0 | A1a | 4 | 2 | 1 | 2 |
+| `intake_goal` | — | L2 | A0 | 0 | 1 | 1 | 2 |
+| `retrieve_material` | `retrieve_project_chunks`, `read_source_span`, `fetch_external_url` | L0 | A1c | 6 | 3 | 1 | 2 |
+| `validate_and_record` | `run_validator`, `append_project_evidence` | L0 | A2 | 4 | 2 | 1 | 2 |
+
+### 重叠检测结果
+
+注册时机械门已保证：同一 `(intent_tag, sink_class, min_authority)` 下不存在多个 exclusive 工具。
+若本表出现重复意图组合，说明门被绕过，应当视为构建失败。
 <!-- END GENERATED -->
 
 ## 2. 手写区 · 工具声明的必填字段

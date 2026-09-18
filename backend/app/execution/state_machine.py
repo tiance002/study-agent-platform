@@ -89,6 +89,8 @@ class LogicalAction:
 
     def to_dict(self) -> dict:
         return {
+            "tenant_id": self.tenant_id,
+            "project_id": self.project_id,
             "run_id": self.run_id,
             "node_instance_id": self.node_instance_id,
             "logical_action_id": self.logical_action_id,
@@ -179,9 +181,19 @@ class ActionStateMachine:
         action_id = self._by_key.get(key)
         return self._actions[action_id] if action_id else None
 
-    def actions_needing_reconciliation(self) -> tuple[LogicalAction, ...]:
-        """需要人工或自动对账的动作。`unknown` 有 SLA 与单独看板（03 号规格 §5）。"""
-        return tuple(a for a in self._actions.values() if a.state is ActionState.UNKNOWN)
+    def actions_needing_reconciliation(
+        self, *, tenant_id: str | None = None, project_id: str | None = None
+    ) -> tuple[LogicalAction, ...]:
+        """需要人工或自动对账的动作。`unknown` 有 SLA 与单独看板（03 号规格 §5）。
+
+        可按租户/项目过滤：对账看板同样是项目级视图，不能跨租户聚合。
+        """
+        actions = [a for a in self._actions.values() if a.state is ActionState.UNKNOWN]
+        if tenant_id is not None:
+            actions = [a for a in actions if a.tenant_id == tenant_id]
+        if project_id is not None:
+            actions = [a for a in actions if a.project_id == project_id]
+        return tuple(actions)
 
     def all_actions(self) -> tuple[LogicalAction, ...]:
         return tuple(self._actions.values())

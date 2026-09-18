@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -34,7 +34,12 @@ class RiskLevel(StrEnum):
 
 @dataclass(frozen=True)
 class AuditRecord:
-    """审计记录。`entry_hash` 覆盖前序哈希与当前载荷，构成链。"""
+    """审计记录。`entry_hash` 覆盖前序哈希与当前载荷，构成链。
+
+    `tenant_id` / `project_id` 是**结构化顶层字段**，不是塞在 `payload` 里的：
+    审计读取必须能可靠地按租户与项目隔离，而 `payload` 的结构由调用方决定，
+    靠解析它来过滤迟早会漏。它们同时参与哈希，因此不能事后补写。
+    """
 
     event_id: str
     seq: int
@@ -43,6 +48,8 @@ class AuditRecord:
     risk: RiskLevel
     previous_hash: str | None
     entry_hash: str
+    tenant_id: str | None = None
+    project_id: str | None = None
 
     def to_line(self) -> str:
         return json.dumps(
@@ -54,11 +61,23 @@ class AuditRecord:
                 "risk": str(self.risk),
                 "previous_hash": self.previous_hash,
                 "entry_hash": self.entry_hash,
+                "tenant_id": self.tenant_id,
+                "project_id": self.project_id,
             },
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         )
+
+    def hash_material(self) -> dict:
+        """参与链哈希的字段。任何一项被改动都会使链校验失败。"""
+        return {
+            "seq": self.seq,
+            "type": self.event_type,
+            "payload": self.payload,
+            "tenant_id": self.tenant_id,
+            "project_id": self.project_id,
+        }
 
 
 class AuditSink:
@@ -104,8 +123,19 @@ class AuditSink:
 
     # ------------------------------------------------------------------ 追加
 
-    def append(self, event_type: str, payload: dict, *, risk: RiskLevel = RiskLevel.HIGH) -> str:
+    def append(
+        self,
+        event_type: str,
+        payload: dict,
+        *,
+        risk: RiskLevel = RiskLevel.HIGH,
+        tenant_id: str | None = None,
+        project_id: str | None = None,
+    ) -> str:
         """追加一条审计事件，返回 `event_id`。
+
+        `tenant_id` / `project_id` 用于**隔离读取**：只有带租户标记的事件才能被
+        按租户查询到；不带标记的视为系统级事件，不对项目接口暴露。
 
         sink 不可用时的处置严格按风险分级，不做「静默丢日志」。
         """
@@ -125,26 +155,41 @@ class AuditSink:
                     f"审计缓冲已达上限 {self._buffer_capacity}，低风险事件也不再接收",
                     event_type=event_type,
                 )
-            record = self._build_record(event_type, payload, risk)
+            record = self._build_record(event_type, payload, risk, tenant_id, project_id)
             self._buffer.append(record)
             return record.event_id
 
-        record = self._build_record(event_type, payload, risk)
+        record = self._build_record(event_type, payload, risk, tenant_id, project_id)
         self._write(record)
         return record.event_id
 
-    def _build_record(self, event_type: str, payload: dict, risk: RiskLevel) -> AuditRecord:
+    def _build_record(
+        self,
+        event_type: str,
+        payload: dict,
+        risk: RiskLevel,
+        tenant_id: str | None,
+        project_id: str | None,
+    ) -> AuditRecord:
+        """构造记录并计算链哈希。
+
+        哈希覆盖租户与项目字段，因此**不能事后补写**这两个字段 ——
+        补写会直接破坏链校验。
+        """
         seq = self._seq + 1
-        entry_hash = hash_chain(self._last_hash, content_hash({"seq": seq, "type": event_type, "payload": payload}))
-        record = AuditRecord(
+        draft = AuditRecord(
             event_id=new_id("aud"),
             seq=seq,
             event_type=event_type,
             payload=payload,
             risk=risk,
             previous_hash=self._last_hash,
-            entry_hash=entry_hash,
+            entry_hash="",
+            tenant_id=tenant_id,
+            project_id=project_id,
         )
+        entry_hash = hash_chain(self._last_hash, content_hash(draft.hash_material()))
+        record = replace(draft, entry_hash=entry_hash)
         self._seq = seq
         self._last_hash = entry_hash
         return record
@@ -173,7 +218,13 @@ class AuditSink:
             expected = hash_chain(
                 previous,
                 content_hash(
-                    {"seq": raw["seq"], "type": raw["event_type"], "payload": raw["payload"]}
+                    {
+                        "seq": raw["seq"],
+                        "type": raw["event_type"],
+                        "payload": raw["payload"],
+                        "tenant_id": raw.get("tenant_id"),
+                        "project_id": raw.get("project_id"),
+                    }
                 ),
             )
             if expected != raw["entry_hash"] or raw["previous_hash"] != previous:
@@ -190,6 +241,21 @@ class AuditSink:
             for line in self._path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
+
+    def read_scoped(self, *, tenant_id: str, project_id: str | None = None) -> list[dict]:
+        """按租户（可选项目）过滤读取。
+
+        不带租户标记的系统级事件**不会**被返回：项目接口不应看到它们。
+        这是「所有项目级实体隔离」在审计读取路径上的落点。
+        """
+        records = [
+            record for record in self.read_all() if record.get("tenant_id") == tenant_id
+        ]
+        if project_id is not None:
+            records = [
+                record for record in records if record.get("project_id") == project_id
+            ]
+        return records
 
     # ------------------------------------------------------------------ 恢复
 

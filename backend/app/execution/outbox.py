@@ -168,6 +168,8 @@ class ToolDispatcher:
                 "params_hash": decision.snapshot_hash,
             },
             risk=RiskLevel.HIGH if (is_high_impact or spec.requires_audit) else RiskLevel.LOW,
+            tenant_id=token.tenant_id,
+            project_id=token.project_id,
         )
         self._machine.transition(action, ActionState.INTENT_PERSISTED)
 
@@ -187,6 +189,8 @@ class ToolDispatcher:
                 "action_unknown",
                 {"logical_action_id": action.logical_action_id, "reason": str(exc)},
                 risk=RiskLevel.HIGH,
+                tenant_id=token.tenant_id,
+                project_id=token.project_id,
             )
             return ToolOutcome(
                 logical_action_id=action.logical_action_id,
@@ -205,6 +209,8 @@ class ToolDispatcher:
                 "action_failed",
                 {"logical_action_id": action.logical_action_id, "error": str(exc)},
                 risk=RiskLevel.LOW,
+                tenant_id=token.tenant_id,
+                project_id=token.project_id,
             )
             return ToolOutcome(
                 logical_action_id=action.logical_action_id,
@@ -229,6 +235,8 @@ class ToolDispatcher:
                 "result_keys": sorted(payload.keys()),
             },
             risk=RiskLevel.LOW,
+            tenant_id=token.tenant_id,
+            project_id=token.project_id,
         )
         return ToolOutcome(
             logical_action_id=action.logical_action_id,
@@ -278,5 +286,7 @@ class ToolDispatcher:
                 "actual_cost_units": actual,
             },
             risk=RiskLevel.HIGH,
+            tenant_id=action.tenant_id,
+            project_id=action.project_id,
         )
         return action

@@ -2,13 +2,52 @@
 
 > `skill_id: sql-schema` | version: 0 | expiry: 2027-03-01 | owner: 待指派
 > 权威来源：`specs/2026-09-17-04-multitenancy-and-data-governance.md`、`03-policy-tools-and-execution.md`、`01-learning-loop-and-mastery-evidence.md`
-> **本文件是设计期版本：生成脚本尚不存在，全文属手写区，生成区为占位。** 实施时按第 4 节约定填充。
+> **生成区已启用**：由 `tools/skills/gen_contracts.py` 从代码导出，并参与 CI 一致性校验。
+> ⚠️ 当前导出的是**代码层实体**，不是 PostgreSQL 表结构；迁移（alembic）落地后应改由迁移导出 DDL。
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=alembic+models, source_hash=PENDING, generated_at=PENDING -->
-> 待实施后由 `tools/skills/gen_sql_schema.py` 导出，内容为：全部表、列、类型、约束、索引、RLS 策略、迁移链摘要。
-> 生成脚本未就绪前，本区不填任何手工内容。CI 校验：导出结果与本区不一致即构建失败。
+<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:e6d4de1828d2679d35da5036a0fefb4a32685b6cc165150f71764eaeb41396dd, generated_at=2026-09-18T05:46:26Z -->
+> 生成时间：2026-09-18T05:46:26Z
+
+> 由 `tools/skills/gen_contracts.py` 从代码扫描导出，请勿手工编辑本区。
+> **注意**：这是**代码层实体**，不是 PostgreSQL 表。迁移落地后应改由 alembic 导出 DDL。
+
+| 实体 | 定义模块 | 字段数 | 含 tenant_id | 含 learning_project_id |
+|---|---|---:|---|---|
+| `AuditRecord` | `app.audit.sink` | 9 | 是 | — |
+| `Account` | `app.budget.ledger` | 8 | 是 | — |
+| `Reservation` | `app.budget.ledger` | 7 | — | — |
+| `ArtifactRef` | `app.core.artifacts` | 5 | — | — |
+| `PlatformError` | `app.core.errors` | 5 | — | — |
+| `ChildEnvelope` | `app.execution.child_run` | 6 | — | — |
+| `Claim` | `app.execution.child_run` | 3 | — | — |
+| `SpawnedChild` | `app.execution.child_run` | 4 | — | — |
+| `ToolOutcome` | `app.execution.outbox` | 7 | — | — |
+| `LogicalAction` | `app.execution.state_machine` | 9 | 是 | — |
+| `Chunk` | `app.knowledge.retrieval` | 9 | 是 | 是 |
+| `ScoredChunk` | `app.knowledge.retrieval` | 2 | — | — |
+| `ComponentVerdict` | `app.learning.evidence` | 7 | — | — |
+| `EvidenceCorrection` | `app.learning.evidence` | 6 | — | — |
+| `EvidenceEvent` | `app.learning.evidence` | 11 | 是 | — |
+| `ComponentMastery` | `app.learning.projector` | 7 | — | — |
+| `MasteryProjection` | `app.learning.projector` | 6 | — | — |
+| `PlatformState` | `app.main` | 11 | — | — |
+| `ExecutorCapabilities` | `app.policy.gateway` | 1 | — | — |
+| `PolicyDecision` | `app.policy.gateway` | 7 | — | — |
+| `PolicyInput` | `app.policy.gateway` | 16 | 是 | — |
+| `Endorsement` | `app.policy.taint` | 10 | — | — |
+| `TaintedValue` | `app.policy.taint` | 4 | — | — |
+| `CapabilityToken` | `app.policy.token` | 15 | 是 | — |
+| `TokenIssuer` | `app.policy.token` | 1 | — | — |
+| `NodeSpec` | `app.registry.models` | 16 | — | — |
+| `ToolSpec` | `app.registry.models` | 15 | — | — |
+| `TenantContext` | `app.tenancy.context` | 3 | 是 | — |
+| `NodeContext` | `app.workflow.context` | 4 | — | — |
+| `InteractionRequest` | `app.workflow.runtime` | 8 | 是 | 是 |
+| `InteractionResult` | `app.workflow.runtime` | 10 | — | — |
+
+合计 31 个实体。
 <!-- END GENERATED -->
 
 ## 2. 手写区 · 不可协商的数据库约束
@@ -45,17 +84,18 @@
 | AuditIndex | 项目级 | 只存索引与引用，正文在独立 sink |
 | LearningProject 之外的跨项目能力引用 | **用户级** | 不得使项目查询自动扩大范围 |
 
-## 4. 待填充的生成脚本约定
+## 4. 生成脚本约定（已实现）
 
 | 项 | 约定 |
 |---|---|
-| 脚本路径 | `tools/skills/gen_sql_schema.py` |
-| 输入 | `alembic/versions/**`、`backend/app/**/models.py` |
-| 输出 | 本文件第 1 节替换内容（表/列/类型/约束/索引/RLS/迁移链） |
-| 排序 | 表名升序、列按定义顺序，保证导出稳定可比对 |
-| `source_hash` | 全部输入文件内容按路径排序后的 SHA-256 |
-| CI | `--check` 模式：导出结果与本区不一致则退出码非零 |
-| 禁止 | 生成区出现任何人工编辑内容；CI 检测到即失败 |
+| 脚本 | `tools/skills/gen_contracts.py --target sql-schema` |
+| 当前输入 | `backend/app/**` 的 dataclass 定义（AST 扫描，不 import，无副作用） |
+| **目标输入** | `alembic/versions/**` —— 迁移落地后**必须替换**，届时导出真正的 DDL |
+| 输出 | 本文件第 1 节生成区（实体、模块、字段数、是否含租户/项目列） |
+| 排序 | 按模块名、类名排序，保证导出稳定可比对 |
+| `source_hash` | 输入文件按路径排序后内容的 SHA-256 |
+| CI | `--check` 重新渲染并与文件比对（不只看哈希，避免手改内容绕过） |
+| 禁止 | 生成区出现人工编辑内容 |
 
 ## 5. 手写区 · 常见坑
 

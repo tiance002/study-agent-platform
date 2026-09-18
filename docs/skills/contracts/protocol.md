@@ -2,13 +2,74 @@
 
 > `skill_id: protocol` | version: 0 | expiry: 2027-03-01 | owner: 待指派
 > 权威来源：`specs/2026-09-17-03-policy-tools-and-execution.md`、`02-routing-retrieval-and-quality.md`、总体设计 §6.2
-> **设计期版本：生成脚本尚不存在，全文属手写区。** 实施时按第 5 节约定填充。
+> **生成区已启用**：由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI、错误码枚举与 node 定义导出，并参与 CI 一致性校验。
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=openapi+pydantic+node_registry, source_hash=PENDING, generated_at=PENDING -->
-> 待实施后导出：OpenAPI 路径与方法、请求/响应 schema、SSE 事件类型、错误码枚举、typed node 输入输出 schema、状态机转移表。
-> CI 校验：导出结果与本区不一致即构建失败。
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:d19444e2a24d6472895a855e0cf6414f302132c7e2909b44d95db6e0c860185d, generated_at=2026-09-18T05:46:26Z -->
+> 生成时间：2026-09-18T05:46:26Z
+
+> 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
+
+### HTTP 接口
+
+| 路径 | 方法 | 说明 |
+|---|---|---|
+| `/healthz` | GET | Healthz |
+| `/projects/{project_id}/audit` | GET | Audit View |
+| `/projects/{project_id}/budget` | GET | Budget View |
+| `/projects/{project_id}/interactions` | POST | Interact |
+| `/projects/{project_id}/mastery` | GET | Mastery |
+| `/projects/{project_id}/sources` | POST | Ingest |
+| `/registry` | GET | Registry View |
+
+### 稳定错误码
+
+共 32 个，一经发布不得改变语义，只能追加。
+
+| 错误码 |
+|---|
+| `AUDIT_SINK_UNAVAILABLE` |
+| `AUTH_REQUIRED` |
+| `BUDGET_EXCEEDED` |
+| `BUDGET_RESERVATION_FAILED` |
+| `BUDGET_TREE_INVALID` |
+| `CAPABILITY_ESCALATION_DENIED` |
+| `CAPABILITY_NOT_HELD` |
+| `CHILD_RUN_AUTHORITY_ESCALATION` |
+| `CHILD_RUN_DEPTH_EXCEEDED` |
+| `CHILD_RUN_ENVELOPE_INVALID` |
+| `CROSS_PROJECT_DENIED` |
+| `CROSS_TENANT_DENIED` |
+| `ENDORSEMENT_EXPIRED` |
+| `ENDORSEMENT_REPLAY_DENIED` |
+| `ENDORSEMENT_SINK_MISMATCH` |
+| `EVIDENCE_IMMUTABLE` |
+| `EVIDENCE_UNMAPPED` |
+| `IDEMPOTENCY_VIOLATION` |
+| `ILLEGAL_STATE_TRANSITION` |
+| `NODE_NOT_REGISTERED` |
+| `OBLIGATION_UNSUPPORTED` |
+| `PARAMS_INVALID` |
+| `POLICY_DENIED` |
+| `POLICY_GATEWAY_UNAVAILABLE` |
+| `PROJECTION_WRITE_DENIED` |
+| `RECONCILIATION_REQUIRED` |
+| `TAINT_REQUIRES_ENDORSEMENT` |
+| `TENANT_CONTEXT_MISSING` |
+| `TOOL_DECLARATION_INVALID` |
+| `TOOL_INTENT_CONFLICT` |
+| `TOOL_NOT_ALLOWED_FOR_NODE` |
+| `TOOL_NOT_REGISTERED` |
+
+### typed node 输入输出 schema
+
+| node | 输入 schema | 输出 schema | 最低档位 |
+|---|---|---|---|
+| `diagnose_prerequisites` | `DiagnoseIn/v1` | `DiagnoseOut/v1` | L0 |
+| `intake_goal` | `IntakeGoalIn/v1` | `IntakeGoalOut/v1` | L2 |
+| `retrieve_material` | `RetrieveIn/v1` | `RetrieveOut/v1` | L0 |
+| `validate_and_record` | `ValidateIn/v1` | `ValidateOut/v1` | L0 |
 <!-- END GENERATED -->
 
 ## 2. 手写区 · 执行状态机（唯一权威转移表）
@@ -57,16 +118,19 @@ planned → intent_persisted → dispatched
 
 **为什么顺序不能换：** 第 5 步若在第 6 步之前不成立，会出现"先用昂贵模型、再发现没权限"；第 3 步若在第 4 步之后，会出现"解析失败却已占用预算"。
 
-## 5. 待填充的生成脚本约定
+## 5. 生成脚本约定（已实现）
 
 | 项 | 约定 |
 |---|---|
-| 脚本路径 | `tools/skills/gen_protocol.py` |
-| 输入 | `backend/app/api/**`、`backend/app/**/schemas.py`、`backend/app/workflow/nodes/**` |
-| 输出 | 本文件第 1 节替换内容 |
+| 脚本 | `tools/skills/gen_contracts.py --target protocol` |
+| 输入 | `backend/app/api/**`、`backend/app/core/errors.py`、`backend/app/workflow/catalog.py` |
+| 输出 | 本文件第 1 节生成区（HTTP 路径、稳定错误码、node 输入输出 schema） |
 | `source_hash` | 输入文件按路径排序后内容的 SHA-256 |
-| CI | `--check` 模式比对，不一致即失败 |
+| CI | `--check` 重新渲染并与文件比对（不只看哈希） |
 | 禁止 | 生成区出现人工编辑内容 |
+
+**已知局限：** 当前导出的是「有哪些路径/错误码/node schema」，**不包含**请求体字段级的 schema 细节。
+字段级契约应随 Pydantic 模型导出补齐 —— 那属于实施期的增量工作。
 
 ## 6. 手写区 · 常见坑
 

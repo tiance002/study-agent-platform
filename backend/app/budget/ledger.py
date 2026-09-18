@@ -70,10 +70,16 @@ class Reservation:
 
 @dataclass
 class Account:
-    """预算账户。树形结构：Tenant → User/Project → Run → Node。"""
+    """预算账户。树形结构：Tenant → User/Project → Run → Node。
+
+    `tenant_id` / `project_id` 是**结构化字段**，用于按租户与项目隔离查询。
+    靠解析 `account_id` 的命名前缀来过滤是不可靠的：前缀只是命名约定，不是约束。
+    """
 
     account_id: str
     parent_id: str | None
+    tenant_id: str | None = None
+    project_id: str | None = None
     limits: dict[str, int] = field(default_factory=_zero_map)
     completion_reserve: dict[str, int] = field(default_factory=_zero_map)
     reserved: dict[str, int] = field(default_factory=_zero_map)
@@ -92,6 +98,8 @@ class Account:
         return {
             "account_id": self.account_id,
             "parent_id": self.parent_id,
+            "tenant_id": self.tenant_id,
+            "project_id": self.project_id,
             "limits": dict(self.limits),
             "completion_reserve": dict(self.completion_reserve),
             "reserved": dict(self.reserved),
@@ -115,19 +123,28 @@ class BudgetLedger:
         account_id: str,
         *,
         parent_id: str | None = None,
+        tenant_id: str | None = None,
+        project_id: str | None = None,
         limits: dict[str, int] | None = None,
         completion_reserve: dict[str, int] | None = None,
     ) -> Account:
         if account_id in self._accounts:
             raise deny(ErrorCode.BUDGET_TREE_INVALID, f"账户已存在：{account_id}")
-        if parent_id is not None and parent_id not in self._accounts:
-            raise deny(
-                ErrorCode.BUDGET_TREE_INVALID,
-                f"父账户不存在：{parent_id}；预算树必须自顶向下建立",
-            )
+        if parent_id is not None:
+            parent = self._accounts.get(parent_id)
+            if parent is None:
+                raise deny(
+                    ErrorCode.BUDGET_TREE_INVALID,
+                    f"父账户不存在：{parent_id}；预算树必须自顶向下建立",
+                )
+            # 子账户**继承**父账户的租户/项目：调用方漏传时账目也不会脱离隔离范围。
+            tenant_id = tenant_id or parent.tenant_id
+            project_id = project_id or parent.project_id
         account = Account(
             account_id=account_id,
             parent_id=parent_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
             limits=dict(limits or {}),
             completion_reserve=dict(completion_reserve or {}),
         )
@@ -258,10 +275,13 @@ class BudgetLedger:
         grants: dict[str, int],
         *,
         child_completion_reserve: dict[str, int] | None = None,
+        tenant_id: str | None = None,
+        project_id: str | None = None,
     ) -> Account:
         """从父账户原子预留并开立子账户。
 
         子账户的额度**只能**来自这次授予；父账户剩余额度对子账户不可见。
+        租户/项目缺省时继承父账户；语义上不属于父账户的（如用户级账户）必须显式传入。
         """
         if child_id in self._accounts:
             raise deny(ErrorCode.BUDGET_TREE_INVALID, f"子账户已存在：{child_id}")
@@ -270,6 +290,8 @@ class BudgetLedger:
         return self.open_account(
             child_id,
             parent_id=parent_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
             limits=grants,
             completion_reserve=child_completion_reserve,
         )
@@ -345,6 +367,23 @@ class BudgetLedger:
             for r in self._reservations.values()
             if r.kind is ReservationKind.GRANT and r.state is ReservationState.HELD
         )
+
+    def reservations_scoped(
+        self, *, tenant_id: str, project_id: str | None = None
+    ) -> tuple[Reservation, ...]:
+        """按租户（可选项目）过滤的未结调用预留。
+
+        先取到账户再比对结构化字段，而不是解析 `account_id` 的命名前缀。
+        """
+        scoped: list[Reservation] = []
+        for reservation in self.open_reservations():
+            account = self._accounts.get(reservation.account_id)
+            if account is None or account.tenant_id != tenant_id:
+                continue
+            if project_id is not None and account.project_id != project_id:
+                continue
+            scoped.append(reservation)
+        return tuple(scoped)
 
     def exposure(self, dimension: str) -> int:
         """未结风险敞口：所有未结算预留之和。"""

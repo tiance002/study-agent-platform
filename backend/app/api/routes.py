@@ -14,7 +14,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 from app.audit.sink import RiskLevel
-from app.core.errors import ErrorCode, PlatformError
+from app.core.errors import ErrorCode, PlatformError, deny
 from app.core.ids import new_request_id
 from app.knowledge.retrieval import Chunk
 from app.policy.taint import TaintSource
@@ -46,6 +46,33 @@ class IngestBody(BaseModel):
 
 def _state(request: Request):
     return request.app.state.platform
+
+
+def _resolve_project_context(
+    *,
+    path_project_id: str,
+    body_project_id: str | None,
+    tenant_id: str,
+    principal_id: str,
+) -> TenantContext:
+    """解析并校验项目上下文。
+
+    **路径中的项目 ID 是权威来源。** 请求体若也携带项目 ID，必须与路径一致；
+    不一致说明客户端正在用 A 项目的路径操作 B 项目的数据，此时**直接拒绝**，
+    而不是「以某一方为准」—— 后者会让项目边界变成可协商的，等于没有边界。
+    """
+    if body_project_id is not None and body_project_id != path_project_id:
+        raise deny(
+            ErrorCode.CROSS_PROJECT_DENIED,
+            "请求体中的项目与请求路径不一致",
+            path_project_id=path_project_id,
+            body_project_id=body_project_id,
+        )
+    return TenantContext(
+        tenant_id=tenant_id,
+        principal_id=principal_id,
+        project_id=path_project_id,
+    )
 
 
 @router.get("/healthz")
@@ -104,20 +131,22 @@ def registry_view(request: Request) -> dict:
 
 @router.post("/projects/{project_id}/sources")
 def ingest(request: Request, project_id: str, body: IngestBody) -> dict:
-    """摄取资料片段。写入必须携带租户上下文。"""
+    """摄取资料片段。写入必须携带租户上下文，且项目以路径为准。"""
     state = _state(request)
-    context = TenantContext(
+    context = _resolve_project_context(
+        path_project_id=project_id,
+        body_project_id=body.learning_project_id,
         tenant_id=body.tenant_id,
         principal_id="ingestion",
-        project_id=body.learning_project_id,
     )
+    scoped_project = context.require_project()
     created = []
     with tenant_scope(context):
         for index, text in enumerate(body.chunks):
             chunk = Chunk(
                 chunk_id=f"{body.source_id}#{index}",
-                tenant_id=body.tenant_id,
-                learning_project_id=body.learning_project_id,
+                tenant_id=context.tenant_id,
+                learning_project_id=scoped_project,
                 source_id=body.source_id,
                 span=(index * 100, index * 100 + len(text)),
                 text=text,
@@ -129,6 +158,8 @@ def ingest(request: Request, project_id: str, body: IngestBody) -> dict:
                 "source_ingested",
                 {"source_id": body.source_id, "chunk_id": chunk.chunk_id},
                 risk=RiskLevel.LOW,
+                tenant_id=context.tenant_id,
+                project_id=scoped_project,
             )
     return {"project_id": project_id, "ingested": created}
 
@@ -137,12 +168,18 @@ def ingest(request: Request, project_id: str, body: IngestBody) -> dict:
 def interact(request: Request, project_id: str, body: InteractionBody) -> dict:
     """执行一次交互。node 必须已注册，否则拒绝且不留预算。"""
     state = _state(request)
+    context = _resolve_project_context(
+        path_project_id=project_id,
+        body_project_id=body.learning_project_id,
+        tenant_id=body.tenant_id,
+        principal_id=body.principal_id,
+    )
     result = state.runtime.run(
         InteractionRequest(
             request_id=new_request_id(),
-            tenant_id=body.tenant_id,
-            principal_id=body.principal_id,
-            learning_project_id=body.learning_project_id,
+            tenant_id=context.tenant_id,
+            principal_id=context.principal_id,
+            learning_project_id=context.require_project(),
             node_id=body.node_id,
             user_input=body.user_input,
             params=body.params,
@@ -163,22 +200,42 @@ def mastery(request: Request, project_id: str, tenant_id: str) -> dict:
 
 
 @router.get("/projects/{project_id}/audit")
-def audit_view(request: Request, project_id: str) -> dict:
-    """审计链校验。应用只有读与追加两种能力，没有删除。"""
+def audit_view(request: Request, project_id: str, tenant_id: str) -> dict:
+    """审计链校验。
+
+    记录**按租户与项目过滤**：项目接口不该看到其他项目乃至其他租户的审计轨迹。
+    `chain_valid` 是**全局**属性（哈希链是单条链），它反映整个 sink 的完整性，
+    而不是本次过滤后子集的完整性 —— 返回里显式标注，避免被误读。
+    """
     state = _state(request)
-    records = state.audit.read_all()
+    context = TenantContext(tenant_id=tenant_id, principal_id="auditor", project_id=project_id)
+    with tenant_scope(context):
+        records = state.audit.read_scoped(tenant_id=tenant_id, project_id=project_id)
     return {
         "records": len(records),
         "chain_valid": state.audit.verify_chain(),
+        "chain_scope": "global",
         "buffered_low_risk": state.audit.buffered_count,
         "tail": records[-5:],
     }
 
 
 @router.get("/projects/{project_id}/budget")
-def budget_view(request: Request, project_id: str) -> dict:
-    """预算与未结敞口。`unknown` 动作的敞口必须可见。"""
+def budget_view(request: Request, project_id: str, tenant_id: str) -> dict:
+    """预算与未结敞口，**按租户与项目过滤**。`unknown` 动作的敞口必须可见。
+
+    不过滤的话，任意项目路径都能读到进程内全部预留与待对账动作 ——
+    这既是隔离缺陷，也是信息泄露（能看出别人在跑什么、花多少）。
+    """
     state = _state(request)
+    context = TenantContext(tenant_id=tenant_id, principal_id="auditor", project_id=project_id)
+    with tenant_scope(context):
+        reservations = state.ledger.reservations_scoped(
+            tenant_id=tenant_id, project_id=project_id
+        )
+        pending = state.machine.actions_needing_reconciliation(
+            tenant_id=tenant_id, project_id=project_id
+        )
     return {
         "open_reservations": [
             {
@@ -188,11 +245,9 @@ def budget_view(request: Request, project_id: str) -> dict:
                 "amount": r.amount,
                 "state": str(r.state),
             }
-            for r in state.ledger.open_reservations()
+            for r in reservations
         ],
-        "needs_reconciliation": [
-            action.to_dict() for action in state.machine.actions_needing_reconciliation()
-        ],
+        "needs_reconciliation": [action.to_dict() for action in pending],
     }
 
 

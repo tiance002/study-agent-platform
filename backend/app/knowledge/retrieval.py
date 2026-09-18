@@ -98,6 +98,23 @@ class ChunkIndex:
         scored.sort(key=lambda item: (-item.score, item.chunk.chunk_id))
         return scored[:limit]
 
+    def read_span(self, source_id: str, span: tuple[int, int]) -> Chunk | None:
+        """按 `source_id` + `span` 精确回读。
+
+        **租户与项目过滤在这里强制**，调用方不需要、也不应该自己判断作用域。
+        把这段逻辑留给调用方，等于把隔离交给"记得写"——迟早会漏。
+        """
+        context = current()
+        project_id = context.require_project()
+        for chunk in self._chunks:
+            if chunk.tenant_id != context.tenant_id:
+                continue
+            if chunk.learning_project_id != project_id:
+                continue
+            if chunk.source_id == source_id and tuple(chunk.span) == tuple(span):
+                return chunk
+        return None
+
 
 def _tokenize(query: str) -> list[str]:
     """极简分词：按空白与非字母数字切分。

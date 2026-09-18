@@ -39,6 +39,8 @@
 
 ### 任务 1：工程骨架与模块门禁
 
+**状态：** 部分完成 —— 目录结构、import 方向门（含禁止 L4 横向互调）、CI 的测试与密钥检查已就绪；schema 兼容门、依赖许可证扫描、分模块 schema 版本未实现。
+
 **文件：** 创建 `backend/app/`、`frontend/`、`tests/`、`alembic/`、`infra/`；修改 CI 配置加入 import 方向、schema 兼容和 lint/type 门禁。
 
 **步骤：**
@@ -52,6 +54,8 @@
 
 ### 任务 2：租户隔离、密钥和数据治理底座
 
+**状态：** 部分完成 —— 租户/项目上下文强制（应用层）与跨租户拒绝测试已实现；PostgreSQL + RLS、KMS/Secret Manager、数据谱系与 DSR 字段级擦除未实现。
+
 **文件：** `backend/app/identity/`、`backend/app/privacy/`、`backend/app/crypto/`、`alembic/versions/`、`tests/isolation/`、`infra/kms/`。
 
 **步骤：**
@@ -64,6 +68,8 @@
 **退出门：** 租户 A 无法读写租户 B；KMS 故障对新写入 fail-closed；恢复测试能证明删除后的投影仍可重建。
 
 ### 任务 3：证据、assessment 和掌握投影
+
+**状态：** 大部分完成 —— 证据模型与组件级四维裁决、`projection_input_set_hash`、顺序无关回放、Projector 唯一写入者、correction 链、confidence 四档均已实现；graph migration dry-run 与 `MasteryPresentedEvent` 未实现。数据库层的禁 UPDATE/DELETE 约束依赖 PostgreSQL，当前由接口层面保证。
 
 **文件：** `backend/app/learning/contracts.py`、`evidence.py`、`corrections.py`、`projector.py`、`graph_migration.py`、`tests/learning/`。
 
@@ -79,6 +85,8 @@
 
 ### 任务 4：知识摄取、taint 和检索质量
 
+**状态：** 少量完成 —— 片段级 taint、sink-specific endorsement、检索的租户/项目内过滤、精确回读的作用域强制已实现；Fetcher 与 Package Proxy（含 SSRF 防护）、中文分词、pgvector 混合检索、索引与词典版本化未实现。
+
 **文件：** `backend/app/knowledge/`、`backend/app/egress/fetcher.py`、`backend/app/egress/package_proxy.py`、`tests/knowledge/`、`tests/security/test_egress.py`。
 
 **步骤：**
@@ -92,6 +100,8 @@
 **退出门：** SSRF、DNS rebinding、解压炸弹、路径逃逸和依赖外传测试均拒绝；检索结果在数据库层强制项目过滤；索引可由版本化源重新构建。
 
 ### 任务 5：工作流、预算、策略和外部执行
+
+**状态：** 大部分完成 —— typed node registry、capability token（只减不增）、撤销 epoch、树形预算与原子预留、额度回收、intent→dispatch→outcome→对账、独立审计 sink（哈希链、无删除接口、fail-closed）均已实现，并有失败注入测试。确认 UI、持久化 outbox、durable task table 未实现（当前为内存适配器）。
 
 **文件：** `backend/app/workflow/`、`backend/app/policy/`、`backend/app/execution/`、`backend/app/audit/`、`tests/policy/`、`tests/execution/`。
 
@@ -107,6 +117,8 @@
 
 ### 任务 6：模型路由、验证器与教学工作流
 
+**状态：** 少量完成 —— L/A/D 轴与 obligation 支持性校验、确定性契约验证、证据充分性判定已实现；prompt/model/retrieval 组合 registry、L1 准入校准、risk-coverage、canary、assessment 全流程与近/远迁移评测未实现。
+
 **文件：** `backend/app/routing/`、`backend/app/validators/`、`backend/app/prompts/`、`backend/app/teaching/`、`tests/routing/`、`tests/evaluation/`。
 
 **步骤：**
@@ -119,6 +131,8 @@
 **退出门：** 冻结数据集上风险上置信界满足 node 的 epsilon 后才优化 coverage；模型升级触发阈值重标定；不输出未经统计门槛支持的概率数值。
 
 ### 任务 7：前端学习与安全体验
+
+**状态：** 未开始（仅有单页演示）—— 演示页覆盖摄取、交互、注册表、掌握、审计、预算六个入口，用于人工观察边界行为；React 应用、确认弹窗、证据解释、无障碍（WCAG 2.2 AA）与端到端测试均未实现。
 
 **文件：** `frontend/src/features/projects/`、`sessions/`、`assessments/`、`evidence/`、`confirmations/`、`support/`、`tests/e2e/`。
 
@@ -134,6 +148,8 @@
 
 ### 任务 8：可观测性、容量、故障演练和发布
 
+**状态：** 未开始 —— OTel 链路、容量压测、故障注入演练、canary 与自动回滚、ADR 复审记录均未实现。CI 目前有三道机械门（测试、manifest、契约一致性）与基础密钥检查，尚不含类型检查与依赖许可证扫描。
+
 **文件：** `backend/app/observability/`、`infra/load/`、`infra/chaos/`、`runbooks/`、`tests/release/`、`docs/adr/`。
 
 **步骤：**
@@ -147,6 +163,10 @@
 **退出门：** 首发规模与目标规模的容量假设有压测证据；所有故障注入动作符合矩阵；回滚演练能在规定时限内恢复；批次一门、批次二门均由 CI/演练报告机械判定。
 
 ### 任务 9：技能契约、子任务运行时与工具边界
+
+**状态：** 已实现 —— manifest 校验（结构、依赖方向、体积预算、到期复审）、三份契约的生成与 `--check` 内容级一致性门、工具声明五字段与重叠门、单 node 工具数上限、工具按需加载、ChildRun（深度上限 1、权限派生、信封四规则校验）均已完成并有测试。
+
+**遗留：** `sql-schema` 的生成源当前是**代码层实体**（AST 扫描），待 alembic 迁移落地后必须替换为 DDL 导出；`protocol` 的生成区尚未覆盖请求体字段级 schema。
 
 **文件：** `docs/skills/`、`tools/skills/`、`backend/app/skills/`、`backend/app/execution/child_run.py`、`tests/skills/`、`tests/execution/test_child_run.py`。
 

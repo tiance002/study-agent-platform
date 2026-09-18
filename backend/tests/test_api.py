@@ -33,17 +33,17 @@ def _ingest(client) -> None:
     assert response.status_code == 200, response.text
 
 
-def _interact(client, node_id: str, **extra) -> dict:
+def _interact(client, node_id: str, *, project: str = PROJECT, **extra) -> dict:
     payload = {
         "tenant_id": TENANT,
         "principal_id": "user_demo",
-        "learning_project_id": PROJECT,
+        "learning_project_id": project,
         "node_id": node_id,
         "user_input": "Agent harness 怎么学",
         "params": {"targets": ["agent.harness"]},
     }
     payload.update(extra)
-    response = client.post(f"/projects/{PROJECT}/interactions", json=payload)
+    response = client.post(f"/projects/{project}/interactions", json=payload)
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -144,15 +144,17 @@ def test_mastery_projection_is_read_only_and_rebuildable(client):
 def test_audit_chain_stays_valid_after_requests(client):
     _ingest(client)
     _interact(client, "diagnose_prerequisites")
-    body = client.get(f"/projects/{PROJECT}/audit").json()
+    body = client.get(f"/projects/{PROJECT}/audit?tenant_id={TENANT}").json()
     assert body["records"] > 0
     assert body["chain_valid"] is True
+    # 链完整性是全局属性，返回里显式标注，避免被误读成"过滤后子集的完整性"
+    assert body["chain_scope"] == "global"
 
 
 def test_budget_leaks_no_open_reservations(client):
     """交互结束后不应留下未结的**调用**预留。"""
     _ingest(client)
     _interact(client, "diagnose_prerequisites")
-    body = client.get(f"/projects/{PROJECT}/budget").json()
+    body = client.get(f"/projects/{PROJECT}/budget?tenant_id={TENANT}").json()
     assert body["open_reservations"] == []
     assert body["needs_reconciliation"] == []
