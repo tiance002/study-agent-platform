@@ -39,7 +39,7 @@ WRITE_PARAMS = {
 
 def _ingest(client, headers, *, project: str = PROJECT) -> dict:
     response = client.post(
-        f"/projects/{project}/sources",
+        f"/projects/{project}/retrieval/chunks",
         json={
             "source_id": "src_1",
             "chunks": ["Agent harness 负责编排工具调用与循环退出条件", "异步与并发决定吞吐上限"],

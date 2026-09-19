@@ -191,9 +191,16 @@ def registry_view(request: Request) -> dict:
     }
 
 
-@router.post("/projects/{project_id}/sources")
+@router.post("/projects/{project_id}/retrieval/chunks")
 def ingest(request: Request, project_id: str, body: IngestBody) -> dict:
-    """摄取资料片段。归属由认证上下文与路径共同决定，请求体无权指定。"""
+    """【演示管线夹具】往检索索引塞 chunk。
+
+    ⚠️ 这**不是**产品语义的"资料登记"（那是 `product_routes.register_source`，
+    走 SourceRepository 与 0002 的 sources 表）。本端点服务的是检索演示节点
+    （retrieve_material 从内存 ChunkIndex 取内容），URL 从 /sources 迁来：
+    那个路径现在属于产品资料登记，两个语义不能共用一个 URL。
+    第 4 轮 RAG 落地时本夹具与演示节点一并退役。
+    """
     state = _state(request)
     _, context = _project_scope(request, project_id)
     scoped_project = context.require_project()

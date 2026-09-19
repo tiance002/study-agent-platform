@@ -120,7 +120,7 @@ def test_audit_api_is_scoped_to_authenticated_tenant(client, auth_headers):
     """
     headers = auth_headers()
     client.post(
-        f"/projects/{PROJECT}/sources",
+        f"/projects/{PROJECT}/retrieval/chunks",
         json={"source_id": "s1", "chunks": ["内容"]},
         headers=headers,
     )

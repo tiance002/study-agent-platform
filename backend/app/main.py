@@ -32,6 +32,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.api.auth_routes import router as auth_router
+from app.api.product_routes import router as product_router
 from app.api.projects_routes import router as projects_router
 from app.api.routes import error_response, router
 from app.audit.sink import AuditSink
@@ -46,6 +47,7 @@ from app.db.identity_store import (
     PostgresMembershipRepository,
     PostgresSessionRepository,
 )
+from app.db.product_store import PostgresProductRepository
 from app.db.rate_limit_store import PostgresRateLimiter
 from app.db.settings import DEFAULT_APP_DSN
 from app.deployment import DeploymentSettings
@@ -71,6 +73,8 @@ from app.learning.evidence import EvidenceLog
 from app.learning.projector import Projector
 from app.policy.gateway import PolicyGateway
 from app.policy.token import TokenIssuer
+from app.product.memory_store import InMemoryProductRepository
+from app.product.ports import ProductRepository
 from app.registry.registry import Registry
 from app.workflow.catalog import build_registry
 from app.workflow.runtime import InteractionRuntime
@@ -120,6 +124,8 @@ class PlatformState:
     # 装配遗漏必须在构造 PlatformState 时就报错，而不是等第一个请求 AttributeError。
     # （必填字段必须排在有默认值的字段之前 —— dataclass 的硬规则。）
     rate_limiter: RateLimiter
+    # 产品仓储（会话/消息/计划/资料）。必填同理：产品端点不能等第一个请求才暴露装配缺失。
+    products: ProductRepository
     #: 会话 cookie 的有效期（也是兑换出的数据库会话的过期时间）。
     session_ttl: timedelta = DEFAULT_SESSION_TTL
     #: 生产环境置 True（HTTPS-only cookie）。测试与本机开发保持 False：
@@ -199,6 +205,7 @@ def build_platform(
     session_store: SessionRepository
     invitations: InvitationRepository
     confirmations: ConfirmationRepository
+    products: ProductRepository
 
     if loaded.use_postgres:
         dsn = loaded.dsn or DEFAULT_APP_DSN
@@ -211,6 +218,7 @@ def build_platform(
         session_store = pg_sessions
         invitations = PostgresInvitationRepository(clock, dsn, sessions=pg_sessions)
         confirmations = PostgresConfirmationStore(dsn)
+        products = PostgresProductRepository(membership=membership, clock=clock, dsn=dsn)
         rate_limiter: RateLimiter = PostgresRateLimiter(
             limit=loaded.exchange_limit,
             window_seconds=loaded.exchange_window_seconds,
@@ -249,6 +257,7 @@ def build_platform(
             session_store=session_store,
             cookie_auth=cookie_auth,
             confirmations=confirmations,
+            products=products,
             session_ttl=loaded.session_ttl,
             cookie_secure=loaded.cookie_secure,
             rate_limiter=rate_limiter,
@@ -270,6 +279,7 @@ def build_platform(
     session_store = memory_sessions
     invitations = InMemoryInvitationRepository(clock=clock, sessions=memory_sessions)
     confirmations = ConfirmationStore()
+    products = InMemoryProductRepository(membership=membership)
     rate_limiter = InMemoryRateLimiter(
         limit=loaded.exchange_limit,
         window_seconds=loaded.exchange_window_seconds,
@@ -306,6 +316,7 @@ def build_platform(
         session_store=session_store,
         cookie_auth=cookie_auth,
         confirmations=confirmations,
+        products=products,
         session_ttl=loaded.session_ttl,
         cookie_secure=loaded.cookie_secure,
         rate_limiter=rate_limiter,
@@ -372,6 +383,7 @@ def create_app(*, platform: PlatformState | None = None) -> FastAPI:
     app.include_router(router)
     app.include_router(auth_router)
     app.include_router(projects_router)
+    app.include_router(product_router)
 
     @app.middleware("http")
     async def _bind_request_id(request: Request, call_next):

@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:d8a1583e7129544307f5359a8a6c73cbebbc1d26b6e52b6707472a16d5c59b08, generated_at=2026-09-19T13:02:11Z -->
-> 生成时间：2026-09-19T13:02:11Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:ccb3b5eb607d43e7ff4c1485d916f16dc33459fc5947fedd287c50ad791cce34, generated_at=2026-09-19T13:34:54Z -->
+> 生成时间：2026-09-19T13:34:54Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -27,9 +27,18 @@
 | `/projects/{project_id}/audit` | GET | Audit View |
 | `/projects/{project_id}/budget` | GET | Budget View |
 | `/projects/{project_id}/confirmations` | POST | Create Confirmation |
+| `/projects/{project_id}/conversations` | GET | List Conversations |
+| `/projects/{project_id}/conversations` | POST | Create Conversation |
+| `/projects/{project_id}/conversations/{conversation_id}/messages` | GET | List Messages |
+| `/projects/{project_id}/conversations/{conversation_id}/messages` | POST | Append Message |
 | `/projects/{project_id}/interactions` | POST | Interact |
 | `/projects/{project_id}/mastery` | GET | Mastery |
-| `/projects/{project_id}/sources` | POST | Ingest |
+| `/projects/{project_id}/plan` | GET | Current Plan |
+| `/projects/{project_id}/plan` | PUT | Replace Plan |
+| `/projects/{project_id}/plan/history` | GET | Plan History |
+| `/projects/{project_id}/retrieval/chunks` | POST | Ingest |
+| `/projects/{project_id}/sources` | GET | List Sources |
+| `/projects/{project_id}/sources` | POST | Register Source |
 | `/registry` | GET | Registry View |
 
 ### 稳定错误码
