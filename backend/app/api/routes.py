@@ -399,6 +399,18 @@ def error_response(exc: PlatformError):
         payload = public_error_payload(
             exc.code.value, exc.message, request_id=request_id
         )
+    elif exc.code is ErrorCode.IDEMPOTENCY_VIOLATION:
+        # 幂等键被复用于不同内容：409 —— 客户端要换 key，不是重新登录。
+        status = 409
+        payload = public_error_payload(
+            exc.code.value, exc.message, request_id=request_id
+        )
+    elif exc.code is ErrorCode.IDEMPOTENCY_VIOLATION:
+        # 幂等键被复用于不同内容：409 —— 客户端要换 key，不是重新登录。
+        status = 409
+        payload = public_error_payload(
+            exc.code.value, exc.message, request_id=request_id
+        )
     elif exc.code is ErrorCode.VERSION_CONFLICT:
         # 乐观锁冲突：409。404 会让客户端误判成权限问题去重新登录；
         # 412 语义上也贴切但极少用 —— 409 是编辑冲突的事实标准。

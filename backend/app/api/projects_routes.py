@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.ids import new_id
@@ -44,18 +45,28 @@ class ProjectUpdateBody(BaseModel):
     expected_version: int = Field(ge=1)
 
 
-@router.post("/projects", status_code=201)
-def create_project(request: Request, body: ProjectCreateBody) -> dict:
+@router.post("/projects", status_code=201, response_model=None)
+def create_project(request: Request, body: ProjectCreateBody) -> dict | JSONResponse:
     """创建学习项目。创建者立即获得访问权（同一行为，不可分）。"""
-    state = _state(request)
-    principal: Principal = _authenticate_and_tenant(request)
-    project = state.membership.create_project_for(
-        principal,
-        project_id=new_id("proj"),
-        name=body.name,
-        goal=body.goal,
-    )
-    return project.to_dict()
+    from app.api.http_idempotency import idempotent_write
+
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+        state = _state(request)
+        project = state.membership.create_project_for(
+            guard.principal,
+            project_id=new_id("proj"),
+            name=body.name,
+            goal=body.goal,
+        )
+        result = project.to_dict()
+        guard.complete(201, result)
+        return result
 
 
 @router.get("/projects")
@@ -75,8 +86,8 @@ def get_project(request: Request, project_id: str) -> dict:
     return state.membership.get(principal, project_id).to_dict()
 
 
-@router.patch("/projects/{project_id}")
-def update_project(request: Request, project_id: str, body: ProjectUpdateBody) -> dict:
+@router.patch("/projects/{project_id}", response_model=None)
+def update_project(request: Request, project_id: str, body: ProjectUpdateBody) -> dict | JSONResponse:
     """乐观锁更新。`name` / `goal` 至少提供一个 —— 全空等于没说要改什么。"""
     if body.name is None and body.goal is None:
         from app.core.errors import ErrorCode, deny
@@ -85,16 +96,26 @@ def update_project(request: Request, project_id: str, body: ProjectUpdateBody) -
             ErrorCode.PARAMS_INVALID,
             "name 与 goal 至少提供一个；空的更新请求不产生新版本",
         )
-    state = _state(request)
-    principal: Principal = _authenticate_and_tenant(request)
-    updated = state.membership.update(
-        principal,
-        project_id,
-        name=body.name,
-        goal=body.goal,
-        expected_version=body.expected_version,
-    )
-    return updated.to_dict()
+    from app.api.http_idempotency import idempotent_write
+
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+        state = _state(request)
+        updated = state.membership.update(
+            guard.principal,
+            project_id,
+            name=body.name,
+            goal=body.goal,
+            expected_version=body.expected_version,
+        )
+        result = updated.to_dict()
+        guard.complete(200, result)
+        return result
 
 
 def _authenticate_and_tenant(request: Request) -> Principal:

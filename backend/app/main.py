@@ -32,6 +32,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.api.auth_routes import router as auth_router
+from app.api.http_idempotency import (
+    HttpIdempotencyStore,
+    InMemoryHttpIdempotencyStore,
+)
 from app.api.product_routes import router as product_router
 from app.api.projects_routes import router as projects_router
 from app.api.routes import error_response, router
@@ -42,6 +46,7 @@ from app.core.errors import PlatformError
 from app.core.ids import new_request_id
 from app.core.request_context import bind_request_id, reset_request_id
 from app.db.confirmation_store import PostgresConfirmationStore
+from app.db.idempotency_store import PostgresHttpIdempotencyStore
 from app.db.identity_store import (
     PostgresInvitationRepository,
     PostgresMembershipRepository,
@@ -126,6 +131,8 @@ class PlatformState:
     rate_limiter: RateLimiter
     # 产品仓储（会话/消息/计划/资料）。必填同理：产品端点不能等第一个请求才暴露装配缺失。
     products: ProductRepository
+    # HTTP 命令幂等的存储。None = 幂等关闭（客户端不带 Idempotency-Key 时无感）。
+    http_idempotency: HttpIdempotencyStore | None = None
     #: 会话 cookie 的有效期（也是兑换出的数据库会话的过期时间）。
     session_ttl: timedelta = DEFAULT_SESSION_TTL
     #: 生产环境置 True（HTTPS-only cookie）。测试与本机开发保持 False：
@@ -206,6 +213,7 @@ def build_platform(
     invitations: InvitationRepository
     confirmations: ConfirmationRepository
     products: ProductRepository
+    http_idempotency: HttpIdempotencyStore | None
 
     if loaded.use_postgres:
         dsn = loaded.dsn or DEFAULT_APP_DSN
@@ -219,6 +227,7 @@ def build_platform(
         invitations = PostgresInvitationRepository(clock, dsn, sessions=pg_sessions)
         confirmations = PostgresConfirmationStore(dsn)
         products = PostgresProductRepository(membership=membership, clock=clock, dsn=dsn)
+        http_idempotency = PostgresHttpIdempotencyStore(dsn)
         rate_limiter: RateLimiter = PostgresRateLimiter(
             limit=loaded.exchange_limit,
             window_seconds=loaded.exchange_window_seconds,
@@ -258,6 +267,7 @@ def build_platform(
             cookie_auth=cookie_auth,
             confirmations=confirmations,
             products=products,
+            http_idempotency=http_idempotency,
             session_ttl=loaded.session_ttl,
             cookie_secure=loaded.cookie_secure,
             rate_limiter=rate_limiter,
@@ -280,6 +290,7 @@ def build_platform(
     invitations = InMemoryInvitationRepository(clock=clock, sessions=memory_sessions)
     confirmations = ConfirmationStore()
     products = InMemoryProductRepository(membership=membership)
+    http_idempotency = InMemoryHttpIdempotencyStore()
     rate_limiter = InMemoryRateLimiter(
         limit=loaded.exchange_limit,
         window_seconds=loaded.exchange_window_seconds,
@@ -317,6 +328,7 @@ def build_platform(
         cookie_auth=cookie_auth,
         confirmations=confirmations,
         products=products,
+        http_idempotency=http_idempotency,
         session_ttl=loaded.session_ttl,
         cookie_secure=loaded.cookie_secure,
         rate_limiter=rate_limiter,

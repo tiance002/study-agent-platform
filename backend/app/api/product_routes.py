@@ -96,15 +96,26 @@ class SourceBody(BaseModel):
 # ---------------------------------------------------------------- 会话与消息
 
 
-@router.post("/projects/{project_id}/conversations", status_code=201)
+@router.post("/projects/{project_id}/conversations", status_code=201, response_model=None)
 def create_conversation(
     request: Request, project_id: str, body: ConversationBody
-) -> dict:
-    state = _state(request)
-    conversation = state.products.create_conversation(
-        _actor(request), project_id, conversation_id=new_id("conv"), title=body.title
-    )
-    return conversation.to_dict()
+) -> dict | JSONResponse:
+    from app.api.http_idempotency import idempotent_write
+
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+        state = _state(request)
+        conversation = state.products.create_conversation(
+            guard.principal, project_id, conversation_id=new_id("conv"), title=body.title
+        )
+        result = conversation.to_dict()
+        guard.complete(201, result)
+        return result
 
 
 @router.get("/projects/{project_id}/conversations")
@@ -117,20 +128,32 @@ def list_conversations(request: Request, project_id: str) -> dict:
 @router.post(
     "/projects/{project_id}/conversations/{conversation_id}/messages",
     status_code=201,
+    response_model=None,
 )
 def append_message(
     request: Request, project_id: str, conversation_id: str, body: MessageBody
-) -> dict:
-    state = _state(request)
-    message = state.products.append_message(
-        _actor(request),
-        project_id,
-        conversation_id,
-        message_id=new_id("msg"),
-        role=body.role,
-        content=body.content,
-    )
-    return message.to_dict()
+) -> dict | JSONResponse:
+    from app.api.http_idempotency import idempotent_write
+
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+        state = _state(request)
+        message = state.products.append_message(
+            guard.principal,
+            project_id,
+            conversation_id,
+            message_id=new_id("msg"),
+            role=body.role,
+            content=body.content,
+        )
+        result = message.to_dict()
+        guard.complete(201, result)
+        return result
 
 
 @router.get("/projects/{project_id}/conversations/{conversation_id}/messages")
@@ -192,19 +215,31 @@ def _build_bundle(actor: Principal, project_id: str, body: PlanBody, *, now) -> 
     )
 
 
-@router.put("/projects/{project_id}/plan")
-def replace_plan(request: Request, project_id: str, body: PlanBody) -> dict:
+@router.put("/projects/{project_id}/plan", response_model=None)
+def replace_plan(request: Request, project_id: str, body: PlanBody) -> dict | JSONResponse:
     """整版替换：返回实现分配版本后的完整 bundle。"""
-    state = _state(request)
-    actor = _actor(request)
-    bundle = state.products.replace_plan(
-        actor, project_id, _build_bundle(actor, project_id, body, now=state.clock.now())
-    )
-    return {
-        "plan": bundle.plan.to_dict(),
-        "milestones": [m.to_dict() for m in bundle.milestones],
-        "tasks": [t.to_dict() for t in bundle.tasks],
-    }
+    from app.api.http_idempotency import idempotent_write
+
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+        state = _state(request)
+        bundle = state.products.replace_plan(
+            guard.principal,
+            project_id,
+            _build_bundle(guard.principal, project_id, body, now=state.clock.now()),
+        )
+        result = {
+            "plan": bundle.plan.to_dict(),
+            "milestones": [m.to_dict() for m in bundle.milestones],
+            "tasks": [t.to_dict() for t in bundle.tasks],
+        }
+        guard.complete(200, result)
+        return result
 
 
 @router.get("/projects/{project_id}/plan")
@@ -238,19 +273,29 @@ def _identity_hash(acquisition: dict) -> str:
     return f"sha256:{digest}"
 
 
-@router.post("/projects/{project_id}/sources", status_code=201)
+@router.post("/projects/{project_id}/sources", status_code=201, response_model=None)
 def register_source(request: Request, project_id: str, body: SourceBody) -> JSONResponse:
-    state = _state(request)
-    record = state.products.register_source(
-        _actor(request),
-        project_id,
-        source_id=new_id("src"),
-        display_name=body.display_name,
-        media_type=body.media_type,
-        identity_hash=_identity_hash(body.acquisition),
-        acquisition=body.acquisition,
-    )
-    return JSONResponse(status_code=201, content=record.to_dict())
+    from app.api.http_idempotency import idempotent_write
+
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+        state = _state(request)
+        record = state.products.register_source(
+            guard.principal,
+            project_id,
+            source_id=new_id("src"),
+            display_name=body.display_name,
+            media_type=body.media_type,
+            identity_hash=_identity_hash(body.acquisition),
+            acquisition=body.acquisition,
+        )
+        guard.complete(201, record.to_dict())
+        return JSONResponse(status_code=201, content=record.to_dict())
 
 
 @router.get("/projects/{project_id}/sources")

@@ -226,3 +226,19 @@ PostgreSQL 身份与产品仓储：`identity/ports.py`、`db/identity_store.py`�
 - **统一拒绝**：邀请的未知/过期/已消费/畸形共用 `INVITATION_INVALID` + 一句话 —— 区分原因等于泄露"token 存在过"。
 - **关键坑（实测）**：`INSERT ... RETURNING` 在 RLS 下要求新行**同时通过 SELECT 的 USING 策略**；`projects` 的 USING 是成员感知的，新项目没有授权行 → 创建者自己都"看不见"，RETURNING 稳定报 `InsufficientPrivilege`。无 RETURNING 的同一 INSERT 全部放行。已改由入参构造契约对象，并做反向验证（注入 RETURNING → 测试变红）。
 - **验收**：372 项测试全过（PG 组真实执行无 skip）；适配器契约 18 项（内存+PG 参数化）+ PG 重启恢复（新仓储实例看到同一份状态：消费不可重放、会话仍存活）；八道门禁全绿。
+## 第 2 轮：产品 API 与持久化闭环（2026-09-19，f30b05f / bd5db82 / 任务6）
+
+- **任务 4（f30b05f）项目 CRUD**：`create_project_for`（创建即授予，PG 同事务两条 INSERT）、
+  乐观锁 `update`（零行时区分 RLS 不可见 404 / 版本过期 409）、`VERSION_CONFLICT` 错误码 + 409 映射。
+- **任务 5（bd5db82）会话/消息/计划/资料**：seq 服务端分配（取号与 INSERT 同事务）；
+  `PUT /plan` 整版替换、版本 = max+1、UNIQUE (project_id, version) 兜底并发；资料按
+  identity_hash 幂等去重；全部 id 服务端生成。端口方法名带类型后缀解决多协议聚合冲突。
+  旧检索演示夹具让出 `/sources` 迁到 `/retrieval/chunks`（docstring 写明退役计划）。
+- **任务 6 HTTP 幂等持久化**：`api/http_idempotency.py` 单文件（协议 + 双适配器 + 守卫 +
+  PG 适配器）；claim-or-read 三态、失败释放、重放带 `X-Idempotent-Replay: true`、
+  VIOLATION 409 / IN_PROGRESS 可重试；6 个写端点接入；守卫是端点取身份的唯一入口。
+- **退出门验收**：PG 装配端到端脚本 8 步全过——登录→建项目（幂等重放）→消息 seq 1,2→
+  存计划→登记资料（去重）→**全新平台实例同一 cookie 仍有效**→消息/计划/资料完整→
+  退出后会话撤销、cookie 立即失效。442 项测试全过，八道门禁全绿。
+- **坑**：幂等 store 曾漏设 RLS 上下文（铁律 33 又犯）；测试脚本固定幂等键 + PG 缓存跨运行持久
+  → "上次运行的项目被重放回来"，键必须 per-run 随机。
