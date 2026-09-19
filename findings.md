@@ -105,6 +105,9 @@
 - 客户端命令幂等只有一个判定出口：`http_idempotency` 以 `(tenant_id, principal_id, command_scope, client_key)` 唯一定位命令，再用 `request_hash` 区分重放与改体冲突。业务表不保存或解释 `client_key`，其唯一约束只保护领域不变量。
 - 项目模型只有一个权威定义：将 `identity/membership.py` 的私有 `ProjectRecord` 升级为 `identity/models.py` 的 `LearningProject`，成员授权和产品服务共同使用；`product/models.py` 不再复制同一行。
 - 第一轮只记录资料元数据与 `registered_at`，不定义永远不会发生的 `processing`/`ready`。摄取任务、切块和状态机随第二轮真实处理管线一起引入。
+- Task 1 审查发现认证引导闭环缺失：邀请交换发生在身份建立前，不能先设置租户 RLS 上下文；且邀请未绑定 invitee 时，交换接口只能接受客户端自报主体。下一任务需用 `0003_auth_bootstrap` 把邀请绑定预建主体，并通过最小授权的 `SECURITY DEFINER` 函数原子消费邀请与创建会话。
+- 仅含 `session_id` 的所谓 opaque Cookie 无法在 principal-scoped RLS 前读取会话行。Cookie 应包含签名保护的 session/tenant/principal 声明，先验签、再设置上下文、最后查数据库撤销状态；声明可见不等于可篡改。
+- `0001`/`0002` 的多张表分别保存 `tenant_id` 与 `project_id`/`principal_id`，但外键只引用单列 ID，数据库不能证明父对象属于同一租户。RLS 只检查子行字段，不能替代关系完整性；`0003` 必须补 `(tenant_id, project_id)`、`(tenant_id, principal_id)` 组合外键及越租户负向测试。
 
 ## 2026-09-19 · 实现期发现（第一轮任务 1）
 

@@ -87,6 +87,9 @@ PostgreSQL 身份与产品仓储：`identity/ports.py`、`db/identity_store.py`�
 - 本轮计划已形成，尚未修改业务代码；下一步从任务 1 的产品契约与 `0002` 迁移开始。
 - 根据计划审查修正幂等冲突：删除业务表 `(tenant_id, project_id, client_key)` 语义，将客户端命令判定统一收口到 `http_idempotency`；同时把幂等仓储从原 Task 6 提前到 Task 4，消除项目 API 的前置依赖倒置。
 - 根据第二轮计划审查消除重复模型与虚假状态：项目统一为 `identity.models.LearningProject`；第一轮资料仅登记元数据，不预埋 `processing`/`ready`，摄取状态机推迟到第二轮真实管线。
+- Task 1 已由提交 `c82bf95`、`ea0cf8a`、`9e195f8` 实现并自查；当前工作树干净。全量 pytest、ruff、mypy 与契约一致性通过，但 15 个 PostgreSQL 条件测试在数据库未运行时跳过。
+- 实施前审查发现邀请/会话的 RLS 引导缺口，已将下一任务改为先落 `0003_auth_bootstrap`，再实现 PostgreSQL 仓储；没有提前进入模型、RAG 或前端。
+- 同轮审查发现租户列与单列外键可产生跨租户关系不一致；下一迁移同时补组合外键，并以应用角色直接 SQL 负向测试作为退出门。
 
 ## 2026-09-18 · 首版实现与推送
 

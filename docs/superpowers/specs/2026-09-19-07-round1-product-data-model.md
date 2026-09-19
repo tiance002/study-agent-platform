@@ -117,8 +117,12 @@ Task 6 又要求 `http_idempotency` 统一承担命令幂等 —— 同一个重
 | `issued_at` / `expires_at` | timestamptz | NOT NULL，`CHECK (expires_at > issued_at)` |
 | `revoked_at` | timestamptz | 可空（退出即写入） |
 
-- cookie 里放**引用了 `session_id` 的签名不透明值**，不放身份字段；
-  身份每次从**库里这一行**读 —— 撤销才能立刻生效。
+- cookie 放**签名保护的声明载荷**：`session_id` + `tenant_id` + `principal_id` +
+  签发/到期时间。验签通过后才可信这些字段，用它们设置 RLS 上下文，
+  再查 `user_sessions` 的撤销状态。
+  ⚠️ 不再称它"不透明值" —— 它对持有者是**可见但防篡改**的，两种说法差一个威胁模型：
+  "不透明"暗示内容不可见，而这里的关键是**不可伪造**，不是不可读。
+  载荷里不放身份之外的任何敏感字段（没有角色、没有邮箱）。
 
 #### `conversations` — 连续问答的容器 · 项目级
 
@@ -455,3 +459,56 @@ CREATE INDEX sources_project_idx ON sources (project_id, registered_at);
 
 隔离级别不再是一个词，而是 `租户` / `租户+项目` / `租户+主体`。
 一个笼统的"租户级"正是漏掉主体维度的原因：它看起来已经描述完了。
+
+---
+
+## 10. 审查第二轮补充（`0003_auth_bootstrap`）
+
+第二轮审查实测确认两个漏洞、一个流程要求，`0003` 逐一落地：
+
+### 10.1 跨租户组合引用没人拦（已修）
+
+各表的 `project_id` 外键是单列 —— 审查实测「`tenant X` 的行指向 `tenant Y`
+的项目」超级用户与应用角色**都能插进去**。RLS 是读的边界，替代不了写的组合完整性。
+
+修法：`principals` / `projects` 加 `(tenant_id, …)` 组合唯一键，
+全部指向它们的单列外键替换为组合外键（含 `http_idempotency` 的
+`(tenant_id, principal_id)` 与 `(tenant_id, project_id)`）。
+组合外键下 NULL 不受约束，所以 `project_id` 可空的幂等表无需特判。
+
+⚠️ **测试位置揭示了外键的真实防线**：项目级表的 `WITH CHECK` 同时校验
+租户与项目维度，跨租户组合会被 RLS **先**拦下——轮不到外键。
+组合外键真正的防线在 RLS 看不见的两处：超级用户/运维连接，
+以及只有"租户+主体"策略的 `http_idempotency`。测试按这两个场景写，
+并由反向验证证明：拆掉外键后错配组合**真的能插进去**。
+
+### 10.2 邀请兑换没有引导通道（已修）
+
+兑换发生在**还没有任何身份**的时刻，而邀请表受租户 RLS 保护——
+实测 `study_app` 无上下文查它是 0 行；且邀请没绑定被邀请主体，
+只能让客户端自报"我是谁"。
+
+修法：
+- 邀请**签发时**绑定 `invitee_principal_id`（NOT NULL + 组合外键）；
+- `public.exchange_invitation(token_hash, session_id, expires_at)` 以
+  `SECURITY DEFINER` 原子完成「消费邀请 + 建会话」，
+  **不收租户、不收主体** —— 客户端无身份可自报。
+- 并发兑换由行锁串行化，测试验证 6 路并发恰好产生 1 条会话。
+
+**权限面**（这是它安全的原因）：只收哈希、只做两件事、`SET search_path`、
+REVOKE PUBLIC / 只 GRANT `study_app` —— 应用能"调用它"，
+拿不到"无上下文读表"的能力。
+⚠️ 运维前提：函数 owner 必须拥有表且能绕过 FORCE RLS（本机为超级用户），
+否则兑换被静默拦成 0 行。
+
+### 10.3 Cookie 载荷修正（见 4.1 的修订）
+
+`user_sessions` 加了主体维度后，只有 `session_id` 无法建立查询上下文。
+cookie 改为签名保护的声明载荷（`session_id` + `tenant_id` + `principal_id` +
+时间），验签 → 设置上下文 → 查撤销。**不再称"不透明"** ——
+它可见但防篡改，两种说法差一个威胁模型。
+
+### 10.4 退出门新增流程要求
+
+**PostgreSQL 组的测试被 skip 就等于这一关没过**：任务 2 起的每次退出门，
+都必须实际启动数据库并确认对应测试真实执行（不看"通过数"，看"执行数"）。

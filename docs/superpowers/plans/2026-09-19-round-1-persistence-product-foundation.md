@@ -31,6 +31,7 @@
 - `backend/app/product/ports.py`: product repository protocols used by API/application services.
 - `backend/app/product/service.py`: product commands and queries; no SQL and no HTTP types.
 - `backend/app/db/identity_store.py`: PostgreSQL membership, invitation, and session adapter.
+- `alembic/versions/0003_auth_bootstrap.py`: invitee binding and the narrowly granted authentication bootstrap function.
 - `backend/app/db/product_store.py`: PostgreSQL product-state adapter.
 - `backend/app/db/idempotency_store.py`: atomic claim/result persistence for HTTP commands.
 - `backend/app/identity/cookie_auth.py`: cookie extraction and signed-session authentication.
@@ -84,6 +85,7 @@
 - Create: `backend/app/db/product_store.py`
 - Create: `backend/app/product/memory_store.py`
 - Create: `backend/tests/test_product_postgres.py`
+- Create: `alembic/versions/0003_auth_bootstrap.py`
 - Modify: `backend/app/identity/membership.py`
 - Modify: `backend/app/db/session.py`
 
@@ -91,18 +93,23 @@
 - Produce `MembershipRepository`, `InvitationRepository`, `SessionRepository`, and `ProductRepository` protocols.
 - `PostgresProductStore` methods open transactions through `tenant_transaction`; no caller receives a raw connection.
 - Preserve `MembershipStore` as an in-memory implementation of the new protocol.
+- `InvitationRepository.exchange(...)` calls one database function that identifies the pre-bound invitee, consumes the invitation, and creates the session atomically; it does not require a caller-supplied tenant or principal.
 
 - [ ] Write failing contract tests that run the same membership and product behavior against memory and PostgreSQL adapters.
 - [ ] Add a tenant-only transaction helper for project listing and project creation; keep project-scoped reads on `tenant_transaction`.
-- [ ] Implement atomic invitation claim with `UPDATE ... WHERE consumed_at IS NULL AND expires_at > now RETURNING`.
-- [ ] Implement project create/list/get, conversation append/list, plan replace/read, and source metadata create/list/status methods.
+- [ ] Add migration `0003_auth_bootstrap.py`: bind every invitation to `invitee_principal_id`, backfill any development rows explicitly, then make the column non-null with a foreign key to `principals`.
+- [ ] In the same migration, add unique parent keys `(tenant_id, principal_id)` and `(tenant_id, project_id)`, then replace single-column project/principal foreign keys with composite tenant-bound foreign keys across `project_grants`, `confirmations`, `evidence_events`, `action_intents`, invitations, sessions, conversations, messages, plans, milestones, tasks, and sources. A row claiming tenant A must never reference a tenant B parent even when both IDs are otherwise valid.
+- [ ] Add a `SECURITY DEFINER` function that accepts only a high-entropy token hash plus server-generated session fields, atomically consumes one live invitation and inserts its session for the invitation's bound principal. Pin `search_path`, schema-qualify referenced objects, revoke execution from `PUBLIC`, and grant only `EXECUTE` to `study_app`; do not grant context-free table reads.
+- [ ] Implement invitation exchange through that function. Unknown, expired, consumed, and wrong hashes return the same public result; the client never supplies tenant or principal identity.
+- [ ] Implement project create/list/get, conversation append/list, plan replace/read, and source metadata create/list methods.
 - [ ] Bind every SQL parameter; do not interpolate tenant, project, principal, or token values into SQL.
 - [ ] Add cross-tenant and cross-project tests using two application-role connections.
+- [ ] Add direct SQL negative tests for mismatched `(tenant_id, project_id)` and `(tenant_id, principal_id)` pairs; expect foreign-key rejection even when the caller sets row-matching RLS variables.
 - [ ] Add concurrency tests proving one invitation can be claimed only once. HTTP idempotency concurrency belongs to Task 4 so it has one implementation and one test owner.
-- [ ] Run `\.venv\Scripts\python -m pytest backend/tests/test_product_postgres.py -q`; expect pass or the existing explicit PostgreSQL skip when the database is unavailable.
+- [ ] Start PostgreSQL and run `\.venv\Scripts\python -m pytest backend/tests/test_product_postgres.py -q`; skipped PostgreSQL tests fail this task's exit gate.
 - [ ] Commit as `feat: add postgres identity and product stores`.
 
-**Exit gate:** Memory and PostgreSQL adapters satisfy the same behavior; application-role SQL cannot bypass RLS.
+**Exit gate:** Memory and PostgreSQL adapters satisfy the same behavior; application-role SQL cannot bypass RLS or create cross-tenant foreign-key relationships; invitation exchange works before a tenant context exists without granting context-free table access.
 
 ### Task 3: Invitation Exchange and Cookie Session
 
@@ -122,7 +129,7 @@
 
 - [ ] Write failing tests for valid exchange, expired invitation, replay, malformed token, revoked session, logout, cookie flags, and absence of raw tokens in responses.
 - [ ] Store only `sha256(raw_token)`; compare fixed-length digests and return the same public error for unknown, expired, and consumed invitations.
-- [ ] Issue a database-backed session record and a signed opaque cookie referencing its session ID.
+- [ ] Issue a signed cookie containing `session_id`, `tenant_id`, `principal_id`, issued-at, and expiry. Verify its signature before trusting those fields, set tenant/principal context from the verified claims, then read `user_sessions` to enforce revocation. Do not describe this visible-but-tamper-evident payload as opaque.
 - [ ] Add CSRF origin checks for cookie-authenticated unsafe methods; bearer-authenticated compatibility calls remain unaffected.
 - [ ] Ensure request and audit logs redact invitation and session material.
 - [ ] Run `\.venv\Scripts\python -m pytest backend/tests/test_invitation_auth.py backend/tests/test_confirmation_and_auth.py -q`.

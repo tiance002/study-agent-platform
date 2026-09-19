@@ -7,13 +7,13 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:490b013444d1ec2b404779c0d6b64fb32e2a4f342a9c7d2985e914cc9a8d215a, generated_at=2026-09-19T07:04:15Z -->
-> 生成时间：2026-09-19T07:04:15Z
+<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:0e39c9d45552a06979d8903b1fffce39431a3941dd56a8393bb341a6e0e46578, generated_at=2026-09-19T07:36:53Z -->
+> 生成时间：2026-09-19T07:36:53Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
 
-当前 head：`0002`
+当前 head：`0003`
 
 ### 表总览
 
@@ -24,7 +24,7 @@
 | `conversations` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 6 |
 | `evidence_events` | 0001 | 租户+项目 | SELECT, INSERT | 12 |
 | `http_idempotency` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE | 12 |
-| `invitations` | 0002 | 租户 | SELECT, INSERT, UPDATE, DELETE | 8 |
+| `invitations` | 0002 | 租户 | SELECT, INSERT, UPDATE, DELETE | 9 |
 | `learning_plans` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 7 |
 | `learning_tasks` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 7 |
 | `messages` | 0002 | 租户+项目 | SELECT, INSERT | 8 |
@@ -101,6 +101,7 @@
 | `invitations` | `expires_at` | `timestamptz` |
 | `invitations` | `consumed_at` | `timestamptz` |
 | `invitations` | `consumed_by` | `text` |
+| `invitations` | `invitee_principal_id` | `text` |
 | `learning_plans` | `plan_id` | `text` |
 | `learning_plans` | `tenant_id` | `text` |
 | `learning_plans` | `project_id` | `text` |
