@@ -254,6 +254,9 @@ def assess_retrieval(signals: RetrievalSignals) -> EvidenceAssessment:
     return EvidenceAssessment(
         state=_derive_state(issues, effective_claims),
         issues=tuple(issues),
+        # 必需集合**如实传递**（未知就是空元组）：类型层要据此拒绝
+        # "声称 supported 却拿不出必需结论集合"这类构造。
+        required_claim_refs=required,
         supported_claim_refs=effective_claims,
     )
 

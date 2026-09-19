@@ -46,6 +46,10 @@ class ErrorCode(StrEnum):
     # ---- 执行 ----
     PARAMS_INVALID = "PARAMS_INVALID"
     IDEMPOTENCY_VIOLATION = "IDEMPOTENCY_VIOLATION"
+    # 同一幂等键的请求正在处理中。**与 VIOLATION 是两回事**：
+    # 前者是"等一下再来"，后者是"你这把钥匙用错了"。混为一谈会让客户端
+    # 把并发重试当成参数冲突处理，从而放弃一个本来会成功的请求。
+    IDEMPOTENCY_IN_PROGRESS = "IDEMPOTENCY_IN_PROGRESS"
     ILLEGAL_STATE_TRANSITION = "ILLEGAL_STATE_TRANSITION"
     RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
 

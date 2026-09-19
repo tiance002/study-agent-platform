@@ -571,11 +571,15 @@ def test_unsupported_state_must_cite_at_least_one_issue():
 def test_partially_supported_requires_supported_claim_refs():
     """`partially_supported` 必须能指名已支持的结论。
 
-    这条是本次审查的核心：`candidate_count > 0` 不能当作"部分结论已支持"。
+    这条是早期审查的核心：`candidate_count > 0` 不能当作"部分结论已支持"。
     """
     issue = EvidenceIssue(code=EvidenceIssueCode.SOURCE_FETCH_FAILED)
     with pytest.raises(ValueError) as exc:
-        EvidenceAssessment(state=EvidenceState.PARTIALLY_SUPPORTED, issues=(issue,))
+        EvidenceAssessment(
+            state=EvidenceState.PARTIALLY_SUPPORTED,
+            issues=(issue,),
+            required_claim_refs=("claim.a",),
+        )
     assert "supported_claim_refs" in str(exc.value)
 
 
@@ -587,9 +591,90 @@ def test_insufficient_cannot_carry_supported_claims():
         EvidenceAssessment(
             state=EvidenceState.INSUFFICIENT,
             issues=(issue,),
+            required_claim_refs=("claim.a",),
             supported_claim_refs=("claim.x",),
         )
     assert "partially_supported" in str(exc.value)
+
+
+# --------------------------------------------------------------- 覆盖约束落到类型
+
+
+@pytest.mark.invariant
+def test_supported_needs_required_claim_set():
+    """**类型层**拒绝"声称 supported 却拿不出必需结论集合"。
+
+    判定器已经会要求正向覆盖，但这个类型**被多个模块共享**（ChildRun 回传、
+    未来的反序列化路径、任何直接构造它的调用方）。约束只活在判定器里时，
+    `EvidenceAssessment(state=SUPPORTED)` —— 一个"证据充分、零证明"的对象 ——
+    照样构造得出来。
+
+    判断标准与 `EvidenceIssue` 一致：**构造一个违反约束的对象，会不会失败。**
+    """
+    with pytest.raises(ValueError) as exc:
+        EvidenceAssessment(state=EvidenceState.SUPPORTED)
+    assert "必需结论集合" in str(exc.value)
+
+
+@pytest.mark.invariant
+def test_supported_rejects_uncovered_required_claims():
+    """required 非空但不被完全覆盖时，不得声称 supported。"""
+    with pytest.raises(ValueError) as exc:
+        EvidenceAssessment(
+            state=EvidenceState.SUPPORTED,
+            required_claim_refs=("claim.a", "claim.b"),
+            supported_claim_refs=("claim.a",),
+        )
+    assert "缺少" in str(exc.value)
+
+
+@pytest.mark.invariant
+def test_unknown_required_set_must_be_declared_as_missing_support():
+    """必需集合未知时：必须有 MISSING_SUPPORT，且不得声称任何结论已支持。
+
+    否则「覆盖未知」这件事在结果里**完全看不出来** —— 那正是上一版
+    `supported + 空覆盖` 的老问题，只是换了个入口。
+    """
+    no_signal = EvidenceIssue(code=EvidenceIssueCode.NO_CANDIDATES)
+
+    with pytest.raises(ValueError) as exc:
+        EvidenceAssessment(state=EvidenceState.INSUFFICIENT, issues=(no_signal,))
+    assert "MISSING_SUPPORT" in str(exc.value)
+
+    with pytest.raises(ValueError) as exc:
+        EvidenceAssessment(
+            state=EvidenceState.INSUFFICIENT,
+            issues=(no_signal,),
+            supported_claim_refs=("claim.x",),
+        )
+    assert "不得声称已支持结论" in str(exc.value)
+
+    # 带上 MISSING_SUPPORT 且不声称覆盖 → 合法
+    ok = EvidenceAssessment(
+        state=EvidenceState.INSUFFICIENT,
+        issues=(
+            EvidenceIssue(code=EvidenceIssueCode.MISSING_SUPPORT, next_action="x"),
+        ),
+    )
+    assert ok.supported_claim_refs == ()
+
+    # 反序列化路径：从 to_dict 的形状重建，也必须被同一套约束拦住。
+    payload = ok.to_dict()
+    assert payload["required_claim_refs"] == []
+    assert payload["supported_claim_refs"] == []
+
+
+@pytest.mark.invariant
+def test_assessment_serialization_keeps_both_claim_sets():
+    """两个集合都要出现在序列化结果里 —— 否则读方无法复核覆盖关系。"""
+    ok = EvidenceAssessment(
+        state=EvidenceState.SUPPORTED,
+        required_claim_refs=("claim.a",),
+        supported_claim_refs=("claim.a",),
+    )
+    payload = ok.to_dict()
+    assert payload["required_claim_refs"] == ["claim.a"]
+    assert payload["supported_claim_refs"] == ["claim.a"]
 
 
 @pytest.mark.invariant

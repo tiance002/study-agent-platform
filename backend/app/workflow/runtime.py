@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass, field, replace
 
 from app.audit.sink import AuditSink, RiskLevel
@@ -54,6 +56,26 @@ from app.workflow import tools_impl
 from app.workflow.context import NodeContext
 
 MAX_INPUT_CHARS = 8_000
+
+
+@dataclass
+class _IdempotencyEntry:
+    """一次幂等请求的**占用**记录。
+
+    三态，比"有没有结果"多一个中间态：
+
+    - `pending`：已被某个请求占用、正在执行。后到的同键请求等待它。
+    - `completed`：结果已落定，后到者直接拿重放结果。
+    - `released`：占用者失败或抛错后放弃。等待者会被唤醒并**接手执行**，
+      而不是干等到超时 —— 否则一次失败会把同键请求一起拖住。
+
+    ⚠️ 没有"缓存失败结果"这一态：失败不缓存，否则参数修好后的重试
+    会永远拿到旧的拒绝。
+    """
+
+    fingerprint: str
+    state: str = "pending"
+    result: InteractionResult | None = None
 
 # 本版执行器声明支持的义务。未声明的一律拒绝执行，而不是"尽力而为"。
 SUPPORTED_OBLIGATIONS = frozenset(
@@ -385,12 +407,24 @@ class InteractionRuntime:
             "run_in_sandbox": tools_impl.run_in_sandbox,
             "append_project_evidence": tools_impl.append_project_evidence,
         }
-        # 幂等缓存：`idempotency_key` → (指纹, 结果)。
+        # 幂等占用表：`(tenant_id, idempotency_key)` → 占用记录。
         #
-        # ⚠️ 这是**开发适配器**：进程内、重启即失，多 worker 之间不共享。
-        # 生产实现必须落库（与 outbox / durable task 同一套），否则"幂等"只在
-        # 单进程生命周期内成立。这一点写进了 README 的已知局限。
-        self._idempotency: dict[str, tuple[str, InteractionResult]] = {}
+        # 两点都是审查发现的，且都**不会报错**，只会静默地做错事：
+        #
+        # 1) 键必须**按租户划分**。只用客户端字符串做键时，租户 A 用 `common-key`
+        #    成功之后，租户 B 用同名键会收到 `IDEMPOTENCY_VIOLATION` ——
+        #    一个租户能"占住"另一个租户的键，属于跨租户可用性干扰。
+        #    `principal_id` / 项目 / 内容继续进指纹，负责发现同一作用域内的误用。
+        #
+        # 2) 必须是**原子占用**，不能"先查缓存、执行完再写"。
+        #    中间隔着整个执行流程，两个并发同键请求会同时看到"未缓存"、
+        #    各自执行一遍。实测（压小 GIL 切换间隔 + handler 做 I/O）可复现。
+        #
+        # ⚠️ 这是**开发适配器**：进程内、重启即失、多 worker 不共享。
+        # 生产实现应由 PostgreSQL 唯一约束保证：先 INSERT
+        # `(tenant_id, idempotency_key)` 抢占用，冲突时读该行并等待状态推进。
+        self._idempotency: dict[tuple[str, str], _IdempotencyEntry] = {}
+        self._idempotency_cond = threading.Condition()
 
     # ------------------------------------------------------------------ 入口
 
@@ -404,28 +438,35 @@ class InteractionRuntime:
             return self._run(request, context)
 
     def _run(self, request: InteractionRequest, context: TenantContext) -> InteractionResult:
-        # 0) 幂等：客户端用 `idempotency_key` 表达"这是同一个请求的重试"。
-        #
-        # ⚠️ 这里**不能**用 `request_id`。它是由服务端每请求生成一次的追踪 id，
-        # 客户端重试必然拿到新值 —— 那样的"幂等"永远命不中，等于没有实现，
-        # 而且不会报错：失败是静默的，只有对照两次结果才能发现。
-        fingerprint = self._idempotency_fingerprint(request)
-        if request.idempotency_key is not None:
-            seen = self._idempotency.get(request.idempotency_key)
-            if seen is not None:
-                stored_fingerprint, stored_result = seen
-                if stored_fingerprint != fingerprint:
-                    # 同一把钥匙开两扇门：必须拒绝，不能"以先到者为准"。
-                    return self._fail(
-                        request,
-                        deny(
-                            ErrorCode.IDEMPOTENCY_VIOLATION,
-                            "同一 idempotency_key 被用于内容不同的请求；"
-                            "幂等键必须唯一标识一次请求，不得复用于不同参数",
-                        ),
-                    )
-                return self._as_replay(stored_result, request)
+        """幂等包装层。**占用的判定与结果写入必须原子**，否则并发会重复执行。
 
+        先到者占住 `(tenant_id, key)`，后到者等待它完成；完成才写结果。
+        具体语义见 `_claim_idempotency`。
+        """
+        if request.idempotency_key is None:
+            return self._execute(request, context)
+
+        key = (request.tenant_id, request.idempotency_key)
+        settled = self._claim_idempotency(request, key)
+        if settled is not None:
+            return settled  # 重放结果，或"处理中 / 键被误用"的拒绝
+
+        try:
+            result = self._execute(request, context)
+        except BaseException:
+            # 执行过程抛错：释放占用，让客户端可以重试。
+            self._release_idempotency(key)
+            raise
+
+        if result.status == "ok":
+            self._complete_idempotency(key, result)
+        else:
+            # 失败/拒绝**不缓存**：释放占用，客户端重试时会真正再执行一次。
+            # 缓存一个"被拒绝"的结果会让后续修好参数的重试永远拿到旧拒绝。
+            self._release_idempotency(key)
+        return result
+
+    def _execute(self, request: InteractionRequest, context: TenantContext) -> InteractionResult:
         # 1) 输入预检查
         if len(request.user_input) > MAX_INPUT_CHARS:
             return self._deny(
@@ -518,9 +559,92 @@ class InteractionRuntime:
             citations=tuple(output.get("citations", ())),
             audit_event_ids=tuple(audit_event_ids),
         )
-        if request.idempotency_key is not None:
-            self._idempotency[request.idempotency_key] = (fingerprint, result)
         return result
+
+    # ------------------------------------------------------------------ 幂等
+
+    #: 等待同键请求完成的上限。超时返回 `IDEMPOTENCY_IN_PROGRESS`（可重试），
+    #: 而不是无限等待 —— 一个卡住的执行不该把所有同键请求一起拖住。
+    IDEMPOTENCY_WAIT_SECONDS = 30.0
+
+    def _claim_idempotency(
+        self, request: InteractionRequest, key: tuple[str, str]
+    ) -> InteractionResult | None:
+        """原子占用幂等键。返回 `None` 表示"这次请求由你执行"。
+
+        为什么必须是原子占用：读缓存与写结果之间隔着**整个执行流程**
+        （策略、预算、工具调用）。分成"先查后写"两步时，两个并发同键请求会
+        同时看到"未缓存"并各自执行一遍 —— 实测（压小 GIL 切换间隔、
+        让 handler 做 I/O）能稳定复现，两次都返回 `idempotent_replay=false`。
+
+        三种非占用结果：
+        - 已完成 → 返回重放结果；
+        - 指纹不同 → `IDEMPOTENCY_VIOLATION`（同一把钥匙开两扇门）；
+        - 仍在处理且超时 → `IDEMPOTENCY_IN_PROGRESS`（**可重试**，
+          与"键被误用"严格区分）。
+        """
+        fingerprint = self._idempotency_fingerprint(request)
+        deadline = time.monotonic() + self.IDEMPOTENCY_WAIT_SECONDS
+
+        with self._idempotency_cond:
+            while True:
+                entry = self._idempotency.get(key)
+                if entry is None or entry.state == "released":
+                    # 无人占用，或占用者已放弃（失败/拒绝）—— 由本次请求接手。
+                    self._idempotency[key] = _IdempotencyEntry(fingerprint=fingerprint)
+                    return None
+
+                if entry.fingerprint != fingerprint:
+                    return self._fail(
+                        request,
+                        deny(
+                            ErrorCode.IDEMPOTENCY_VIOLATION,
+                            "同一 idempotency_key 被用于内容不同的请求；"
+                            "幂等键必须唯一标识一次请求，不得复用于不同参数",
+                        ),
+                    )
+
+                if entry.state == "completed":
+                    # 到这里 `result` 必定非空：completed 与 result 同时设置。
+                    assert entry.result is not None
+                    return self._as_replay(entry.result, request)
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return self._fail(
+                        request,
+                        PlatformError(
+                            code=ErrorCode.IDEMPOTENCY_IN_PROGRESS,
+                            message="同一 idempotency_key 的请求仍在处理中，请稍后重试",
+                            retryable=True,
+                        ),
+                    )
+                # 释放条件变量再等待，让占用者能推进。
+                self._idempotency_cond.wait(timeout=remaining)
+
+    def _complete_idempotency(self, key: tuple[str, str], result: InteractionResult) -> None:
+        """写入结果并唤醒等待者。
+
+        结果与 `completed` 标记在同一次持锁内设置 —— 否则等待者可能被唤醒后
+        看到 `completed=True` 但 `result=None`。
+        """
+        with self._idempotency_cond:
+            entry = self._idempotency.get(key)
+            if entry is None:
+                # 不该发生：占用者一定持有记录。这里显式忽略而不是静默新建，
+                # 因为静默新建会把"占用表被谁改过"这件事盖住。
+                return
+            entry.result = result
+            entry.state = "completed"
+            self._idempotency_cond.notify_all()
+
+    def _release_idempotency(self, key: tuple[str, str]) -> None:
+        """放弃占用。等在这把键上的请求会被唤醒并接手执行。"""
+        with self._idempotency_cond:
+            entry = self._idempotency.get(key)
+            if entry is not None:
+                entry.state = "released"
+            self._idempotency_cond.notify_all()
 
     @staticmethod
     def _as_replay(stored: InteractionResult, request: InteractionRequest) -> InteractionResult:
@@ -577,52 +701,62 @@ class InteractionRuntime:
     def _ensure_budget_tree(
         self, request: InteractionRequest, node_spec: NodeSpec, run_id: str
     ) -> str:
-        """建立 Tenant → Project → Run 三级账户。额度按 node 上限下发。"""
+        """建立 Tenant → Project → Run 三级账户。额度按 node 上限下发。
+
+        ⚠️ 整段必须在一个临界区里。这里的每一步都是「不存在就创建」——
+        典型的 check-then-act。只给账本的单个方法加锁是**不够的**：
+        两个线程会同时通过 `not in self.ledger._accounts` 检查，
+        第二个在创建时抛「账户已存在」。
+
+        实测就是这么暴露的：加了账本级锁之后并发仍然稳定抛
+        `BUDGET_TREE_INVALID`。**单个方法原子 ≠ 一组方法原子。**
+        """
         tenant_account = f"acct_tenant_{request.tenant_id}"
         project_account = f"acct_project_{request.learning_project_id}"
         run_account = f"acct_run_{run_id}"
 
-        if tenant_account not in self.ledger._accounts:  # noqa: SLF001 — 内部编排访问
-            self.ledger.open_account(
-                tenant_account,
-                tenant_id=request.tenant_id,
-                limits={
-                    str(Dimension.CURRENCY_MICROS): 1_000_000_000,
-                    str(Dimension.TOKENS): 100_000_000,
-                    str(Dimension.STEPS): 100_000,
-                    str(Dimension.TOOL_CALLS): 100_000,
-                    str(Dimension.SANDBOX_SECONDS): 100_000,
-                },
-                completion_reserve={str(Dimension.CURRENCY_MICROS): 10_000_000},
-            )
-        if project_account not in self.ledger._accounts:  # noqa: SLF001
-            self.ledger.grant_to_child(
-                tenant_account,
-                project_account,
-                {
-                    str(Dimension.CURRENCY_MICROS): 100_000_000,
-                    str(Dimension.TOKENS): 10_000_000,
-                    str(Dimension.STEPS): 10_000,
-                    str(Dimension.TOOL_CALLS): 10_000,
-                    str(Dimension.SANDBOX_SECONDS): 10_000,
-                },
-                tenant_id=request.tenant_id,
-                project_id=request.learning_project_id,
-            )
-        if run_account not in self.ledger._accounts:  # noqa: SLF001
-            # run 账户不传租户/项目，从 project 账户继承 —— 靠继承而非重复声明，
-            # 避免"某处漏传导致账目脱离隔离范围"。
-            self.ledger.grant_to_child(
-                project_account,
-                run_account,
-                {
-                    str(Dimension.CURRENCY_MICROS): node_spec.max_cost_micros,
-                    str(Dimension.TOKENS): node_spec.max_tokens,
-                    str(Dimension.STEPS): node_spec.max_steps,
-                    str(Dimension.TOOL_CALLS): node_spec.max_tool_calls,
-                    str(Dimension.SANDBOX_SECONDS): node_spec.max_sandbox_seconds,
-                },
-            )
+        with self.ledger.atomic():
+            if not self.ledger.has_account(tenant_account):
+                self.ledger.open_account(
+                    tenant_account,
+                    tenant_id=request.tenant_id,
+                    limits={
+                        str(Dimension.CURRENCY_MICROS): 1_000_000_000,
+                        str(Dimension.TOKENS): 100_000_000,
+                        str(Dimension.STEPS): 100_000,
+                        str(Dimension.TOOL_CALLS): 100_000,
+                        str(Dimension.SANDBOX_SECONDS): 100_000,
+                    },
+                    completion_reserve={str(Dimension.CURRENCY_MICROS): 10_000_000},
+                )
+            if not self.ledger.has_account(project_account):
+                self.ledger.grant_to_child(
+                    tenant_account,
+                    project_account,
+                    {
+                        str(Dimension.CURRENCY_MICROS): 100_000_000,
+                        str(Dimension.TOKENS): 10_000_000,
+                        str(Dimension.STEPS): 10_000,
+                        str(Dimension.TOOL_CALLS): 10_000,
+                        str(Dimension.SANDBOX_SECONDS): 10_000,
+                    },
+                    tenant_id=request.tenant_id,
+                    project_id=request.learning_project_id,
+                )
+            if not self.ledger.has_account(run_account):
+                # run 账户不传租户/项目，从 project 账户继承 —— 靠继承而非重复声明，
+                # 避免"某处漏传导致账目脱离隔离范围"。
+                self.ledger.grant_to_child(
+                    project_account,
+                    run_account,
+                    {
+                        str(Dimension.CURRENCY_MICROS): node_spec.max_cost_micros,
+                        str(Dimension.TOKENS): node_spec.max_tokens,
+                        str(Dimension.STEPS): node_spec.max_steps,
+                        str(Dimension.TOOL_CALLS): node_spec.max_tool_calls,
+                        str(Dimension.SANDBOX_SECONDS): node_spec.max_sandbox_seconds,
+                    },
+                )
         return run_account
 
     def _close_run_quietly(self, run_account_id: str, *, request_id: str | None = None) -> None:

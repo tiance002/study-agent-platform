@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:39679788c7d5f285e8c1d19431877be0af4aaaf4643fe5322cb22ddb1429cc2f, generated_at=2026-09-18T17:46:13Z -->
-> 生成时间：2026-09-18T17:46:13Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:1108d375092c0603f9dcdc2a3b107feffc7e7bc0cd55253e439cfce1b0420ddc, generated_at=2026-09-19T05:17:17Z -->
+> 生成时间：2026-09-19T05:17:17Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -27,7 +27,7 @@
 
 ### 稳定错误码
 
-共 32 个，一经发布不得改变语义，只能追加。
+共 33 个，一经发布不得改变语义，只能追加。
 
 | 错误码 |
 |---|
@@ -48,6 +48,7 @@
 | `ENDORSEMENT_SINK_MISMATCH` |
 | `EVIDENCE_IMMUTABLE` |
 | `EVIDENCE_UNMAPPED` |
+| `IDEMPOTENCY_IN_PROGRESS` |
 | `IDEMPOTENCY_VIOLATION` |
 | `ILLEGAL_STATE_TRANSITION` |
 | `NODE_NOT_REGISTERED` |
@@ -154,7 +155,17 @@ planned → intent_persisted → dispatched
 | 字段 | 来源 | 用途 |
 |---|---|---|
 | `request_id`（响应头 `X-Request-Id` 同值） | 服务端每请求生成 | 全链路追踪。响应头、响应体、错误体、**审计记录**必须是同一个值 |
-| `idempotency_key`（请求体可选，≤ 200 字符） | **客户端**提供 | 表达"这是我上一次那个请求的重试"。绑定主体 + 项目 + 请求内容 + 确认记录；同键不同内容 → `IDEMPOTENCY_VIOLATION` |
+| `idempotency_key`（请求体可选，≤ 200 字符） | **客户端**提供 | 表达"这是我上一次那个请求的重试"。作用域为 `(tenant_id, idempotency_key)`；指纹另绑主体 + 项目 + 请求内容 + 确认记录 |
+
+幂等键的三种非成功结果必须区分开：
+
+| 错误码 | 含义 | 客户端应当 |
+|---|---|---|
+| `IDEMPOTENCY_VIOLATION` | 同一租户内这把键被用于**不同内容** | 换一把键（这是用错了） |
+| `IDEMPOTENCY_IN_PROGRESS` | 同键请求**仍在处理中**，等待超时 | **重试**（可重试；占用者完成后就会返回重放结果） |
+| `output.idempotent_replay = true` | 命中已有结果，本次未重新执行 | 正常使用 |
+
+把前两者混为一谈会让客户端把并发重试当成参数冲突，从而放弃一个本来会成功的请求。
 
 ⚠️ 审计记录带 `request_id` 并纳入链哈希（记录格式 `schema_version=2`）。
 在此之前审计只带 `run_id`（由 `request_id` 与 `node_id` 哈希而来，**不可逆**），

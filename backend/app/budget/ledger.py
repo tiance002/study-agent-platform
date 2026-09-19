@@ -14,11 +14,38 @@
 
 from __future__ import annotations
 
+import contextlib
+import functools
+import threading
 from dataclasses import dataclass, field
 from enum import StrEnum
 
 from app.core.errors import ErrorCode, deny
 from app.core.ids import new_id
+
+
+def _synchronized(method):
+    """把整个方法关进账本的临界区。
+
+    账本的不变量（可用额度 = 上限 − 预留 − 消费 − 完成预留）是**跨字段**的，
+    所以任何"读-改-写"都必须是原子的：两个并发预留会都看到"够用"，然后一起扣。
+
+    这不是理论问题。实测中并发创建同一个 run 账户时，
+    第二个线程**在父账户已经预留成功之后**才撞上「账户已存在」并抛错 ——
+    那次预留就永远挂在那里，既没被消费也没被释放。**失败留了部分状态**，
+    正好违反本类文档承诺的那条不变量。
+
+    内存适配器用 `RLock`（可重入：`grant_to_child` 会嵌套调用 `batch_reserve`
+    与 `open_account`）。生产实现应把不变量交给数据库 —— 行锁 + 约束，
+    而不是进程内的锁（多 worker 下等于不存在）。
+    """
+
+    @functools.wraps(method)
+    def wrapper(self: "BudgetLedger", *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class Dimension(StrEnum):
@@ -115,9 +142,41 @@ class BudgetLedger:
         self._reservations: dict[str, Reservation] = {}
         # 子账户 → 授予时在父账户上占用的预留。关闭账户时据此回收额度。
         self._grant_reservations: dict[str, list[Reservation]] = {}
+        # 额度变动一律走 `_synchronized`，见那个装饰器的说明。
+        self._lock = threading.RLock()
+
+    # ------------------------------------------------------------------ 临界区
+
+    @contextlib.contextmanager
+    def atomic(self):
+        """把**一组**操作关进同一临界区。
+
+        为什么需要它：单个方法原子 ≠ 一组方法原子。
+        `if 账户不存在: 创建账户` 是典型的 check-then-act —— 两个线程都会
+        通过检查，第二个再抛「账户已存在」。实测就是这样：
+        `_ensure_budget_tree` 在并发下稳定抛 `BUDGET_TREE_INVALID`，
+        而账本里每个方法各自都"加了锁"。
+
+        ⚠️ 这**不是数据库事务**：没有隔离级别、**没有回滚**，
+        只保证互斥。出错后已做的变动仍然保留，调用方需自行保证顺序。
+        生产实现应换成数据库事务（行锁 + 约束）。
+
+        用 `RLock` 实现，所以内部方法仍然可以各自加锁、可以重入。
+        """
+        with self._lock:
+            yield
 
     # ------------------------------------------------------------------ 账户
 
+    def has_account(self, account_id: str) -> bool:
+        """账户是否存在。
+
+        比让调用方摸 `_accounts` 更好：**不交出可变字典**，避免"顺手改一下"
+        绕过所有额度不变量。需要跨方法原子时配合 `atomic()` 使用。
+        """
+        return account_id in self._accounts
+
+    @_synchronized
     def open_account(
         self,
         account_id: str,
@@ -159,6 +218,7 @@ class BudgetLedger:
 
     # ------------------------------------------------------------------ 预留
 
+    @_synchronized
     def reserve(
         self,
         account_id: str,
@@ -192,6 +252,7 @@ class BudgetLedger:
         self._reservations[reservation.reservation_id] = reservation
         return reservation
 
+    @_synchronized
     def batch_reserve(
         self,
         account_id: str,
@@ -215,6 +276,7 @@ class BudgetLedger:
             raise
         return taken
 
+    @_synchronized
     def mark_in_flight(self, reservation_id: str) -> Reservation:
         """标记为已派发。此后不可因 TTL 到期释放。"""
         reservation = self._reservation(reservation_id)
@@ -226,6 +288,7 @@ class BudgetLedger:
         reservation.state = ReservationState.IN_FLIGHT
         return reservation
 
+    @_synchronized
     def settle(self, reservation_id: str, actual: int) -> Reservation:
         """按实际用量结算。实际用量不得超过预留上界。"""
         reservation = self._reservation(reservation_id)
@@ -251,6 +314,7 @@ class BudgetLedger:
         reservation.consumed = actual
         return reservation
 
+    @_synchronized
     def release(self, reservation_id: str) -> Reservation:
         """释放未派发的预留。已派发的调用不得释放。"""
         reservation = self._reservation(reservation_id)
@@ -268,6 +332,7 @@ class BudgetLedger:
 
     # ------------------------------------------------------------------ 子树
 
+    @_synchronized
     def grant_to_child(
         self,
         parent_id: str,
@@ -296,6 +361,7 @@ class BudgetLedger:
             completion_reserve=child_completion_reserve,
         )
 
+    @_synchronized
     def close_account(self, account_id: str) -> dict[str, int]:
         """关闭账户并把额度回收给父账户。
 

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import base64
 import json
-import sys
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -26,28 +25,7 @@ CURRENCY = str(Dimension.CURRENCY_MICROS)
 TOOL = "append_project_evidence"
 PARAMS = {"a": 1}
 
-
-@pytest.fixture
-def racy_scheduling():
-    """把 GIL 的线程切换间隔压到最小，让竞态真的有机会发生。
-
-    默认间隔是 5ms，而「读 → 判断 → 写」这种临界区只有微秒级。
-    默认设置下线程几乎不可能被切到中间，于是**一个并不原子的实现
-    也能稳定通过并发测试** —— 它给出的信心是假的。
-
-    这不是推测，是量出来的（同一份并发脚本，8 线程，各 100 轮）：
-
-        默认 5ms 间隔 ：无锁实现 0/100 轮穿透
-        压到 1μs 间隔 ：无锁实现 **92/100** 轮穿透，加锁实现 0/100
-
-    所以并发测试必须显式制造切换机会。用完恢复，避免影响其它测试。
-    """
-    original = sys.getswitchinterval()
-    sys.setswitchinterval(1e-6)
-    try:
-        yield
-    finally:
-        sys.setswitchinterval(original)
+# `racy_scheduling` 已移到 `conftest.py` —— 它现在是多处复用的基建。
 
 
 def _new_store(ceiling_amount: int = 100) -> tuple[ConfirmationStore, str]:

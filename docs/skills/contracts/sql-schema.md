@@ -7,8 +7,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:62fae27f45c3a6e579ce6a32211178ba20884ea72a3b6e67e9c3b5dca80e22a4, generated_at=2026-09-18T17:46:13Z -->
-> 生成时间：2026-09-18T17:46:13Z
+<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:4c32b9ca0d0d49554f3fb1fe4a18d74a3aea7d69ed59018f548cd3384080dac3, generated_at=2026-09-19T05:22:05Z -->
+> 生成时间：2026-09-19T05:22:05Z
 
 > 由 `tools/skills/gen_contracts.py` 从代码扫描导出，请勿手工编辑本区。
 > **注意**：这是**代码层实体**，不是 PostgreSQL 表。迁移落地后应改由 alembic 导出 DDL。
@@ -21,7 +21,7 @@
 | `Reservation` | `app.budget.ledger` | 7 | — | — |
 | `ArtifactRef` | `app.core.artifacts` | 5 | — | — |
 | `PlatformError` | `app.core.errors` | 5 | — | — |
-| `EvidenceAssessment` | `app.core.evidence_issues` | 3 | — | — |
+| `EvidenceAssessment` | `app.core.evidence_issues` | 4 | — | — |
 | `EvidenceIssue` | `app.core.evidence_issues` | 6 | — | — |
 | `ChildEnvelope` | `app.execution.child_run` | 6 | — | — |
 | `Claim` | `app.execution.child_run` | 3 | — | — |
@@ -58,8 +58,9 @@
 | `NodeContext` | `app.workflow.context` | 8 | 是 | — |
 | `InteractionRequest` | `app.workflow.runtime` | 9 | 是 | 是 |
 | `InteractionResult` | `app.workflow.runtime` | 10 | — | — |
+| `_IdempotencyEntry` | `app.workflow.runtime` | 3 | — | — |
 
-合计 43 个实体。
+合计 44 个实体。
 <!-- END GENERATED -->
 
 ## 2. 手写区 · 不可协商的数据库约束

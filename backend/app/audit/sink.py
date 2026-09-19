@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
@@ -162,6 +163,17 @@ class AuditSink:
         self._buffer_capacity = buffer_capacity
         # 有界缓冲：只允许低风险事件堆积，且必须有上限。
         self._buffer: list[AuditRecord] = []
+        # ⚠️ 「分配序号 → 读取前序哈希 → 计算本记录哈希 → 更新状态 → 写文件」
+        # 必须是一个**整体临界区**。少了这把锁，两个并发追加会拿到相同的
+        # `seq` 与 `previous_hash`，第二条记录当场断链。
+        # FastAPI 的同步路由跑在线程池里，所以这不是理论问题：
+        # 实测（压小 GIL 切换间隔）30 轮里 24 轮断链，seqs = [1, 1]。
+        #
+        # 这把锁只管**单进程**。多 worker / 多进程必须换成单一写入者进程、
+        # 系统级文件锁或落库 —— 进程内的锁对它们等于不存在。
+        #
+        # 必须在读取现有链之前创建：下面的 `read_all()` 也会取这把锁。
+        self._lock = threading.RLock()
         self._last_hash: str | None = self._read_last_hash()
         self._seq: int = self._read_last_seq()
 
@@ -213,30 +225,32 @@ class AuditSink:
 
         effective_request_id = request_id or current_request_id()
 
-        if not self._available:
-            if risk is RiskLevel.HIGH:
-                raise deny(
-                    ErrorCode.AUDIT_SINK_UNAVAILABLE,
-                    "审计 sink 不可用，高影响动作拒绝执行（fail-closed）",
-                    event_type=event_type,
+        # 整个「分配序号 → 算哈希 → 写文件/入缓冲」在同一临界区内完成。
+        with self._lock:
+            if not self._available:
+                if risk is RiskLevel.HIGH:
+                    raise deny(
+                        ErrorCode.AUDIT_SINK_UNAVAILABLE,
+                        "审计 sink 不可用，高影响动作拒绝执行（fail-closed）",
+                        event_type=event_type,
+                    )
+                if len(self._buffer) >= self._buffer_capacity:
+                    raise deny(
+                        ErrorCode.AUDIT_SINK_UNAVAILABLE,
+                        f"审计缓冲已达上限 {self._buffer_capacity}，低风险事件也不再接收",
+                        event_type=event_type,
+                    )
+                record = self._build_record(
+                    event_type, payload, risk, tenant_id, project_id, effective_request_id
                 )
-            if len(self._buffer) >= self._buffer_capacity:
-                raise deny(
-                    ErrorCode.AUDIT_SINK_UNAVAILABLE,
-                    f"审计缓冲已达上限 {self._buffer_capacity}，低风险事件也不再接收",
-                    event_type=event_type,
-                )
+                self._buffer.append(record)
+                return record.event_id
+
             record = self._build_record(
                 event_type, payload, risk, tenant_id, project_id, effective_request_id
             )
-            self._buffer.append(record)
+            self._write(record)
             return record.event_id
-
-        record = self._build_record(
-            event_type, payload, risk, tenant_id, project_id, effective_request_id
-        )
-        self._write(record)
-        return record.event_id
 
     def _build_record(
         self,
@@ -277,9 +291,10 @@ class AuditSink:
             handle.flush()
 
     def _flush_buffer(self) -> None:
-        pending, self._buffer = self._buffer, []
-        for record in pending:
-            self._write(record)
+        with self._lock:
+            pending, self._buffer = self._buffer, []
+            for record in pending:
+                self._write(record)
 
     # ------------------------------------------------------------------ 校验
 
@@ -349,14 +364,19 @@ class AuditSink:
         return self.verify_chain_report().ok
 
     def read_all(self) -> list[dict]:
-        """只读遍历。sink 是审计事实的载体，只有读与追加两个出口。"""
-        if not self._path.exists():
-            return []
-        return [
-            json.loads(line)
-            for line in self._path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        """只读遍历。sink 是审计事实的载体，只有读与追加两个出口。
+
+        读取也取锁：否则可能读到"写了一半"的行，把并发写变成读侧的解析错误 ——
+        那会被误判成记录损坏。
+        """
+        with self._lock:
+            if not self._path.exists():
+                return []
+            return [
+                json.loads(line)
+                for line in self._path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
 
     def read_scoped(self, *, tenant_id: str, project_id: str | None = None) -> list[dict]:
         """按租户（可选项目）过滤读取。
