@@ -252,7 +252,8 @@ Round 2 增加摄取任务、切块与它们的状态机时，**那些状态才�
 | `project_grants` | 租户 | 同上（**不能**引用 `projects`，否则自引用递归） |
 | `projects` | **成员感知** | 见下 |
 | `confirmations` / `evidence_events` / `action_intents` | 项目 | `tenant_id` + `project_id` |
-| `invitations` / `user_sessions` / `http_idempotency` | 租户 | `tenant_id` |
+| `invitations` | 租户 | `tenant_id`（消费前**没有**主体，见 9.1） |
+| `user_sessions` / `http_idempotency` | 租户 + **主体** | `tenant_id` AND `principal_id` |
 | `conversations` / `messages` / `learning_plans` / `milestones` / `learning_tasks` / `sources` | 项目 | `tenant_id` + `project_id` |
 
 `projects` 的策略：
@@ -396,3 +397,61 @@ CREATE INDEX sources_project_idx ON sources (project_id, registered_at);
    删除 `ProjectRecord`；`product/models.py` 不定义项目模型。
 3. **`sources` 本轮无处理状态**：只存登记元数据与 `registered_at`，
    不定义也不返回 `processing` / `ready`；Round 2 随摄取状态机引入。
+
+---
+
+## 9. 自查补充（任务 1 完成后按审查者标准回查）
+
+实测抓到一处**真实的隔离缺口**，并补了一条机械守卫。
+
+### 9.1 `user_sessions` 与 `http_idempotency` 曾只受租户级保护
+
+漏的是**主体维度**。实测（`study_app` 角色，同一租户两个主体）：
+
+| 探测 | 改前 | 改后 |
+|---|---|---|
+| A 看自己的会话 / 幂等记录 | 1 / 1 | 1 / 1（正向对照：没变成"谁都看不到"） |
+| **B 看 A 的会话 / 幂等记录** | **1 / 1** | **0 / 0** |
+| **B 能读到的 `response_body`** | **1** | **0** |
+
+`http_idempotency.response_body` 存的是**命令响应**（业务载荷），不是元数据 ——
+同租户的另一个用户可以把它整条读走。
+
+应用层当然会按 `principal_id` 过滤，但 **RLS 存在的意义就是"应用层写错也不泄露"**：
+只按租户过滤时它没兜住。修法：这两张表加主体维度。
+
+`invitations` **刻意**保持租户级：消费前它没有主体（`consumed_by` 是消费后才写），
+加主体维度会让邀请根本没法被认领。泄露面是 `issued_by` 与邀请数量 ——
+属租户内管理信息，可接受，但记录在此。
+
+### 9.2 声明的隔离级别必须有机械守卫
+
+契约里的"隔离级别"来自迁移里的**人工声明**，而真正生效的是 `pg_policy`。
+两者漂移时契约就在撒谎 —— 这次缺陷正是这样藏住的：声明的常量写着"租户级"，
+**没有任何地方问过"这张表有 `principal_id` 列，为什么不约束它"**。
+
+新增 `tests/test_rls_policy_matches_declaration.py`（PostgreSQL 组），
+规则**完全从数据库推导**：
+
+> 表里有 `tenant_id` / `project_id` / `principal_id` 且 **NOT NULL**，
+> 策略就必须真的约束对应的会话变量。
+
+限定 NOT NULL 是必要的：`http_idempotency.project_id` 可空（创建项目的命令被占用时
+项目还不存在），加项目维度会让那条幂等记录**永远读不出来**。
+规则粗糙时只能用豁免去补，而豁免清单会自己长大。
+
+两类例外分开记，性质完全不同：
+
+- **`EXEMPT`** —— 规则在这里**本不适用**（`project_grants` 的两个维度、
+  `projects` 的 project 维度），每条附理由；
+- **`KNOWN_GAP`** —— 规则适用、**现在还没做**。当前一条：`confirmations`
+  （项目级策略下同项目成员能读到彼此批准了什么；补它需要 `tenant_transaction`
+  支持设置 `app.principal_id`，属任务 2/3 的连带改动）。
+
+并且有测试断言"缺口仍然是缺口"、"豁免仍然会被规则命中"：
+**修好之后它会失败，提醒你来删条目** —— 否则这两份清单只会自我繁殖。
+
+### 9.3 契约展示改为"叠加了几层"
+
+隔离级别不再是一个词，而是 `租户` / `租户+项目` / `租户+主体`。
+一个笼统的"租户级"正是漏掉主体维度的原因：它看起来已经描述完了。

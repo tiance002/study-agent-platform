@@ -7,8 +7,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:449a0aa9d74c7bdd2ac783b2770da1f809c65f6022d4c1218494a54f65d59235, generated_at=2026-09-19T06:46:39Z -->
-> 生成时间：2026-09-19T06:46:39Z
+<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:490b013444d1ec2b404779c0d6b64fb32e2a4f342a9c7d2985e914cc9a8d215a, generated_at=2026-09-19T07:04:15Z -->
+> 生成时间：2026-09-19T07:04:15Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
@@ -19,22 +19,22 @@
 
 | 表 | 来源迁移 | 隔离级别 | 应用角色权限 | 列数 |
 |---|---|---|---|---:|
-| `action_intents` | 0001 | 项目级 | SELECT, INSERT, UPDATE, DELETE | 11 |
-| `confirmations` | 0001 | 项目级 | SELECT, INSERT, UPDATE, DELETE | 12 |
-| `conversations` | 0002 | 项目级 | SELECT, INSERT, UPDATE, DELETE | 6 |
-| `evidence_events` | 0001 | 项目级 | SELECT, INSERT | 12 |
-| `http_idempotency` | 0002 | 租户级 | SELECT, INSERT, UPDATE | 12 |
-| `invitations` | 0002 | 租户级 | SELECT, INSERT, UPDATE, DELETE | 8 |
-| `learning_plans` | 0002 | 项目级 | SELECT, INSERT, UPDATE, DELETE | 7 |
-| `learning_tasks` | 0002 | 项目级 | SELECT, INSERT, UPDATE, DELETE | 7 |
-| `messages` | 0002 | 项目级 | SELECT, INSERT | 8 |
-| `milestones` | 0002 | 项目级 | SELECT, INSERT, UPDATE, DELETE | 7 |
-| `principals` | 0001 | 租户级 | SELECT, INSERT, UPDATE, DELETE | 4 |
-| `project_grants` | 0001 | 租户级 | SELECT, INSERT, UPDATE, DELETE | 4 |
+| `action_intents` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 11 |
+| `confirmations` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 12 |
+| `conversations` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 6 |
+| `evidence_events` | 0001 | 租户+项目 | SELECT, INSERT | 12 |
+| `http_idempotency` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE | 12 |
+| `invitations` | 0002 | 租户 | SELECT, INSERT, UPDATE, DELETE | 8 |
+| `learning_plans` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 7 |
+| `learning_tasks` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 7 |
+| `messages` | 0002 | 租户+项目 | SELECT, INSERT | 8 |
+| `milestones` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 7 |
+| `principals` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | 4 |
+| `project_grants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | 4 |
 | `projects` | 0001 → 0002 改写 | 成员感知 | SELECT, INSERT, UPDATE, DELETE | 7 |
-| `sources` | 0002 | 项目级 | SELECT, INSERT, UPDATE, DELETE | 8 |
-| `tenants` | 0001 | 租户级 | SELECT, INSERT, UPDATE, DELETE | 3 |
-| `user_sessions` | 0002 | 租户级 | SELECT, INSERT, UPDATE, DELETE | 6 |
+| `sources` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 8 |
+| `tenants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | 3 |
+| `user_sessions` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE, DELETE | 6 |
 
 ### 列明细
 

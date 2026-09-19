@@ -260,6 +260,7 @@ def render_sql_schema() -> str:
     for filename, tree in _migration_modules():
         revision = filename.split("_", 1)[0]
         project_scoped = set(_module_literal(tree, "PROJECT_SCOPED") or ())
+        principal_scoped = set(_module_literal(tree, "PRINCIPAL_SCOPED") or ())
         append_only = set(_module_literal(tree, "APPEND_ONLY") or ())
         no_delete = set(_module_literal(tree, "NO_DELETE") or ())
         overrides = _module_literal(tree, "POLICY_OVERRIDES") or {}
@@ -268,9 +269,18 @@ def render_sql_schema() -> str:
             name = _table_name(block)
             if name is None:
                 continue
+            # 隔离级别写成"叠加了几层"而不是一个词：租户是最底层，
+            # 项目与主体是往上加的约束。这样 `user_sessions`（租户+主体）
+            # 与 `conversations`（租户+项目）的差别一眼能看出来 ——
+            # 而"租户级"这个笼统说法正是漏掉主体维度的原因。
+            scope = "+".join(
+                ["租户"]
+                + (["项目"] if name in project_scoped else [])
+                + (["主体"] if name in principal_scoped else [])
+            )
             tables[name] = {
                 "revision": revision,
-                "scope": "项目级" if name in project_scoped else "租户级",
+                "scope": scope,
                 "grants": _grants_of(name, append_only, no_delete),
                 "columns": _columns_of(block),
             }

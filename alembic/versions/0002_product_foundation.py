@@ -81,11 +81,27 @@ APPEND_ONLY = {"messages"}
 # 只给 SELECT / INSERT / UPDATE 的表：要写回结果，但**不该能删除历史**。
 NO_DELETE = {"http_idempotency"}
 
+#: 除租户外还必须匹配**主体**的表。
+#:
+#: 这两张表都带"属于某个人"的数据，而租户级策略挡不住同租户的其他成员：
+#:
+#: - `user_sessions`：泄露"谁在什么时候登录过"；
+#: - `http_idempotency`：`response_body` 存的是命令响应（含业务载荷），
+#:   实测同租户的另一个用户能直接读到 —— 这是**响应体泄露**，不只是元数据。
+#:
+#: 应用层当然会按 principal 过滤，但 RLS 存在的意义就是"应用层写错也不泄露"：
+#: 只按租户过滤时，它没兜住。
+PRINCIPAL_SCOPED = {"user_sessions", "http_idempotency"}
+
 #: 本迁移**改写**了既有表的隔离级别，供 SQL 契约生成器读取。
 #:
 #: 把它写成模块级常量而不是只藏在函数里，是为了让"这次迁移动了哪张表的隔离语义"
 #: 成为一条可被机械读取的事实 —— 否则契约文档里 `projects` 会一直显示成租户级，
 #: 而数据库里早就是成员感知了。**文档与实现的漂移，往往就是从这种地方开始的。**
+#:
+#: ⚠️ 声明与实现之间由 `tests/test_rls_policy_matches_declaration.py` 守着：
+#: 它直接查 `pg_policy`，断言这里的级别与数据库里的实际谓词一致 ——
+#: 否则这个常量就会变成第二个人工真相源。
 POLICY_OVERRIDES: dict[str, str] = {"projects": "成员感知"}
 
 
@@ -291,19 +307,24 @@ def _index_statements() -> list[str]:
 # --------------------------------------------------------------------- RLS
 
 
-def _standard_rls(table: str, *, project_scoped: bool = False) -> list[str]:
+def _standard_rls(
+    table: str, *, project_scoped: bool = False, principal_scoped: bool = False
+) -> list[str]:
     """一般表的 RLS 语句。
 
     谓词与 0001 一致：缺上下文时 `app.tenant_id` 为 NULL，
     `tenant_id = NULL` 恒假 —— 忘记设置上下文退化成"查不到"，
     而不是"查到全部"。
+
+    条件按需叠加（租户 → 项目 → 主体），三者可以共存：
+    "一条属于某人、又属于某个项目的记录"本来就该同时受这三层约束。
     """
-    predicate = "tenant_id = current_setting('app.tenant_id', true)"
+    parts = ["tenant_id = current_setting('app.tenant_id', true)"]
     if project_scoped:
-        predicate = (
-            f"({predicate})\n"
-            f"       AND project_id = current_setting('app.project_id', true)"
-        )
+        parts.append("project_id = current_setting('app.project_id', true)")
+    if principal_scoped:
+        parts.append("principal_id = current_setting('app.principal_id', true)")
+    predicate = "\n       AND ".join(parts)
     return [
         f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY",
         f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY",
@@ -376,7 +397,11 @@ def upgrade() -> None:
         op.execute(statement)
 
     for table in TABLES:
-        for statement in _standard_rls(table, project_scoped=table in PROJECT_SCOPED):
+        for statement in _standard_rls(
+            table,
+            project_scoped=table in PROJECT_SCOPED,
+            principal_scoped=table in PRINCIPAL_SCOPED,
+        ):
             op.execute(statement)
 
     # projects 的策略换成成员感知版。
