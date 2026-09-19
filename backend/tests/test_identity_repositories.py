@@ -77,6 +77,29 @@ def _unique(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
 
 
+def _reset_pg_identity_state() -> None:
+    """清掉本模块租户下的会话与邀请（超级用户连接）。
+
+    为什么必须清：`test_revoke_all_for_contract` 断言的是**绝对条数**
+    （"只撤掉本次创建的 2 条"），而会话 id 唯一、库跨用例与跨运行长期保留。
+    上一次残留的存活会话会被下一次 `revoke_all_for` 一并撤掉 ——
+    实测报出 `assert 66 == 2`。那不是产品缺陷（RLS 确实只圈住了
+    「该租户 + 该主体」，没有越过边界），是测试没有隔离自己。
+    """
+    if not _postgres_reachable():
+        return
+    with psycopg.connect(MIGRATION_DSN) as conn:
+        with conn.transaction():
+            conn.execute(
+                "DELETE FROM user_sessions WHERE tenant_id IN (%s, %s)",
+                (TENANT, OTHER_TENANT),
+            )
+            conn.execute(
+                "DELETE FROM invitations WHERE tenant_id IN (%s, %s)",
+                (TENANT, OTHER_TENANT),
+            )
+
+
 @pytest.fixture(
     params=[
         pytest.param("memory", id="memory"),
@@ -108,6 +131,9 @@ def repos(request, pg_seed):
         PostgresSessionRepository,
     )
 
+    # 每个 PG 用例都从干净状态开始：本模块有绝对计数断言，不能受
+    # 其他用例或上一次运行残留的会话影响（见 `_reset_pg_identity_state`）。
+    _reset_pg_identity_state()
     return (
         PostgresMembershipRepository(),
         PostgresInvitationRepository(),
@@ -351,6 +377,75 @@ def test_pg_state_survives_adapter_restart(pg_seed):
     )
     # 会话仍然存活：重启没有丢登录态。
     assert second_sessions.get_live(_alice(), session_id) is not None
+
+
+@pytest.mark.invariant
+def test_revoke_all_for_contract(repos):
+    """集中失效在两个适配器上语义一致：只撤自己租户+主体的存活会话。"""
+    _, _, sessions = repos
+    from datetime import datetime, timezone
+
+    from app.product.models import UserSession
+
+    now = datetime.now(timezone.utc)
+
+    def _make(sid: str, principal: str) -> None:
+        sessions.create(
+            UserSession(
+                session_id=sid,
+                tenant_id=TENANT,
+                principal_id=principal,
+                issued_at=now,
+                expires_at=now + NOW_TIMDELTA,
+            )
+        )
+
+    keep, drop1, drop2 = _unique("sess"), _unique("sess"), _unique("sess")
+    bobs = _unique("sess")
+    _make(keep, ALICE)
+    _make(drop1, ALICE)
+    _make(drop2, ALICE)
+    _make(bobs, BOB)
+
+    # 「退出其余设备」：保留当前会话。
+    assert sessions.revoke_all_for(_alice(), at=now, except_session_id=keep) == 2
+    assert sessions.get_live(_alice(), keep) is not None
+    assert sessions.get_live(_alice(), drop1) is None
+    assert sessions.get_live(_alice(), drop2) is None
+    # 同租户别的主体不受影响。
+    assert sessions.get_live(_bob(), bobs) is not None
+    # 这次撤掉保留的那一条；之后幂等为 0。
+    assert sessions.revoke_all_for(_alice(), at=now) == 1
+    assert sessions.revoke_all_for(_alice(), at=now) == 0
+    # BOB 自己撤自己。
+    assert sessions.revoke_all_for(_bob(), at=now) == 1
+
+
+@pytest.mark.invariant
+def test_exchange_rejects_session_window_beyond_ttl_cap(repos):
+    """会话期限硬上限在两个适配器上同一拒绝方向（100 年会话必须建不出来）。"""
+    _, invitations, sessions = repos
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    token_hash = "sha256:" + uuid.uuid4().hex
+    invitations.issue(SystemContext(TENANT, "契约测试"), **_issue_args(token_hash, ALICE))
+
+    with pytest.raises(PlatformError) as excinfo:
+        invitations.exchange(
+            token_hash,
+            session_id=_unique("sess"),
+            session_expires_at=now + timedelta(days=36500),
+        )
+    assert excinfo.value.code is ErrorCode.INTERNAL_CONSISTENCY_ERROR
+
+    # 邀请没有被悬空消费：合法期限内兑换成功且会话可查。
+    ok_id = _unique("sess")
+    session = invitations.exchange(
+        token_hash, session_id=ok_id, session_expires_at=now + NOW_TIMDELTA
+    )
+    assert session is not None
+    assert sessions.get_live(_alice(), ok_id) is not None
 
 
 @pytest.mark.invariant

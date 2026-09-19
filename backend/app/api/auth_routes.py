@@ -1,4 +1,4 @@
-"""邀请登录与退出（Task 3 的 HTTP 入口）。
+"""邀请登录与退出（认证引导 HTTP 入口）。
 
 ## 本模块存在的意义
 
@@ -9,39 +9,54 @@ POST /auth/invitations/exchange  {"token": "<原始邀请令牌>"}
   → 服务端算 sha256 → InvitationRepository.exchange()（无身份参数）
   → 成功：种下 HttpOnly cookie，响应里**没有任何令牌材料**
   → 失败：未知 / 已过期 / 已消费 / 格式错 → 同一个错误码同一句话
+  → 按客户端键限流，超限 429 + Retry-After
 
-POST /auth/logout   → 撤销数据库会话 + 清除 cookie
+POST /auth/logout       → 撤销当前会话 + 清除 cookie
+POST /auth/logout/all   → 集中失效本主体全部会话（退出所有设备）+ 清除 cookie
 ```
 
-安全属性（都有测试守着）：
+## 安全边界（第 1 轮收口后）
 
 - **客户端没有身份参数可传**：请求体里只有 `token`，主体由邀请行预绑定
   （0003 迁移的 `invitee_principal_id` + `SECURITY DEFINER` 兑换函数）；
-- **原始令牌与哈希不出现在任何响应里**（响应体没有、Set-Cookie 里也没有 ——
-  cookie 里放的是签名声明，与邀请令牌是两回事）；
+- **原始令牌与哈希不出现在任何响应/审计载荷里**；
 - **失败统一拒绝**：探测者无法区分"token 不存在"和"token 已被用过"；
-- `extra="forbid"`：多传 `tenant_id` / `principal_id` 直接 422 ——
-  那类字段出现在认证请求里，应当当场被拒而不是"安全地"忽略。
+- **CSRF 严格模式**：凭 cookie 的不安全方法**必须**携带可信 Origin；
+  无 Origin 时只接受同源 Referer；两者都没有 → 拒绝。可信集合 =
+  配置的外部 Origin 白名单 ∪ 请求自身 Host 来源（反代下按
+  X-Forwarded-* 计算，且只有显式声明 `STUDY_PLATFORM_BEHIND_PROXY=1`
+  才信任转发头，否则客户端可随意伪造）；
+- **Bearer 兜底可整体关闭**：生产装配关闭 bearer，只认 cookie；
+- **审计**：兑换成功/被拒、认证失败、限流命中、退出（单个/全部）
+  全部进入审计事实源。
 """
 
 from __future__ import annotations
 
 from hashlib import sha256
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.errors import ErrorCode, deny
+from app.audit.sink import RiskLevel
+from app.core.errors import ErrorCode, PlatformError, deny
 from app.core.ids import new_id
 from app.identity.cookie_auth import SESSION_COOKIE_NAME
 from app.identity.models import Principal
+
+if TYPE_CHECKING:  # 类型标注用，运行时不导入（避免与 main 循环依赖）
+    from app.main import PlatformState
 
 router = APIRouter()
 
 #: 邀请令牌的长度上限。原始令牌是高熵随机串；超长输入不是用户，是探测。
 TOKEN_MAX_CHARS = 4096
+
+#: 不依赖环境凭证的"安全方法"：即使带 cookie 也不做 CSRF 判定。
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
 
 class ExchangeBody(BaseModel):
@@ -60,52 +75,131 @@ def _token_hash(raw_token: str) -> str:
     return f"sha256:{digest}"
 
 
+# ------------------------------------------------------------ CSRF / 客户端键
+
+
+def _request_host_origin(request: Request, *, behind_proxy: bool) -> str | None:
+    """本次请求自身的 Origin（scheme://host[:port]）。
+
+    反向代理场景只有在显式声明 behind_proxy 时才采信 X-Forwarded-* ——
+    这些头客户端可以随便造，无条件信任等于让 CSRF 白名单形同虚设。
+    """
+    headers = request.headers
+    if behind_proxy:
+        host = (
+            headers.get("x-forwarded-host", "").split(",")[0].strip()
+            or headers.get("host", "").strip()
+        )
+        scheme = (
+            headers.get("x-forwarded-proto", "").split(",")[0].strip()
+            or request.url.scheme
+        )
+    else:
+        host = headers.get("host", "").strip()
+        scheme = request.url.scheme
+    if not host:
+        return None
+    return f"{scheme.lower()}://{host.lower()}"
+
+
+def _origin_from_url(value: str) -> str | None:
+    """从绝对 URL 提取 scheme://host[:port]；非法返回 None。"""
+    parts = urlsplit(value.strip())
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        return None
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+
+
+def _require_same_origin(request: Request, state: "PlatformState") -> None:
+    """cookie 认证的**不安全方法**必须通过严格同源校验。
+
+    判定顺序（主流框架严格模式一致）：
+
+    1. 有 ``Origin``：必须命中可信集合（白名单 ∪ 请求自身 Host 来源）；
+    2. 无 ``Origin`` 但有 ``Referer``：Referer 的源必须命中可信集合；
+    3. 两者都没有 / 都不可信 → ``CSRF_DENIED``。
+
+    「没有 Origin 就放行」是第 1 轮修掉的漏洞：非浏览器客户端可以不带
+    Origin 直接发 POST，浏览器在部分隐私模式下也会省略 Origin。
+    """
+    if request.method in _SAFE_METHODS:
+        return
+    trusted = set(state.trusted_origins)
+    host_origin = _request_host_origin(request, behind_proxy=state.behind_proxy)
+    if host_origin is not None:
+        trusted.add(host_origin)
+
+    origin = request.headers.get("origin")
+    if origin:
+        if origin.strip().lower().rstrip("/") in trusted:
+            return
+        raise deny(ErrorCode.CSRF_DENIED, "请求来源与会话站点不一致（Origin 不匹配）")
+
+    referer = request.headers.get("referer")
+    if referer:
+        referer_origin = _origin_from_url(referer)
+        if referer_origin is not None and referer_origin in trusted:
+            return
+        raise deny(ErrorCode.CSRF_DENIED, "请求来源与会话站点不一致（Referer 不匹配）")
+
+    raise deny(ErrorCode.CSRF_DENIED, "请求缺少 Origin/Referer，无法确认同源")
+
+
+def _client_key(request: Request, state: "PlatformState") -> str:
+    """限流客户端键：显式反代模式取 X-Forwarded-For 首跳，否则取 TCP 对端。"""
+    if state.behind_proxy:
+        first = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        if first:
+            return first
+    if request.client is not None:
+        return request.client.host
+    return "unknown"
+
+
 # --------------------------------------------------------------------- 认证
 
 
-def authenticate_request(request: Request) -> Principal:
-    """HTTP 请求的**唯一**认证入口：cookie 优先，bearer 兼容兜底。
+def _audit_auth_failure(request: Request, state: "PlatformState", exc: PlatformError) -> None:
+    """认证失败统一进审计事实源（HIGH：安全追踪与异常告警依赖它）。"""
+    stage = "csrf_origin" if exc.code is ErrorCode.CSRF_DENIED else "credential"
+    state.audit.append(
+        "authentication_failed",
+        {
+            "stage": stage,
+            "path": request.url.path,
+            "client_key": _client_key(request, state),
+        },
+        risk=RiskLevel.HIGH,
+    )
 
-    cookie 路径三步、顺序不可换：
-    1. 验签 —— 签名无效立刻拒绝，此后才谈得上信任载荷；
-    2. CSRF 来源检查（仅不安全方法）—— 利用的是浏览器自动携带的环境凭证；
-    3. 回库查撤销 —— cookie 可撤销的全部根据：状态只在数据库里。
 
-    bearer 路径是显式的运维/测试兼容适配器：凭据由调用方显式携带，
-    不经过 CSRF 检查（没有"自动携带"可被利用）。
-    """
-    state = _state(request)
+def _authenticate(request: Request, state: "PlatformState") -> Principal:
     raw = request.cookies.get(SESSION_COOKIE_NAME)
     if raw is not None:
         claims = state.cookie_auth.verify(raw, now=state.clock.now())
-        _require_same_origin(request)
+        _require_same_origin(request, state)
         if state.session_store.get_live(claims.to_principal(), claims.session_id) is None:
             # 已撤销 / 已过期 / 不存在 —— 同一种拒绝。
             # 撤销立刻生效的全部根据就在这次回库查询上。
             raise deny(ErrorCode.AUTH_REQUIRED, "未认证或凭据无效")
         return claims.to_principal()
+
+    # bearer 是显式的运维/测试兼容适配器。生产装配整体关闭它，
+    # 避免"浏览器路径收紧了、开发通道还开着"的双标面。
+    if not state.bearer_enabled:
+        raise deny(ErrorCode.AUTH_REQUIRED, "未认证或凭据无效")
     return state.auth.authenticate(request.headers.get("Authorization"))
 
 
-def _require_same_origin(request: Request) -> None:
-    """cookie 认证的**不安全方法**必须通过来源检查。
-
-    浏览器对不安全请求**总会**带 `Origin`；带了就必须与 Host 一致。
-    没有 Origin 的请求不是浏览器发的 —— 显式携带凭据的客户端
-    （curl、测试、服务间调用）不在 CSRF 威胁模型内，直接放行。
-    """
-    if request.method in {"GET", "HEAD", "OPTIONS"}:
-        return
-    origin = request.headers.get("origin")
-    if origin is None:
-        return
-    host = request.headers.get("host", "")
-    if urlsplit(origin).netloc.lower() != host.lower():
-        raise deny(
-            ErrorCode.CSRF_DENIED,
-            "请求来源与会话站点不一致",
-            origin=origin,
-        )
+def authenticate_request(request: Request) -> Principal:
+    """HTTP 请求的**唯一**认证入口：cookie 优先，bearer 受开关控制兜底。"""
+    state = _state(request)
+    try:
+        return _authenticate(request, state)
+    except PlatformError as exc:
+        if exc.code in (ErrorCode.AUTH_REQUIRED, ErrorCode.CSRF_DENIED):
+            _audit_auth_failure(request, state, exc)
+        raise
 
 
 # --------------------------------------------------------------------- 端点
@@ -113,20 +207,55 @@ def _require_same_origin(request: Request) -> None:
 
 @router.post("/auth/invitations/exchange")
 def exchange_invitation(request: Request, body: ExchangeBody) -> JSONResponse:
-    """兑换邀请：种下会话 cookie。
+    """兑换邀请：限流 → 兑换 → 审计 → 种下会话 cookie。
 
     这是**认证引导**端点 —— 调用方此刻还没有任何身份，所以本端点不做认证，
-    也不做 CSRF 来源检查（没有环境凭证可被利用）。
+    也不做 CSRF 来源检查（没有环境凭证可被利用），但必须限流。
     """
     state = _state(request)
-    session = state.invitations.exchange(
-        _token_hash(body.token),
-        session_id=new_id("sess"),
-        session_expires_at=state.clock.now() + state.session_ttl,
-    )
+    now = state.clock.now()
+    client_key = _client_key(request, state)
+
+    decision = state.rate_limiter.register(client_key, now=now)
+    if not decision.allowed:
+        state.audit.append(
+            "auth_rate_limited",
+            {"client_key": client_key, "attempts": decision.attempts},
+            risk=RiskLevel.LOW,
+        )
+        # 统一走 error_response：429 + Retry-After + 标准错误体（含 request_id）。
+        raise PlatformError(
+            code=ErrorCode.RATE_LIMITED,
+            message="尝试过于频繁，请稍后再试",
+            retryable=True,
+            details={"retry_after_seconds": decision.retry_after_seconds},
+        )
+
+    try:
+        session = state.invitations.exchange(
+            _token_hash(body.token),
+            session_id=new_id("sess"),
+            session_expires_at=now + state.session_ttl,
+        )
+    except PlatformError:
+        # 内部一致性错误（例如 TTL 越界）不伪装成"邀请无效"，原样上抛为 5xx。
+        raise
     if session is None:
+        # 审计同一条事件、载荷不带失败原因（未知/过期/已消费不可区分）。
+        state.audit.append(
+            "invitation_rejected",
+            {"client_key": client_key},
+            risk=RiskLevel.HIGH,
+        )
         # 统一拒绝：不给"token 存在但已被用掉"留任何可区分的信号。
         raise deny(ErrorCode.INVITATION_INVALID, "邀请无效、已过期或已被使用")
+
+    state.audit.append(
+        "invitation_exchanged",
+        {"session_id": session.session_id, "principal_id": session.principal_id},
+        risk=RiskLevel.HIGH,
+        tenant_id=session.tenant_id,
+    )
 
     cookie_value = state.cookie_auth.issue(session)
     response = JSONResponse(
@@ -147,25 +276,63 @@ def exchange_invitation(request: Request, body: ExchangeBody) -> JSONResponse:
     return response
 
 
+def _require_cookie_session(request: Request):
+    """logout 系列端点共同前置：有效签名 cookie + 严格 CSRF，失败统一审计。"""
+    state = _state(request)
+    try:
+        raw = request.cookies.get(SESSION_COOKIE_NAME)
+        if raw is None:
+            raise deny(ErrorCode.AUTH_REQUIRED, "未认证或凭据无效")
+        claims = state.cookie_auth.verify(raw, now=state.clock.now())
+        _require_same_origin(request, state)
+        return claims
+    except PlatformError as exc:
+        if exc.code in (ErrorCode.AUTH_REQUIRED, ErrorCode.CSRF_DENIED):
+            _audit_auth_failure(request, state, exc)
+        raise
+
+
 @router.post("/auth/logout")
 def logout(request: Request) -> JSONResponse:
     """退出：撤销数据库会话并清除 cookie。
 
     cookie 是会话的引用，**撤销必须落在库上** —— 只删 cookie 的话，
     那份 cookie 若被复制过（日志、代理、他人屏幕）就还能用。
-    撤销之后同一 cookie 再来，认证路径的回库查询会扑空 → 拒绝。
     """
     state = _state(request)
-    raw = request.cookies.get(SESSION_COOKIE_NAME)
-    if raw is None:
-        raise deny(ErrorCode.AUTH_REQUIRED, "未认证或凭据无效")
+    claims = _require_cookie_session(request)
+    now = state.clock.now()
 
-    # 复用统一认证路径的验签与 CSRF 检查；这里只差"撤销"这一步。
-    claims = state.cookie_auth.verify(raw, now=state.clock.now())
-    _require_same_origin(request)
-    revoked = state.session_store.revoke(
-        claims.to_principal(), claims.session_id, at=state.clock.now()
-    )
+    revoked = state.session_store.revoke(claims.to_principal(), claims.session_id, at=now)
+    if revoked:
+        state.audit.append(
+            "session_revoked",
+            {"session_id": claims.session_id},
+            risk=RiskLevel.LOW,
+            tenant_id=claims.tenant_id,
+        )
     response = JSONResponse({"revoked": revoked})
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    return response
+
+
+@router.post("/auth/logout/all")
+def logout_all(request: Request) -> JSONResponse:
+    """退出所有设备：集中失效本主体名下全部存活会话（含当前设备）。
+
+    用于 cookie 密钥轮换、设备丢失等场景；返回实际撤销条数。
+    """
+    state = _state(request)
+    claims = _require_cookie_session(request)
+    now = state.clock.now()
+
+    revoked_count = state.session_store.revoke_all_for(claims.to_principal(), at=now)
+    state.audit.append(
+        "sessions_revoked_all",
+        {"session_id": claims.session_id, "revoked_count": revoked_count},
+        risk=RiskLevel.LOW,
+        tenant_id=claims.tenant_id,
+    )
+    response = JSONResponse({"revoked": revoked_count})
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
     return response

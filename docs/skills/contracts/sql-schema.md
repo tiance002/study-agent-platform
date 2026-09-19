@@ -7,19 +7,20 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:2f34a0d7d6c07deb84fa643fa4c71277b18a2f8c4cfbd6c38fa3e0581f0b6fb0, generated_at=2026-09-19T08:38:36Z -->
-> 生成时间：2026-09-19T08:38:36Z
+<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:1c0ade5df6f7d0ff18c92564188320fededd11703dbab62bf0743a4d0387c626, generated_at=2026-09-19T10:36:37Z -->
+> 生成时间：2026-09-19T10:36:37Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
 
-当前 head：`0003`
+当前 head：`0004`
 
 ### 表总览
 
 | 表 | 来源迁移 | 隔离级别 | 应用角色权限 | 列数 |
 |---|---|---|---|---:|
 | `action_intents` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 11 |
+| `auth_attempt_counters` | 0004 | 系统级（无租户，认证前设施） | 无表权限（仅 SECURITY DEFINER 函数 EXECUTE） | 4 |
 | `confirmations` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 12 |
 | `conversations` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 6 |
 | `evidence_events` | 0001 | 租户+项目 | SELECT, INSERT | 12 |
@@ -51,6 +52,10 @@
 | `action_intents` | `attempts` | `jsonb` |
 | `action_intents` | `created_at` | `timestamptz` |
 | `action_intents` | `updated_at` | `timestamptz` |
+| `auth_attempt_counters` | `bucket` | `text` |
+| `auth_attempt_counters` | `window_start` | `timestamptz` |
+| `auth_attempt_counters` | `attempts` | `integer` |
+| `auth_attempt_counters` | `last_at` | `timestamptz` |
 | `confirmations` | `confirmation_id` | `text` |
 | `confirmations` | `tenant_id` | `text` |
 | `confirmations` | `project_id` | `text` |

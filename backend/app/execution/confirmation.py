@@ -42,6 +42,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
+from typing import Protocol
 
 from app.core.errors import ErrorCode, deny
 from app.core.hashing import content_hash
@@ -177,6 +178,58 @@ def assert_within_ceiling(ceiling: BudgetCeiling, reserved: dict[str, int]) -> N
             confirmed_ceiling=ceiling.amount,
             requested=actual,
         )
+
+
+class ConfirmationRepository(Protocol):
+    """确认记录的**端口**：内存适配器与 PostgreSQL 适配器互换的契约。
+
+    只声明编排层与接入层真正需要的方法。刻意**不含 `get`**：
+    两个适配器的 `get` 签名本就不同（内存按 id 取，PostgreSQL 还必须
+    带租户 + 项目上下文、由 RLS 兜底），把它塞进端口等于逼其中一方
+    伪造一个自己不满足的签名。端口描述的是共同能力，不是实现细节的并集。
+
+    编排层此前直接标注具体类 `ConfirmationStore`，于是 PG 装配只能靠
+    `type: ignore` 或宽联合类型通过 —— 两者都会让"换了适配器却没换对"
+    在类型层面不可见。
+    """
+
+    def create(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str,
+        principal_id: str,
+        tool_id: str,
+        params: dict,
+        budget_ceiling: BudgetCeiling,
+        issued_at: datetime,
+        ttl: timedelta = DEFAULT_CONFIRMATION_TTL,
+    ) -> ConfirmationRecord: ...
+
+    def peek(
+        self,
+        confirmation_id: str,
+        *,
+        tenant_id: str,
+        project_id: str,
+        principal_id: str,
+        tool_id: str,
+        params: dict,
+        now: datetime,
+    ) -> ConfirmationRecord: ...
+
+    def consume(
+        self,
+        confirmation_id: str,
+        *,
+        tenant_id: str,
+        project_id: str,
+        principal_id: str,
+        tool_id: str,
+        params: dict,
+        now: datetime,
+        reserved_budget: dict[str, int] | None = None,
+    ) -> ConfirmationRecord: ...
 
 
 @dataclass

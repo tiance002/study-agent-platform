@@ -256,6 +256,7 @@ def render_sql_schema() -> str:
     | `PROJECT_SCOPED` | 其中属于项目级的（谓词额外要求 `app.project_id`） |
     | `APPEND_ONLY` | 只给应用角色 `SELECT, INSERT` |
     | `NO_DELETE` | 只给 `SELECT, INSERT, UPDATE` |
+    | `SYSTEM_TABLES` | 认证前系统设施：无租户、无表权限，仅 definer 函数可触达 |
     | `POLICY_OVERRIDES` | 改写既有表的隔离级别，如 `{"projects": "成员感知"}` |
     """
     tables: dict[str, dict[str, object]] = {}
@@ -265,25 +266,33 @@ def render_sql_schema() -> str:
         principal_scoped = set(_module_literal(tree, "PRINCIPAL_SCOPED") or ())
         append_only = set(_module_literal(tree, "APPEND_ONLY") or ())
         no_delete = set(_module_literal(tree, "NO_DELETE") or ())
+        system_tables = set(_module_literal(tree, "SYSTEM_TABLES") or ())
         overrides = _module_literal(tree, "POLICY_OVERRIDES") or {}
 
         for block in _create_table_blocks(tree):
             name = _table_name(block)
             if name is None:
                 continue
-            # 隔离级别写成"叠加了几层"而不是一个词：租户是最底层，
-            # 项目与主体是往上加的约束。这样 `user_sessions`（租户+主体）
-            # 与 `conversations`（租户+项目）的差别一眼能看出来 ——
-            # 而"租户级"这个笼统说法正是漏掉主体维度的原因。
-            scope = "+".join(
-                ["租户"]
-                + (["项目"] if name in project_scoped else [])
-                + (["主体"] if name in principal_scoped else [])
-            )
+            if name in system_tables:
+                # 认证前系统设施（限流计数表）：没有租户、不套用 RLS 租户模板，
+                # 应用角色没有任何裸表权限，只能通过 SECURITY DEFINER 函数触达。
+                scope = "系统级（无租户，认证前设施）"
+                grants = "无表权限（仅 SECURITY DEFINER 函数 EXECUTE）"
+            else:
+                # 隔离级别写成"叠加了几层"而不是一个词：租户是最底层，
+                # 项目与主体是往上加的约束。这样 `user_sessions`（租户+主体）
+                # 与 `conversations`（租户+项目）的差别一眼能看出来 ——
+                # 而"租户级"这个笼统说法正是漏掉主体维度的原因。
+                scope = "+".join(
+                    ["租户"]
+                    + (["项目"] if name in project_scoped else [])
+                    + (["主体"] if name in principal_scoped else [])
+                )
+                grants = _grants_of(name, append_only, no_delete)
             tables[name] = {
                 "revision": revision,
                 "scope": scope,
-                "grants": _grants_of(name, append_only, no_delete),
+                "grants": grants,
                 "columns": _columns_of(block),
             }
 

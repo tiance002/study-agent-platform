@@ -122,3 +122,18 @@ class SessionRepository(Protocol):
     def revoke(self, actor: Principal, session_id: str, *, at: datetime) -> bool:
         """撤销会话。返回是否真的撤掉了一条（重复撤销返回 False）。"""
         ...
+
+    def revoke_all_for(
+        self,
+        actor: Principal,
+        *,
+        at: datetime,
+        except_session_id: str | None = None,
+    ) -> int:
+        """集中失效：撤销该主体名下全部存活会话（"退出所有设备"）。
+
+        只作用于调用方自己的租户+主体（RLS / 归属判定兜底），
+        返回本次真正撤掉的条数。`except_session_id` 用于"撤掉其余设备
+        但保留当前会话"；集中轮换密钥等场景不传例外。
+        """
+        ...

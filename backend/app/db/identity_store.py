@@ -17,7 +17,7 @@
 |---|---|---|
 | `create_project` / `grant_project` | 租户级 | 写入供给：创建项目时还没有 project_id 可设 |
 | `list_for` / `get` | 租户 + 主体 | `projects` 读取策略是成员感知的（EXISTS 读 `app.principal_id`） |
-| `get_live` / `revoke` | 租户 + 主体 | `user_sessions` 策略叠加了主体维度 |
+| `get_live` / `revoke` / `revoke_all_for` | 租户 + 主体 | `user_sessions` 策略叠加了主体维度 |
 | `exchange` | **无上下文** | 兑换发生在任何身份存在之前（SECURITY DEFINER 函数自己搞定） |
 """
 
@@ -164,10 +164,17 @@ class PostgresMembershipRepository:
 class PostgresInvitationRepository:
     """邀请的 PostgreSQL 实现。兑换走 `exchange_invitation()` 引导函数。"""
 
-    def __init__(self, clock: Clock | None = None, dsn: str | None = None) -> None:
+    def __init__(
+        self,
+        clock: Clock | None = None,
+        dsn: str | None = None,
+        sessions: PostgresSessionRepository | None = None,
+    ) -> None:
         self._clock = clock or SystemClock()
         self._dsn = dsn
-        self._sessions = PostgresSessionRepository(clock=self._clock, dsn=dsn)
+        # 允许装配层注入**同一个**会话仓储：兑换写入与认证回读必须落在同一
+        # 适配器/同一 DSN 上，各建各的实例在传入不同 dsn 时会静默分叉。
+        self._sessions = sessions or PostgresSessionRepository(clock=self._clock, dsn=dsn)
 
     def issue(
         self,
@@ -218,13 +225,22 @@ class PostgresInvitationRepository:
         # 刻意不设任何上下文：兑换发生在「调用方还没有任何身份」的时刻。
         # 函数是 SECURITY DEFINER，自己完成"消费邀请 + 建会话"；
         # 应用角色只有 EXECUTE 权限，没有无上下文读表的能力。
-        with connect(self._dsn) as conn:
-            rows = conn.execute(
-                "SELECT session_id, tenant_id, principal_id, expires_at"
-                " FROM exchange_invitation(%s, %s, %s)",
-                (token_hash, session_id, session_expires_at),
-            ).fetchall()
-            conn.commit()
+        try:
+            with connect(self._dsn) as conn:
+                rows = conn.execute(
+                    "SELECT session_id, tenant_id, principal_id, expires_at"
+                    " FROM exchange_invitation(%s, %s, %s)",
+                    (token_hash, session_id, session_expires_at),
+                ).fetchall()
+                conn.commit()
+        except pg_errors.CheckViolation as exc:
+            # 0004 起函数对会话期限做硬上限校验、表上也有同名 CHECK。
+            # 能触发它只可能是服务端配置/调用错误（客户端不提供期限），
+            # 翻译成内部一致性错误，与内存适配器同一拒绝方向。
+            raise deny(
+                ErrorCode.INTERNAL_CONSISTENCY_ERROR,
+                "会话有效期超出服务端允许范围",
+            ) from exc
         if not rows:
             # 未知 / 已过期 / 已消费统一走到这里 —— 与内存版同一个公开结果。
             return None
@@ -232,10 +248,14 @@ class PostgresInvitationRepository:
         principal = Principal(principal_id=principal_id, tenant_id=tenant_id)
         # 回读权威行（含 issued_at / revoked_at），而不是用入参拼一个近似对象。
         session = self._sessions.get_live(principal, session_id)
-        assert session is not None, (
-            "exchange_invitation 返回了会话标识，但紧接着的回读不可见 —— "
-            "这说明函数与会话表的隔离策略之间出现了不一致，必须当场暴露"
-        )
+        if session is None:
+            # 不用 assert：python -O 会剥掉断言，而这是兑换事务与会话表
+            # 隔离策略之间的内部一致性破裂，在优化模式下也必须当场暴露。
+            raise deny(
+                ErrorCode.INTERNAL_CONSISTENCY_ERROR,
+                "兑换函数返回了会话但回读不可见，认证存储一致性破裂",
+                session_id=session_id,
+            )
         return session
 
 
@@ -247,23 +267,30 @@ class PostgresSessionRepository:
         self._dsn = dsn
 
     def create(self, session: UserSession) -> None:
-        with principal_transaction(
-            tenant_id=session.tenant_id,
-            principal_id=session.principal_id,
-            dsn=self._dsn,
-        ) as conn:
-            conn.execute(
-                "INSERT INTO user_sessions"
-                " (session_id, tenant_id, principal_id, issued_at, expires_at)"
-                " VALUES (%s, %s, %s, %s, %s)",
-                (
-                    session.session_id,
-                    session.tenant_id,
-                    session.principal_id,
-                    session.issued_at,
-                    session.expires_at,
-                ),
-            )
+        try:
+            with principal_transaction(
+                tenant_id=session.tenant_id,
+                principal_id=session.principal_id,
+                dsn=self._dsn,
+            ) as conn:
+                conn.execute(
+                    "INSERT INTO user_sessions"
+                    " (session_id, tenant_id, principal_id, issued_at, expires_at)"
+                    " VALUES (%s, %s, %s, %s, %s)",
+                    (
+                        session.session_id,
+                        session.tenant_id,
+                        session.principal_id,
+                        session.issued_at,
+                        session.expires_at,
+                    ),
+                )
+        except pg_errors.CheckViolation as exc:
+            # 0004 的 TTL CHECK：会话期限非法是服务端错误，不是客户端可修复的参数。
+            raise deny(
+                ErrorCode.INTERNAL_CONSISTENCY_ERROR,
+                "会话有效期超出服务端允许范围",
+            ) from exc
 
     def get_live(self, actor: Principal, session_id: str) -> UserSession | None:
         with principal_transaction(
@@ -289,3 +316,31 @@ class PostgresSessionRepository:
                 (at, session_id),
             ).fetchone()
         return row is not None
+
+    def revoke_all_for(
+        self,
+        actor: Principal,
+        *,
+        at: datetime,
+        except_session_id: str | None = None,
+    ) -> int:
+        """集中失效该主体名下全部存活会话。
+
+        租户+主体维度由 RLS 策略兜底（`app.principal_id` 不匹配的行
+        UPDATE 时对当前角色不可见），SQL 里不再手写归属条件，
+        与 `revoke` 同一纪律；只额外过滤"存活"与可选例外。
+        """
+        with principal_transaction(
+            tenant_id=actor.tenant_id, principal_id=actor.principal_id, dsn=self._dsn
+        ) as conn:
+            rows = conn.execute(
+                "UPDATE user_sessions SET revoked_at = %s"
+                " WHERE revoked_at IS NULL AND expires_at > now()"
+                # `%s::text` 的显式转换不可省：裸参数出现在 `IS NULL` 里时
+                # PostgreSQL 无法推断类型，报 "could not determine data type
+                # of parameter $2"，整个 logout/all 路径在 PG 形态下 500。
+                " AND (%s::text IS NULL OR session_id <> %s)"
+                " RETURNING session_id",
+                (at, except_session_id, except_session_id),
+            ).fetchall()
+        return len(rows)

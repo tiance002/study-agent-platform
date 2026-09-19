@@ -70,10 +70,27 @@ class CookieAuth:
     与会话令牌密钥、数据密钥、审计密钥互相分离。
     """
 
-    def __init__(self, secret: str, clock: Clock) -> None:
+    def __init__(
+        self,
+        secret: str,
+        clock: Clock,
+        *,
+        previous_secrets: tuple[str, ...] = (),
+    ) -> None:
+        """
+        :param secret: 当前签名密钥，**签发**只用它。
+        :param previous_secrets: 轮换窗口内的旧密钥，只用于**验签**。
+            轮换密钥后，旧 cookie 在窗口内仍然可用（用户无需重新登录），
+            直到自然过期或被集中撤销；新签发的 cookie 一律用新密钥。
+            旧密钥验证通过的 cookie 不会自动重签 —— 是否重签由接入层决定，
+            本类只回答"这份凭据是否由某个曾信任的密钥签过且未过期"。
+        """
         if not secret:
             raise ValueError("cookie 签名密钥不能为空")
         self._secret = secret.encode("utf-8")
+        self._verify_secrets = (self._secret,) + tuple(
+            old.encode("utf-8") for old in previous_secrets if old
+        )
         self._clock = clock
 
     # ------------------------------------------------------------------ 签发
@@ -97,8 +114,12 @@ class CookieAuth:
         return f"{body.rstrip('=')}.{self._sign(payload)}"
 
     def _sign(self, payload: dict) -> str:
+        return self._sign_with(self._secret, payload)
+
+    @staticmethod
+    def _sign_with(key: bytes, payload: dict) -> str:
         material = canonical_json(payload).encode("utf-8")
-        return hmac.new(self._secret, material, sha256).hexdigest()
+        return hmac.new(key, material, sha256).hexdigest()
 
     # ------------------------------------------------------------------ 校验
 
@@ -133,6 +154,8 @@ class CookieAuth:
             raise deny(ErrorCode.AUTH_REQUIRED, "会话凭据无效") from exc
 
         # 重建 payload 再验签：只信重算出来的签名，不信 cookie 自带的。
+        # 当前密钥与轮换窗口内的旧密钥逐个比对（compare_digest 短路无意义，
+        # 但必须用它，不能用 == 比较签名）。
         payload = {
             "session_id": session_id,
             "tenant_id": tenant_id,
@@ -140,7 +163,11 @@ class CookieAuth:
             "issued_at": issued_at,
             "expires_at": expires_at,
         }
-        if not hmac.compare_digest(signature, self._sign(payload)):
+        signature_ok = any(
+            hmac.compare_digest(signature, self._sign_with(key, payload))
+            for key in self._verify_secrets
+        )
+        if not signature_ok:
             raise deny(ErrorCode.AUTH_REQUIRED, "会话凭据无效")
         if now >= expires_at:
             raise deny(ErrorCode.AUTH_REQUIRED, "会话凭据无效")

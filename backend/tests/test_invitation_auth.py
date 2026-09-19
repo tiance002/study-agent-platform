@@ -129,7 +129,8 @@ def test_logout_revokes_session_and_clears_cookie(client, invited):
     assert client.post("/auth/invitations/exchange", json={"token": TOKEN_LIVE}).status_code == 200
     assert client.get("/me").status_code == 200
 
-    logout = client.post("/auth/logout")
+    # cookie 认证的不安全方法必须显式携带同源 Origin（严格 CSRF）。
+    logout = client.post("/auth/logout", headers={"Origin": "http://testserver"})
     assert logout.status_code == 200
     assert logout.json()["revoked"] is True
     assert "study_session=;" in logout.headers["set-cookie"] or 'study_session=""' in logout.headers["set-cookie"]

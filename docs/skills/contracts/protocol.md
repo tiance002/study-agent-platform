@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:1019b23e6b3b84b68d8b7e9a76f4e4ceb98d57f24cbc54b5989acc003f7c015b, generated_at=2026-09-19T08:38:36Z -->
-> 生成时间：2026-09-19T08:38:36Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:54b9131cb9d2bd3fa84e89d1d629ae8e915314eb26a40df6247430b250b5526d, generated_at=2026-09-19T12:33:19Z -->
+> 生成时间：2026-09-19T12:33:19Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -17,6 +17,7 @@
 |---|---|---|
 | `/auth/invitations/exchange` | POST | Exchange Invitation |
 | `/auth/logout` | POST | Logout |
+| `/auth/logout/all` | POST | Logout All |
 | `/healthz` | GET | Healthz |
 | `/me` | GET | Me |
 | `/projects/{project_id}/audit` | GET | Audit View |
@@ -29,7 +30,7 @@
 
 ### 稳定错误码
 
-共 36 个，一经发布不得改变语义，只能追加。
+共 38 个，一经发布不得改变语义，只能追加。
 
 | 错误码 |
 |---|
@@ -55,6 +56,7 @@
 | `IDEMPOTENCY_IN_PROGRESS` |
 | `IDEMPOTENCY_VIOLATION` |
 | `ILLEGAL_STATE_TRANSITION` |
+| `INTERNAL_CONSISTENCY_ERROR` |
 | `INVITATION_INVALID` |
 | `NODE_NOT_REGISTERED` |
 | `OBLIGATION_UNSUPPORTED` |
@@ -62,6 +64,7 @@
 | `POLICY_DENIED` |
 | `POLICY_GATEWAY_UNAVAILABLE` |
 | `PROJECTION_WRITE_DENIED` |
+| `RATE_LIMITED` |
 | `RECONCILIATION_REQUIRED` |
 | `TAINT_REQUIRES_ENDORSEMENT` |
 | `TENANT_CONTEXT_MISSING` |

@@ -136,13 +136,13 @@ def healthz(request: Request) -> dict:
         "components": {
             "policy_gateway": "available",
             "audit_sink": "available" if state.audit.available else "unavailable",
-            "auth": "cookie_session_bearer_compat",
-            "membership": "in_memory_adapter",
-            "confirmation": "server_side_records",
+            "auth": state.auth_mode_label,
+            "membership": state.persistence_backend,
+            "confirmation": state.persistence_backend,
             "retrieval": "development_adapter",
             "sandbox": "not_implemented",
-            "persistence": "in_memory_adapter",
-            "rls": "not_implemented",
+            "persistence": state.persistence_backend,
+            "rls": state.rls_label,
         },
     }
 
@@ -410,6 +410,19 @@ def error_response(exc: PlatformError):
         )
     elif exc.code in (ErrorCode.AUDIT_SINK_UNAVAILABLE, ErrorCode.POLICY_GATEWAY_UNAVAILABLE):
         status = 503
+    elif exc.code is ErrorCode.RATE_LIMITED:
+        # 引导端点限流：可重试的 429，带 Retry-After（秒）。
+        status = 429
+        retry_after = exc.details.get("retry_after_seconds", 0)
+        response = JSONResponse(status_code=status, content=payload)
+        response.headers["Retry-After"] = str(max(int(retry_after), 0))
+        return response
+    elif exc.code is ErrorCode.INTERNAL_CONSISTENCY_ERROR:
+        # 内部不变量破裂：对外只给通用 500，绝不回显 session_id / 约束名等细节。
+        status = 500
+        payload = public_error_payload(
+            "INTERNAL_ERROR", "服务器内部错误", request_id=request_id
+        )
     elif exc.code is ErrorCode.RECONCILIATION_REQUIRED:
         # 409：请求本身没问题，是动作处于「结果未知」，必须先对账。
         # 用 403 等于说「你不被允许」，那是误导；用 5xx 又会被客户端当故障重试，

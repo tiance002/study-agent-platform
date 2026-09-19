@@ -30,7 +30,7 @@ from app.budget.ledger import BudgetLedger, Dimension
 from app.core.clock import Clock
 from app.core.errors import ErrorCode, PlatformError, deny, public_error_payload
 from app.core.hashing import content_hash
-from app.execution.confirmation import ConfirmationStore
+from app.execution.confirmation import ConfirmationRepository
 from app.execution.outbox import ToolDispatcher
 from app.execution.state_machine import ActionStateMachine
 from app.knowledge.evidence_state import (
@@ -390,7 +390,7 @@ class InteractionRuntime:
         clock: Clock,
         chunk_index: ChunkIndex,
         evidence_log: EvidenceLog,
-        confirmations: ConfirmationStore,
+        confirmations: ConfirmationRepository,
         capabilities: ExecutorCapabilities | None = None,
     ) -> None:
         self.registry = registry

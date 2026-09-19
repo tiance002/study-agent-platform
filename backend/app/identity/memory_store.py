@@ -22,6 +22,7 @@ from datetime import datetime
 
 from app.core.clock import Clock, SystemClock
 from app.core.errors import ErrorCode, deny
+from app.identity.limits import MAX_SESSION_TTL
 from app.identity.models import Principal
 from app.identity.ports import SystemContext
 from app.product.models import Invitation, UserSession
@@ -77,6 +78,9 @@ class InMemoryInvitationRepository:
         self, token_hash: str, *, session_id: str, session_expires_at: datetime
     ) -> UserSession | None:
         now = self.clock.now()
+        # TTL 硬上限在消费邀请**之前**判：这是服务端配置错误，不是邀请状态，
+        # 不能把邀请消费掉再失败（否则留下"邀请没了、会话也没有"的悬空状态）。
+        self._require_session_window(now, session_expires_at)
         with self._lock:
             invitation = self._by_hash.get(token_hash)
             # 未知 / 已过期 / 已消费在这里汇成同一个结果：None。
@@ -84,21 +88,40 @@ class InMemoryInvitationRepository:
             # `WHERE token_hash = %s AND consumed_at IS NULL AND expires_at > now()`。
             if invitation is None or not invitation.is_live(now):
                 return None
+            session = UserSession(
+                session_id=session_id,
+                tenant_id=invitation.tenant_id,
+                principal_id=invitation.invitee_principal_id,
+                issued_at=now,
+                expires_at=session_expires_at,
+            )
+            # 「消费邀请 + 登记会话」必须在**同一临界区**内共同成功或共同不发生。
+            # 此前标记消费在锁内、建会话在锁外，建会话一旦失败（例如重复 session_id）
+            # 就会留下"邀请已消费但会话不存在"——兑换者被永久锁在门外。
+            # PG 版由兑换函数内的单事务保证；内存版靠这把锁 + 失败回滚对齐语义。
+            try:
+                if self.sessions is not None:
+                    # 锁顺序恒为 邀请锁 → 会话锁；会话仓储从不回调邀请仓储，无死锁。
+                    self.sessions.create(session)
+            except BaseException:
+                # 会话没建成就把邀请原样还回去：本次兑换等于没发生。
+                self._by_hash[token_hash] = invitation
+                raise
             self._by_hash[token_hash] = replace(
                 invitation,
                 consumed_at=now,
                 consumed_by=invitation.invitee_principal_id,
             )
-        session = UserSession(
-            session_id=session_id,
-            tenant_id=invitation.tenant_id,
-            principal_id=invitation.invitee_principal_id,
-            issued_at=now,
-            expires_at=session_expires_at,
-        )
-        if self.sessions is not None:
-            self.sessions.create(session)
-        return session
+            return session
+
+    @staticmethod
+    def _require_session_window(now: datetime, expires_at: datetime) -> None:
+        """会话期限硬上限。与 0004 迁移的数据库守卫同一数值、同一拒绝方向。"""
+        if expires_at <= now or expires_at > now + MAX_SESSION_TTL:
+            raise deny(
+                ErrorCode.INTERNAL_CONSISTENCY_ERROR,
+                "会话有效期超出服务端允许范围",
+            )
 
 
 @dataclass
@@ -140,3 +163,27 @@ class InMemorySessionRepository:
                 return False
             self._sessions[session_id] = replace(session, revoked_at=at)
             return True
+
+    def revoke_all_for(
+        self,
+        actor: Principal,
+        *,
+        at: datetime,
+        except_session_id: str | None = None,
+    ) -> int:
+        """集中失效：撤销该主体名下全部**存活**会话，返回撤销条数。"""
+        count = 0
+        with self._lock:
+            for session_id, session in list(self._sessions.items()):
+                if (
+                    session.tenant_id != actor.tenant_id
+                    or session.principal_id != actor.principal_id
+                ):
+                    continue
+                if except_session_id is not None and session_id == except_session_id:
+                    continue
+                # 只数本次真正撤掉的存活会话：已撤销/已过期的不计数。
+                if session.revoked_at is None and session.is_live(self.clock.now()):
+                    self._sessions[session_id] = replace(session, revoked_at=at)
+                    count += 1
+        return count

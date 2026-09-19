@@ -8,14 +8,22 @@ uvicorn app.main:app --app-dir backend --reload
 # 然后打开 http://127.0.0.1:8000/
 ```
 
-⚠️ 本版是「批次一最小闭环的**开发适配器版**」：核心边界逻辑完整且可测，
-   但持久化、隔离沙箱、真实检索管线、模型调用、KMS 与 PostgreSQL RLS
-   均**未实现**。详见 README 的「未实现项」一节。
+## 部署形态（第 1 轮安全收口）
+
+``STUDY_PLATFORM_ENV`` 决定装配，**生产配置缺失时启动直接失败**，
+而不是静默退回内存适配器：
+
+- ``development``（默认）：内存适配器 + Bearer 兜底 + 演示种子，零配置本机开发；
+  显式 ``STUDY_PLATFORM_PERSISTENCE=postgres`` 时改用 PostgreSQL（本机演练）。
+- ``production``：PostgreSQL 持久化、仅 cookie 认证（Bearer 关闭）、
+  密钥显式注入且互不相同、Secure cookie、可信 Origin 白名单、限流，
+  启动时连接数据库核对迁移版本。
+
+安全配置集中在 ``app.core.deployment``，本文件只负责装配。
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -31,7 +39,16 @@ from app.core.clock import SystemClock
 from app.core.errors import PlatformError
 from app.core.ids import new_request_id
 from app.core.request_context import bind_request_id, reset_request_id
-from app.execution.confirmation import ConfirmationStore
+from app.db.confirmation_store import PostgresConfirmationStore
+from app.db.identity_store import (
+    PostgresInvitationRepository,
+    PostgresMembershipRepository,
+    PostgresSessionRepository,
+)
+from app.db.rate_limit_store import PostgresRateLimiter
+from app.db.settings import DEFAULT_APP_DSN
+from app.deployment import DeploymentSettings
+from app.execution.confirmation import ConfirmationRepository, ConfirmationStore
 from app.execution.state_machine import ActionStateMachine
 from app.identity.auth import AuthProvider, BearerSessionAuthProvider
 from app.identity.cookie_auth import CookieAuth
@@ -46,6 +63,7 @@ from app.identity.ports import (
     SessionRepository,
     SystemContext,
 )
+from app.identity.rate_limit import InMemoryRateLimiter, RateLimiter
 from app.identity.session import SessionIssuer
 from app.knowledge.retrieval import ChunkIndex
 from app.learning.evidence import EvidenceLog
@@ -70,6 +88,9 @@ DEMO_PROJECT = "proj_demo"
 #: 会话 cookie 的默认有效期。
 DEFAULT_SESSION_TTL = timedelta(hours=8)
 
+#: 代码预期的数据库迁移版本。启动自检核对它；新增迁移必须同步更新。
+EXPECTED_SCHEMA_VERSION = "0004"
+
 
 @dataclass
 class PlatformState:
@@ -92,59 +113,167 @@ class PlatformState:
     session_store: SessionRepository
     cookie_auth: CookieAuth
     # 服务端确认记录
-    confirmations: ConfirmationStore
+    confirmations: ConfirmationRepository
+    # --- 第 1 轮安全收口新增 ---
+    # rate_limiter 刻意**必填**：限流是认证引导端点的前置守卫，
+    # 装配遗漏必须在构造 PlatformState 时就报错，而不是等第一个请求 AttributeError。
+    # （必填字段必须排在有默认值的字段之前 —— dataclass 的硬规则。）
+    rate_limiter: RateLimiter
     #: 会话 cookie 的有效期（也是兑换出的数据库会话的过期时间）。
     session_ttl: timedelta = DEFAULT_SESSION_TTL
     #: 生产环境置 True（HTTPS-only cookie）。测试与本机开发保持 False：
     #: TestClient 走 http，Secure cookie 不会被回传，等于开了箱就坏。
     cookie_secure: bool = False
+    trusted_origins: tuple[str, ...] = ()
+    behind_proxy: bool = False
+    #: 是否保留 Bearer 兼容通道。生产形态必须为 False。
+    bearer_enabled: bool = True
+    settings: DeploymentSettings | None = None
+    persistence_backend: str = "in_memory_adapter"
+    rls_label: str = "not_implemented"
+    auth_mode_label: str = "cookie_session_bearer_compat"
+
+
+def _verify_database_ready(dsn: str, *, expected_version: str) -> None:
+    """启动时数据库自检：连得上 + 迁移版本是代码预期值，否则拒绝启动。
+
+    应用角色在 0004 起对 ``alembic_version`` 有 SELECT 权限。
+    """
+    from app.db.session import connect
+
+    with connect(dsn) as conn:
+        rows = conn.execute("SELECT version_num FROM alembic_version").fetchall()
+    versions = [row[0] for row in rows]
+    if len(versions) != 1:
+        raise RuntimeError(
+            f"启动自检失败：alembic_version 应有且仅有一行，实际为 {versions!r}；"
+            "请先运行 alembic upgrade head。"
+        )
+    if versions[0] != expected_version:
+        raise RuntimeError(
+            f"启动自检失败：数据库迁移版本为 {versions[0]!r}，代码预期 {expected_version!r}；"
+            "请先运行 alembic upgrade head（或回退代码到匹配版本）。"
+        )
 
 
 def build_platform(
-    *,
-    audit_available: bool = True,
     var_dir: Path | None = None,
+    audit_available: bool = True,
+    settings: DeploymentSettings | None = None,
 ) -> PlatformState:
-    """装配平台。参数用于故障注入与测试隔离。
+    """组合根：在这里选择适配器实现。
 
-    ⚠️ 本装配函数默认全部使用**内存适配器**。PostgreSQL 适配器
-    （`db.identity_store` / `db.confirmation_store`）由契约测试直接驱动，
-    切换生产装配属于任务 7（重启恢复验收）的范围。
+    生产形态（``STUDY_PLATFORM_ENV=production``）配置不完整时**直接抛错**，
+    由进程启动失败暴露问题 —— 绝不静默退回内存实现。
     """
+    loaded = settings or DeploymentSettings.load()
+    loaded.validate_for_startup()
+
     base = var_dir or VAR_DIR
     registry = build_registry()
     gateway = PolicyGateway()
     ledger = BudgetLedger()
     machine = ActionStateMachine()
     clock = SystemClock()
-    tokens = TokenIssuer(
-        # 生产密钥必须来自 KMS / Secret Manager，并与数据、审计密钥分离。
-        secret=os.environ.get("STUDY_PLATFORM_TOKEN_SECRET", "dev-only-placeholder-change-me")
-    )
+    tokens = TokenIssuer(secret=loaded.token_secret)
     projector = Projector()
     chunk_index = ChunkIndex()
     evidence_log = EvidenceLog()
     audit = AuditSink(base / "audit", available=audit_available)
-    confirmations = ConfirmationStore()
 
     # 身份与授权。签名密钥生产必须来自 KMS/Secret Manager，且互相分离。
-    session_secret = os.environ.get(
-        "STUDY_PLATFORM_SESSION_SECRET", "dev-only-session-secret-change-me"
-    )
-    sessions = SessionIssuer(secret=session_secret)
-    membership = MembershipStore()
-    session_store = InMemorySessionRepository(clock=clock)
-    invitations = InMemoryInvitationRepository(clock=clock, sessions=session_store)
+    sessions = SessionIssuer(secret=loaded.session_secret)
     cookie_auth = CookieAuth(
-        # cookie 密钥缺省复用会话密钥：开发环境少一个要配的变量；
-        # 生产必须显式提供独立密钥（见 .env.example 的说明）。
-        secret=os.environ.get("STUDY_PLATFORM_COOKIE_SECRET", session_secret),
-        clock=clock,
+        loaded.cookie_secret,
+        clock,
+        previous_secrets=loaded.cookie_previous_secrets,
     )
-    _seed_demo_membership(membership)
     auth = BearerSessionAuthProvider(issuer=sessions, clock=clock)
 
-    runtime = InteractionRuntime(
+    # 适配器选择：先把变量声明成**端口类型**，再在各分支里赋具体实现。
+    # 不声明的话 mypy 会拿第一个分支的具体类当变量类型，第二个分支的赋值
+    # 就报"类型不兼容"—— 而这两个适配器本来就该可以互换，
+    # 那个报错说明的是类型标注写错了，不是代码写错了。
+    membership: MembershipRepository
+    session_store: SessionRepository
+    invitations: InvitationRepository
+    confirmations: ConfirmationRepository
+
+    if loaded.use_postgres:
+        dsn = loaded.dsn or DEFAULT_APP_DSN
+        # 无论是生产还是开发态显式选择 postgres：连不上 / 版本不对都必须
+        # 在启动时暴露，而不是等第一个请求 500。
+        _verify_database_ready(dsn, expected_version=EXPECTED_SCHEMA_VERSION)
+
+        membership = PostgresMembershipRepository(clock, dsn)
+        pg_sessions = PostgresSessionRepository(clock, dsn)
+        session_store = pg_sessions
+        invitations = PostgresInvitationRepository(clock, dsn, sessions=pg_sessions)
+        confirmations = PostgresConfirmationStore(dsn)
+        rate_limiter: RateLimiter = PostgresRateLimiter(
+            limit=loaded.exchange_limit,
+            window_seconds=loaded.exchange_window_seconds,
+            dsn=dsn,
+        )
+        runtime = _build_runtime(
+            registry=registry,
+            gateway=gateway,
+            ledger=ledger,
+            audit=audit,
+            machine=machine,
+            tokens=tokens,
+            projector=projector,
+            clock=clock,
+            chunk_index=chunk_index,
+            evidence_log=evidence_log,
+            confirmations=confirmations,
+        )
+        # 生产形态不做演示种子：租户/主体由管理员邀请流程建立。
+        return PlatformState(
+            registry=registry,
+            gateway=gateway,
+            ledger=ledger,
+            audit=audit,
+            machine=machine,
+            tokens=tokens,
+            projector=projector,
+            clock=clock,
+            chunk_index=chunk_index,
+            evidence_log=evidence_log,
+            runtime=runtime,
+            sessions=sessions,
+            membership=membership,
+            auth=auth,
+            invitations=invitations,
+            session_store=session_store,
+            cookie_auth=cookie_auth,
+            confirmations=confirmations,
+            session_ttl=loaded.session_ttl,
+            cookie_secure=loaded.cookie_secure,
+            rate_limiter=rate_limiter,
+            trusted_origins=loaded.trusted_origins,
+            behind_proxy=loaded.behind_proxy,
+            # 生产形态关闭 bearer 兜底；开发态用 PG 演练时保留它方便测试工具。
+            bearer_enabled=not loaded.is_production,
+            settings=loaded,
+            persistence_backend="postgresql",
+            rls_label="postgresql_row_level_security",
+            auth_mode_label=(
+                "cookie_session" if loaded.is_production else "cookie_session_bearer_compat"
+            ),
+        )
+
+    # ---------------------------------------------------------- 开发内存形态
+    membership = MembershipStore()
+    memory_sessions = InMemorySessionRepository(clock=clock)
+    session_store = memory_sessions
+    invitations = InMemoryInvitationRepository(clock=clock, sessions=memory_sessions)
+    confirmations = ConfirmationStore()
+    rate_limiter = InMemoryRateLimiter(
+        limit=loaded.exchange_limit,
+        window_seconds=loaded.exchange_window_seconds,
+    )
+    runtime = _build_runtime(
         registry=registry,
         gateway=gateway,
         ledger=ledger,
@@ -157,7 +286,7 @@ def build_platform(
         evidence_log=evidence_log,
         confirmations=confirmations,
     )
-    return PlatformState(
+    state = PlatformState(
         registry=registry,
         gateway=gateway,
         ledger=ledger,
@@ -175,12 +304,49 @@ def build_platform(
         invitations=invitations,
         session_store=session_store,
         cookie_auth=cookie_auth,
-        cookie_secure=os.environ.get("STUDY_PLATFORM_COOKIE_SECURE", "") in {"1", "true"},
+        confirmations=confirmations,
+        session_ttl=loaded.session_ttl,
+        cookie_secure=loaded.cookie_secure,
+        rate_limiter=rate_limiter,
+        trusted_origins=loaded.trusted_origins,
+        behind_proxy=loaded.behind_proxy,
+        bearer_enabled=True,
+        settings=loaded,
+    )
+    _seed_demo_membership(membership)
+    return state
+
+
+def _build_runtime(
+    *,
+    registry: Registry,
+    gateway: PolicyGateway,
+    ledger: BudgetLedger,
+    audit: AuditSink,
+    machine: ActionStateMachine,
+    tokens: TokenIssuer,
+    projector: Projector,
+    clock: SystemClock,
+    chunk_index: ChunkIndex,
+    evidence_log: EvidenceLog,
+    confirmations: ConfirmationRepository,
+) -> InteractionRuntime:
+    return InteractionRuntime(
+        registry=registry,
+        gateway=gateway,
+        ledger=ledger,
+        audit=audit,
+        machine=machine,
+        tokens=tokens,
+        projector=projector,
+        clock=clock,
+        chunk_index=chunk_index,
+        evidence_log=evidence_log,
         confirmations=confirmations,
     )
 
 
-def _seed_demo_membership(membership: MembershipStore) -> None:
+def _seed_demo_membership(membership: MembershipRepository) -> None:
     """建立演示租户、项目与成员关系。
 
     这是**服务端种子**：它决定"谁属于哪个项目"。
@@ -193,12 +359,12 @@ def _seed_demo_membership(membership: MembershipStore) -> None:
 
 def create_app(*, platform: PlatformState | None = None) -> FastAPI:
     app = FastAPI(
-        title="Agent 工程学习规划平台（批次一开发适配器版）",
+        title="Agent 工程学习规划平台",
         version="0.1.0",
         description=(
             "核心边界逻辑的可用实现：策略网关、capability token、taint/endorsement、"
-            "预算树、幂等执行状态机、审计哈希链、证据与掌握投影、子任务运行时。"
-            "持久化与沙箱为开发适配器，生产适配器未实现。"
+            "预算树、幂等执行状态机、审计哈希链、证据与掌握投影、子任务运行时，"
+            "以及 cookie 会话认证与 PostgreSQL 持久化装配。"
         ),
     )
     app.state.platform = platform or build_platform()
