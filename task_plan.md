@@ -60,6 +60,8 @@
 - 2026-09-18：**确立硬约定 `scripts/*.cmd` 必须保持纯 ASCII 且行尾为 CRLF**。cmd.exe 按系统代码页逐字节解析批处理文件，UTF-8 中文会让解析偏移错位并报出乱码错误；`chcp 65001` 放在文件开头无法挽回。中文说明一律进 README，`.gitattributes` 已为 `*.cmd` 指定 `eol=crlf`。
 - 2026-09-18：确认回改现有权威规格以固化分层 RAG、结构化证据问题、工具调用前校验与三套独立重试预算；不新建平行规格。`derive()` 保持通用，模型边界通过显式 `new_sources=MODEL_OUTPUT` 增加来源，不把确定性派生误标为模型输出。
 - 2026-09-19：开发路线调整为“先完善底层，再交付普通用户测试版”，压缩为三轮大里程碑；第一轮只做持久化与产品底座，模型/RAG 和 React 用户界面分别留到第二、三轮。
+- 2026-09-19：**冻结第一轮数据模型与接口**（`docs/superpowers/specs/2026-09-19-07-round1-product-data-model.md`）。冻结时发现执行计划与仓库现状**四处偏差**，全部解决：①`gen_sql_schema.py` 不存在，SQL 契约实为 `gen_contracts.py` 的渲染器；②幂等键改**单一出口**（`http_idempotency`，唯一键 `(tenant_id, principal_id, command_scope, client_key)`，**`project_id` 不进唯一键**）；③项目模型统一为 `identity/models.py` 的 `LearningProject`，删除 `ProjectRecord`；④`app/config.py` 只做应用级聚合，DSN 唯一来源仍是 `db/settings.py`。
+- 2026-09-19：完成第一轮**任务 1**（产品契约 + `0002` 迁移）。9 张新表、`projects` 加 3 列、**策略从租户级收紧为成员感知**；SQL 契约改为**从迁移导出**（此前扫描 dataclass，与真实表结构没有任何机械联系）。实测：空库 → head 建 17 张表；`head → downgrade -1 → head` 可逆且策略真的还原；`study_app` 无上下文查 `projects` 得 **0 行**。
 
 ## 错误记录
 

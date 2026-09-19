@@ -105,3 +105,12 @@
 - 客户端命令幂等只有一个判定出口：`http_idempotency` 以 `(tenant_id, principal_id, command_scope, client_key)` 唯一定位命令，再用 `request_hash` 区分重放与改体冲突。业务表不保存或解释 `client_key`，其唯一约束只保护领域不变量。
 - 项目模型只有一个权威定义：将 `identity/membership.py` 的私有 `ProjectRecord` 升级为 `identity/models.py` 的 `LearningProject`，成员授权和产品服务共同使用；`product/models.py` 不再复制同一行。
 - 第一轮只记录资料元数据与 `registered_at`，不定义永远不会发生的 `processing`/`ready`。摄取任务、切块和状态机随第二轮真实处理管线一起引入。
+
+## 2026-09-19 · 实现期发现（第一轮任务 1）
+
+- **SQL 契约必须与权威源有机械联系**：`render_sql_schema` 此前扫描 `backend/app` 的 dataclass，导出的是"代码层实体" —— 与真实表结构**没有任何关系**，契约可以整体没错而表已经完全不同。改为从 `alembic/versions/**` 导出（`CREATE TABLE` + `ALTER TABLE ADD COLUMN` + `POLICY_OVERRIDES`），并用反向验证证明"改迁移 → 门禁报警"。
+- **`downgrade()` 必须真的还原，而不是删掉对象了事**：只 `DROP POLICY` 不重建，会留下一张带 `FORCE RLS` 却没有策略的表 —— 那不是"无保护"，是**拒绝一切访问**。改写的策略在同一个函数里成对写"改成什么"与"还原成什么"，避免升级改了、降级忘了。
+- **迁移必须自包含**：不复用会演进的 helper。共享 helper 会让历史迁移在新库上重放出**不同的 SQL**，历史语义随时间漂移。几行重复换可重放性，值。
+- **DSN 的方言前缀是个陷阱**：裸 `postgresql://` 让 SQLAlchemy 去 import psycopg2，而项目用 psycopg 3；错误是 `No module named 'psycopg2'`，**完全不指向真正原因**。已由 `alembic/env.py` 自动补 `+psycopg` —— 与其要求每个人记住，不如让机制兜住。
+- **不可见字符**：中文输入法会在注释里插入零宽空格，review 抓不到，却能让"看起来一样"的字符串不相等。已加机械守卫（连同行尾与 `.cmd` 纯 ASCII 一起守）。
+- **本机环境两条硬规则**：每条需要数据库的命令必须**自己启动 PG**（命令结束即回收后台进程，上一条启动的库在下一条里已经没了）；沙箱内的写操作不落盘，`alembic` 与契约生成一律沙箱外跑。

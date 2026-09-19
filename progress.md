@@ -37,7 +37,49 @@
 - 设计阶段仍未创建任何业务代码；下一步为进入实施或继续评审 05／06 号讨论稿。
 - 随后按用户要求进入实施：生成批次一最小闭环并推送 GitHub（见下）。未实现项已在 README 显式列出，设计文档仍为权威依据。
 
-## 2026-09-19 · 下一轮计划
+## 2026-09-19 · 第一轮任务 1：产品契约与 `0002` 迁移（已完成）
+
+执行计划：`plans/2026-09-19-round-1-persistence-product-foundation.md`
+冻结稿：`specs/2026-09-19-07-round1-product-data-model.md`
+
+### 交付
+
+| 文件 | 内容 |
+|---|---|
+| `app/core/contracts.py` | 契约校验原语（住 core，避免 identity ↔ product 互相依赖） |
+| `app/identity/models.py` | 新增 `LearningProject` —— **唯一的项目模型** |
+| `app/identity/membership.py` | 删 `ProjectRecord`；`projects_for` 返回完整契约；注入 `clock` |
+| `app/product/models.py` | 8 个契约（会话/消息/计划/里程碑/任务/资料登记/邀请/会话） |
+| `app/product/ports.py` | 5 个仓库端口（Protocol，方法一律收 `Principal`） |
+| `alembic/versions/0002_product_foundation.py` | 9 张新表 + `projects` 加 3 列 + 成员感知策略 + GRANT |
+| `tools/skills/gen_contracts.py` | `render_sql_schema` 改为**从迁移导出** |
+
+### 验收（全部实测，非推断）
+
+| 项 | 结果 |
+|---|---|
+| 空库 → `upgrade head` | 17 张表、版本 `0002` ✓ |
+| `head → downgrade -1 → head` | 可逆；策略**真的还原**成租户级（不是只 DROP POLICY） ✓ |
+| `study_app` 不设上下文查 `projects` | **0 行**（RLS + GRANT 均生效） ✓ |
+| 反向验证：注入列改名 → `--check` | 退出码 1 并指出内容与 `source_hash` 不一致；还原后回到 0 ✓ |
+| 八道门禁 | 全绿（迁移门：2 条迁移、单头 `0002`、无环） |
+
+### 关键设计选择（理由留在代码里）
+
+- **`USING` 与 `WITH CHECK` 不对称**：新建项目时还没有 grant 行，
+  写路径若也要求成员存在，项目永远建不出来。读靠成员关系（安全），
+  写靠租户上下文 + 事务内同时写 grant（正确性）。
+- **`http_idempotency.project_id` 不建外键、不进唯一键**：命令被占用时项目还不存在。
+- **`SourceRecord` 没有任何处理状态**：Round 2 有真实摄取管线时才可能出现。
+- **`PlanBundle`**：把"整版替换"变成可实现的目标 —— 分三次写会留下
+  "有计划没里程碑"的半版状态，而它看起来是合法的。
+- **迁移刻意自包含**（不共享 0001 的 helper）：共享会演进的 helper 会让
+  历史迁移在新库上重放出不同的 SQL。
+
+### 下一轮（任务 2）
+
+PostgreSQL 身份与产品仓储：`identity/ports.py`、`db/identity_store.py`、
+`db/product_store.py`、`product/memory_store.py`，以及内存/PG 双适配器的契约测试。
 
 - 用户选择“先继续完善底层，再做普通用户可测试版本”，并同意扩大每轮范围、用机械退出门控制风险。
 - 审查了现有迁移、数据库会话、确认存储、成员关系、运行时装配和 API；确认第一轮应复用现有 psycopg + 手写迁移 + RLS 路径。
