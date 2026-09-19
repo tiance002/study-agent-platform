@@ -77,6 +77,22 @@ class _IdempotencyEntry:
     state: str = "pending"
     result: InteractionResult | None = None
 
+    def mark_completed(self, result: InteractionResult) -> None:
+        """结果与状态**一并**设置。
+
+        分成两行写、其中一行被漏掉时，等待者会看到 `state="completed"`
+        却读到 `result=None` —— 那正是这个类存在的意义（表达占用进度）被破坏。
+        用方法而不是两处赋值，是为了让"两件事必须一起发生"落在代码结构上，
+        而不是落在调用方的记忆里。
+        """
+        self.result = result
+        self.state = "completed"
+
+    def mark_released(self) -> None:
+        """放弃占用，且**不留结果**。"""
+        self.result = None
+        self.state = "released"
+
 # 本版执行器声明支持的义务。未声明的一律拒绝执行，而不是"尽力而为"。
 SUPPORTED_OBLIGATIONS = frozenset(
     {
@@ -589,12 +605,15 @@ class InteractionRuntime:
         with self._idempotency_cond:
             while True:
                 entry = self._idempotency.get(key)
-                if entry is None or entry.state == "released":
-                    # 无人占用，或占用者已放弃（失败/拒绝）—— 由本次请求接手。
-                    self._idempotency[key] = _IdempotencyEntry(fingerprint=fingerprint)
-                    return None
 
-                if entry.fingerprint != fingerprint:
+                # 指纹检查必须对**三种状态一致生效**，所以放在状态分派之前。
+                #
+                # 改前它排在 "released" 分支之后，而那个分支会直接替换记录 ——
+                # 于是同一个错误在不同状态下有不同结果（实测）：
+                #   占用者失败后复用同键换参数 → 静默接受，正常执行；
+                #   占用者成功后复用同键换参数 → IDEMPOTENCY_VIOLATION。
+                # 客户端据此会得出"key 复用没问题"的结论，而事实只有一半。
+                if entry is not None and entry.fingerprint != fingerprint:
                     return self._fail(
                         request,
                         deny(
@@ -604,9 +623,21 @@ class InteractionRuntime:
                         ),
                     )
 
+                if entry is None or entry.state == "released":
+                    # 无人占用，或占用者已放弃（失败/拒绝）—— 由本次请求接手。
+                    self._idempotency[key] = _IdempotencyEntry(fingerprint=fingerprint)
+                    return None
+
                 if entry.state == "completed":
-                    # 到这里 `result` 必定非空：completed 与 result 同时设置。
-                    assert entry.result is not None
+                    # 用显式检查而不是 `assert`：`-O` 会把断言整个剥掉，
+                    # 而那正是这条不变量最需要被守住的时候（生产）。内部
+                    # 不变量被破坏是代码缺陷，不该伪装成一次正常的业务拒绝，
+                    # 所以这里抛出而不是返回一个结果。
+                    if entry.result is None:
+                        raise deny(
+                            ErrorCode.ILLEGAL_STATE_TRANSITION,
+                            "幂等记录为 completed 却没有结果：占用表被非法改动",
+                        )
                     return self._as_replay(entry.result, request)
 
                 remaining = deadline - time.monotonic()
@@ -625,8 +656,8 @@ class InteractionRuntime:
     def _complete_idempotency(self, key: tuple[str, str], result: InteractionResult) -> None:
         """写入结果并唤醒等待者。
 
-        结果与 `completed` 标记在同一次持锁内设置 —— 否则等待者可能被唤醒后
-        看到 `completed=True` 但 `result=None`。
+        结果与状态标记由 `mark_completed` 一并设置 —— 否则等待者可能被唤醒后
+        看到 `completed` 却读到 `None`。
         """
         with self._idempotency_cond:
             entry = self._idempotency.get(key)
@@ -634,8 +665,7 @@ class InteractionRuntime:
                 # 不该发生：占用者一定持有记录。这里显式忽略而不是静默新建，
                 # 因为静默新建会把"占用表被谁改过"这件事盖住。
                 return
-            entry.result = result
-            entry.state = "completed"
+            entry.mark_completed(result)
             self._idempotency_cond.notify_all()
 
     def _release_idempotency(self, key: tuple[str, str]) -> None:
@@ -643,7 +673,7 @@ class InteractionRuntime:
         with self._idempotency_cond:
             entry = self._idempotency.get(key)
             if entry is not None:
-                entry.state = "released"
+                entry.mark_released()
             self._idempotency_cond.notify_all()
 
     @staticmethod

@@ -99,6 +99,49 @@ def test_regeneration_still_repairs_a_hand_edited_block(tmp_path):
 
 
 @pytest.mark.invariant
+def test_report_matches_action_when_content_changed(tmp_path, capsys):
+    """内容变了就必须**报告**"已写入"，而且真的写了。
+
+    为什么专门盯「报告」：我曾对着输出与 mtime 反复确认过一次 ——
+    `--all` 说"未改动文件"，而文件是新的。追查后判定为观察侧的假象
+    （同一时刻 `--check` 报"一致"，但文件在另一侧还是旧的），
+    生成器本身可复现地正确。
+
+    但这次经历说明一件事：**"工具说它做了某件事"和"它真的做了"必须被绑在一起**，
+    否则下次遇到不一致时，仍然只能靠猜。
+    """
+    target, copy_path = _copy_of("tool-catalog", tmp_path)
+    _tamper_generated_region(copy_path, "retrieve_chunk", "retrieve_chunk_tampered")
+    capsys.readouterr()  # 丢掉准备阶段的输出
+
+    assert gc.run_target(target, check=False) == 0
+
+    out = capsys.readouterr().out
+    assert "已写入" in out, f"内容变了却报告未改动：{out!r}"
+    assert "retrieve_chunk_tampered" not in copy_path.read_text(encoding="utf-8"), (
+        "报告说写了，文件里却没被修好"
+    )
+
+
+@pytest.mark.invariant
+def test_report_matches_action_when_nothing_changed(tmp_path, capsys):
+    """内容没变就必须报告"未改动文件"，且文件不被触碰。
+
+    这条与上一条互为对照：只有两条都在，"报告与动作一致"才是真的被覆盖 ——
+    单看一条时，"永远说已写入"或"永远说未改动"都能骗过它。
+    """
+    target, copy_path = _copy_of("tool-catalog", tmp_path)
+    mtime_before = copy_path.stat().st_mtime_ns
+    capsys.readouterr()
+
+    assert gc.run_target(target, check=False) == 0
+
+    out = capsys.readouterr().out
+    assert "未改动文件" in out, f"内容未变却报告写入：{out!r}"
+    assert copy_path.stat().st_mtime_ns == mtime_before
+
+
+@pytest.mark.invariant
 def test_check_detects_stale_source_label(tmp_path):
     """只改 `Target.source_label` 也必须被发现。
 

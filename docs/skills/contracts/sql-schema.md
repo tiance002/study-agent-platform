@@ -7,8 +7,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:4c32b9ca0d0d49554f3fb1fe4a18d74a3aea7d69ed59018f548cd3384080dac3, generated_at=2026-09-19T05:22:05Z -->
-> 生成时间：2026-09-19T05:22:05Z
+<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:d9e94b9afc94d6a6cfc99867b9f012191df1ebb8c109fd2dc1841395d6dc35c5, generated_at=2026-09-19T05:47:56Z -->
+> 生成时间：2026-09-19T05:47:56Z
 
 > 由 `tools/skills/gen_contracts.py` 从代码扫描导出，请勿手工编辑本区。
 > **注意**：这是**代码层实体**，不是 PostgreSQL 表。迁移落地后应改由 alembic 导出 DDL。
@@ -17,6 +17,7 @@
 |---|---|---:|---|---|
 | `AuditRecord` | `app.audit.sink` | 11 | 是 | — |
 | `ChainVerification` | `app.audit.sink` | 5 | — | — |
+| `_BufferedEvent` | `app.audit.sink` | 7 | 是 | — |
 | `Account` | `app.budget.ledger` | 8 | 是 | — |
 | `Reservation` | `app.budget.ledger` | 7 | — | — |
 | `ArtifactRef` | `app.core.artifacts` | 5 | — | — |
@@ -60,7 +61,7 @@
 | `InteractionResult` | `app.workflow.runtime` | 10 | — | — |
 | `_IdempotencyEntry` | `app.workflow.runtime` | 3 | — | — |
 
-合计 44 个实体。
+合计 45 个实体。
 <!-- END GENERATED -->
 
 ## 2. 手写区 · 不可协商的数据库约束

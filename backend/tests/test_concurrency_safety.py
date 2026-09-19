@@ -236,20 +236,42 @@ def test_in_flight_same_key_reports_in_progress_and_is_retryable(
 
 
 @pytest.mark.invariant
-def test_failed_request_releases_the_claim(platform):
-    """失败/拒绝不缓存，且必须释放占用，让重试真的再执行一次。
+def test_failed_request_releases_the_claim(platform, monkeypatch):
+    """失败/拒绝不缓存，且必须释放占用，让**同样的**重试真的再执行一次。
 
-    缓存一个"被拒绝"的结果会让后续修好参数的重试永远拿到旧拒绝；
-    而只释放不行、必须有明确状态 —— 否则等待者会干等到超时。
+    缓存一个"被拒绝"的结果会让后续重试永远拿到旧拒绝；
+    而只释放不够、必须有明确状态 —— 否则等待者会干等到超时。
+
+    ⚠️ 重试必须是**同一把钥匙开同一扇门**，也就是请求内容完全相同。
+    这个用例原先让第二次换一个 `node_id` 来表达"重试"，而那是"同一把钥匙开两扇门"，
+    按契约一律 `IDEMPOTENCY_VIOLATION`，与"占用有没有被释放"根本是两件事。
+    它当时能通过，靠的是 `released` 分支漏掉了指纹比较（第八轮修复）。
+
+    所以这里改成让第一次因**外部原因**失败（handler 抛可重试错误），
+    两次请求内容完全一致 —— 这才真正测到"失败不留占用"。
     """
-    denied = platform.runtime.run(
-        _request(node_id="nonexistent_node", idempotency_key="k1")
-    )
-    assert denied.status == "denied"
+    attempts = {"n": 0}
+    original = rt._HANDLERS["intake_goal"]
 
-    retried = platform.runtime.run(_request(node_id="intake_goal", idempotency_key="k1"))
+    def flaky(invoker, request, ctx):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise PlatformError(
+                code=ErrorCode.ILLEGAL_STATE_TRANSITION,
+                message="第一次执行的瞬时故障",
+                retryable=True,
+            )
+        return original(invoker, request, ctx)
+
+    monkeypatch.setitem(rt._HANDLERS, "intake_goal", flaky)
+
+    failed = platform.runtime.run(_request(idempotency_key="k1"))
+    assert failed.status == "failed", failed.error
+
+    retried = platform.runtime.run(_request(idempotency_key="k1"))
     assert retried.status == "ok", retried.error
     assert retried.output.get("idempotent_replay") is not True
+    assert attempts["n"] == 2, "重试必须真的再执行一次：失败没有被当成结果缓存下来"
 
 
 # --------------------------------------------------------------- 预算账本

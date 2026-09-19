@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:1108d375092c0603f9dcdc2a3b107feffc7e7bc0cd55253e439cfce1b0420ddc, generated_at=2026-09-19T05:17:17Z -->
-> 生成时间：2026-09-19T05:17:17Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:4158d8597dd757ddf850fb72b60a958f8a59d58c622701d13e3d97588a272562, generated_at=2026-09-19T05:41:06Z -->
+> 生成时间：2026-09-19T05:41:06Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -27,10 +27,11 @@
 
 ### 稳定错误码
 
-共 33 个，一经发布不得改变语义，只能追加。
+共 34 个，一经发布不得改变语义，只能追加。
 
 | 错误码 |
 |---|
+| `AUDIT_LOG_CORRUPTED` |
 | `AUDIT_SINK_UNAVAILABLE` |
 | `AUTH_REQUIRED` |
 | `BUDGET_EXCEEDED` |
@@ -149,6 +150,15 @@ planned → intent_persisted → dispatched
 3. **不得存在第二套证据判定**。历史上曾并存一个按「有没有 citation」计算的
    `evidence_sufficiency`，会与 `evidence_state` 直接矛盾（外部抓取失败但本地有命中时
    必然如此）。该字段已删除，**不提供兼容投影**——它不是历史契约，而是错误判定的遗迹。
+
+**幂等键复用判定与占用状态无关。** `IDEMPOTENCY_VIOLATION` 只看「同一作用域内的
+同一把键有没有被用于不同内容」，**不区分上一次是成功还是失败**。
+占用者失败后（占用已被释放）复用同键换参数，同样是 `IDEMPOTENCY_VIOLATION` ——
+客户端应当改用一把新键，而不是指望"上次没成功所以这次可以复用"。
+
+这条曾经是不一致的：`released` 分支排在指纹比较之前，于是**失败后复用会被静默接受**，
+只有成功后复用才报错。客户端据此会得出"key 复用没问题"，而事实只有一半 ——
+**不一致的判定比严格但一致的判定更糟。**
 
 追踪与幂等是两个字段，不得混用：
 

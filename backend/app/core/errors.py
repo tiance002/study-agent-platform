@@ -72,6 +72,9 @@ class ErrorCode(StrEnum):
     PROJECTION_WRITE_DENIED = "PROJECTION_WRITE_DENIED"
     EVIDENCE_UNMAPPED = "EVIDENCE_UNMAPPED"
 
+    # ---- 审计存储 ----
+    AUDIT_LOG_CORRUPTED = "AUDIT_LOG_CORRUPTED"
+
 
 # 平台层 next_action 词汇表。
 # 目前只登记真实会被产生的取值 —— 永不触发的取值比缺失的取值更糟，

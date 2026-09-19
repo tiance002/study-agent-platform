@@ -81,6 +81,36 @@ def test_same_key_with_different_content_is_rejected(platform, demo):
 
 
 @pytest.mark.invariant
+def test_key_reuse_is_rejected_even_after_a_failed_attempt(platform, demo):
+    """「同一把钥匙开两扇门」的判定不能取决于前一次成功与否。
+
+    改前 `released` 分支排在指纹比较**之前**，而它会直接替换占用记录 ——
+    于是同一个错误有两种结果（实测）：
+
+    - 占用者失败后复用同键换参数 → **静默接受**，正常执行；
+    - 占用者成功后复用同键换参数 → `IDEMPOTENCY_VIOLATION`。
+
+    不一致的判定比严格但一致的判定更糟：客户端据此会得出"key 复用没问题"，
+    而事实只有一半。契约里也没有"除非上一次失败"这个例外。
+    """
+    # 第一次让 node 不存在 → denied → 占用被释放（released）
+    failed = platform.runtime.run(
+        _request(demo, node_id="nonexistent_node", idempotency_key="k1")
+    )
+    assert failed.status == "denied"
+
+    # 同键换内容：即便前一次没有产生结果，也必须拒绝
+    conflicting = platform.runtime.run(
+        _request(demo, user_input="换了内容", idempotency_key="k1")
+    )
+    assert conflicting.status == "denied"
+    assert conflicting.error is not None
+    assert conflicting.error["code"] == str(ErrorCode.IDEMPOTENCY_VIOLATION), (
+        "失败后复用同一个 key 换参数，必须和成功后一样被拒绝"
+    )
+
+
+@pytest.mark.invariant
 def test_same_key_from_another_principal_is_rejected(platform, demo):
     """幂等键必须绑定主体。
 
