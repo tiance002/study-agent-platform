@@ -48,6 +48,19 @@ def set_tenant_context(
     conn.execute("SELECT set_config('app.project_id', %s, true)", (project_id,))
 
 
+def set_principal_context(
+    conn: psycopg.Connection, *, tenant_id: str, principal_id: str
+) -> None:
+    """在当前事务内设置租户/主体上下文。
+
+    `user_sessions` / `http_idempotency` 的策略是「租户 + 主体」叠加：
+    只设租户时，同租户的另一个主体的会话行依然不可见 —— 这正是
+    会话仓储（`get_live` / `revoke`）需要的隔离级别。
+    """
+    conn.execute("SELECT set_config('app.tenant_id', %s, true)", (tenant_id,))
+    conn.execute("SELECT set_config('app.principal_id', %s, true)", (principal_id,))
+
+
 @contextmanager
 def tenant_transaction(
     *, tenant_id: str, project_id: str, dsn: str | None = None
@@ -60,4 +73,32 @@ def tenant_transaction(
     with connect(dsn) as conn:
         with conn.transaction():
             set_tenant_context(conn, tenant_id=tenant_id, project_id=project_id)
+            yield conn
+
+
+@contextmanager
+def tenant_only_transaction(
+    *, tenant_id: str, dsn: str | None = None
+) -> Iterator[psycopg.Connection]:
+    """只带租户、不带项目的事务。
+
+    适用范围要认清：`projects` 的**读取**策略是成员感知的（EXISTS 子查询
+    读 `app.principal_id`），列出/读取项目必须用 `principal_transaction`。
+    本助手用于**写入**供给动作 —— 创建项目（此时还没有 project_id 可设）、
+    写授权行（`project_grants` 是租户级策略）。
+    """
+    with connect(dsn) as conn:
+        with conn.transaction():
+            conn.execute("SELECT set_config('app.tenant_id', %s, true)", (tenant_id,))
+            yield conn
+
+
+@contextmanager
+def principal_transaction(
+    *, tenant_id: str, principal_id: str, dsn: str | None = None
+) -> Iterator[psycopg.Connection]:
+    """租户 + 主体级事务。会话表（`user_sessions`）的读写走这里。"""
+    with connect(dsn) as conn:
+        with conn.transaction():
+            set_principal_context(conn, tenant_id=tenant_id, principal_id=principal_id)
             yield conn

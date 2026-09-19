@@ -11,6 +11,7 @@ from app.audit.sink import AuditSink, RiskLevel
 from app.budget.ledger import BudgetLedger, Dimension
 from app.core.clock import utc
 from app.core.errors import ErrorCode, PlatformError
+from app.identity.ports import SystemContext
 from app.knowledge.retrieval import Chunk, ChunkIndex
 from app.learning.evidence import (
     ComponentVerdict,
@@ -57,7 +58,9 @@ def test_request_body_carries_no_identity_fields():
 @pytest.mark.invariant
 def test_cross_tenant_path_access_is_rejected(client, auth_headers, platform):
     """用 A 租户的令牌访问 B 租户的项目 → 404（不暴露存在性）。"""
-    platform.membership.create_project("proj_of_tenant_b", tenant_id="tenant_b")
+    platform.membership.create_project(
+        SystemContext("tenant_b"), project_id="proj_of_tenant_b"
+    )
     response = client.get(
         "/projects/proj_of_tenant_b/mastery", headers=auth_headers(tenant_id="tenant_a")
     )

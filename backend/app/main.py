@@ -17,11 +17,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
+from app.api.auth_routes import router as auth_router
 from app.api.routes import error_response, router
 from app.audit.sink import AuditSink
 from app.budget.ledger import BudgetLedger
@@ -32,7 +34,18 @@ from app.core.request_context import bind_request_id, reset_request_id
 from app.execution.confirmation import ConfirmationStore
 from app.execution.state_machine import ActionStateMachine
 from app.identity.auth import AuthProvider, BearerSessionAuthProvider
+from app.identity.cookie_auth import CookieAuth
 from app.identity.membership import MembershipStore
+from app.identity.memory_store import (
+    InMemoryInvitationRepository,
+    InMemorySessionRepository,
+)
+from app.identity.ports import (
+    InvitationRepository,
+    MembershipRepository,
+    SessionRepository,
+    SystemContext,
+)
 from app.identity.session import SessionIssuer
 from app.knowledge.retrieval import ChunkIndex
 from app.learning.evidence import EvidenceLog
@@ -54,6 +67,9 @@ DEMO_TENANT = "tenant_demo"
 DEMO_PRINCIPAL = "user_demo"
 DEMO_PROJECT = "proj_demo"
 
+#: 会话 cookie 的默认有效期。
+DEFAULT_SESSION_TTL = timedelta(hours=8)
+
 
 @dataclass
 class PlatformState:
@@ -70,10 +86,18 @@ class PlatformState:
     runtime: InteractionRuntime
     # 身份与授权
     sessions: SessionIssuer
-    membership: MembershipStore
+    membership: MembershipRepository
     auth: AuthProvider
+    invitations: InvitationRepository
+    session_store: SessionRepository
+    cookie_auth: CookieAuth
     # 服务端确认记录
     confirmations: ConfirmationStore
+    #: 会话 cookie 的有效期（也是兑换出的数据库会话的过期时间）。
+    session_ttl: timedelta = DEFAULT_SESSION_TTL
+    #: 生产环境置 True（HTTPS-only cookie）。测试与本机开发保持 False：
+    #: TestClient 走 http，Secure cookie 不会被回传，等于开了箱就坏。
+    cookie_secure: bool = False
 
 
 def build_platform(
@@ -81,7 +105,12 @@ def build_platform(
     audit_available: bool = True,
     var_dir: Path | None = None,
 ) -> PlatformState:
-    """装配平台。参数用于故障注入与测试隔离。"""
+    """装配平台。参数用于故障注入与测试隔离。
+
+    ⚠️ 本装配函数默认全部使用**内存适配器**。PostgreSQL 适配器
+    （`db.identity_store` / `db.confirmation_store`）由契约测试直接驱动，
+    切换生产装配属于任务 7（重启恢复验收）的范围。
+    """
     base = var_dir or VAR_DIR
     registry = build_registry()
     gateway = PolicyGateway()
@@ -98,11 +127,20 @@ def build_platform(
     audit = AuditSink(base / "audit", available=audit_available)
     confirmations = ConfirmationStore()
 
-    # 身份与授权。签名密钥生产必须来自 KMS/Secret Manager。
-    sessions = SessionIssuer(
-        secret=os.environ.get("STUDY_PLATFORM_SESSION_SECRET", "dev-only-session-secret-change-me")
+    # 身份与授权。签名密钥生产必须来自 KMS/Secret Manager，且互相分离。
+    session_secret = os.environ.get(
+        "STUDY_PLATFORM_SESSION_SECRET", "dev-only-session-secret-change-me"
     )
+    sessions = SessionIssuer(secret=session_secret)
     membership = MembershipStore()
+    session_store = InMemorySessionRepository(clock=clock)
+    invitations = InMemoryInvitationRepository(clock=clock, sessions=session_store)
+    cookie_auth = CookieAuth(
+        # cookie 密钥缺省复用会话密钥：开发环境少一个要配的变量；
+        # 生产必须显式提供独立密钥（见 .env.example 的说明）。
+        secret=os.environ.get("STUDY_PLATFORM_COOKIE_SECRET", session_secret),
+        clock=clock,
+    )
     _seed_demo_membership(membership)
     auth = BearerSessionAuthProvider(issuer=sessions, clock=clock)
 
@@ -134,6 +172,10 @@ def build_platform(
         sessions=sessions,
         membership=membership,
         auth=auth,
+        invitations=invitations,
+        session_store=session_store,
+        cookie_auth=cookie_auth,
+        cookie_secure=os.environ.get("STUDY_PLATFORM_COOKIE_SECURE", "") in {"1", "true"},
         confirmations=confirmations,
     )
 
@@ -144,8 +186,9 @@ def _seed_demo_membership(membership: MembershipStore) -> None:
     这是**服务端种子**：它决定"谁属于哪个项目"。
     客户端无法通过任何请求字段改变这些关系 —— 这正是与「自报租户」的本质区别。
     """
-    membership.create_project(DEMO_PROJECT, tenant_id=DEMO_TENANT, name="演示学习项目")
-    membership.grant_project(DEMO_TENANT, DEMO_PRINCIPAL, DEMO_PROJECT)
+    context = SystemContext(DEMO_TENANT, "演示种子数据")
+    membership.create_project(context, project_id=DEMO_PROJECT, name="演示学习项目")
+    membership.grant_project(context, principal_id=DEMO_PRINCIPAL, project_id=DEMO_PROJECT)
 
 
 def create_app(*, platform: PlatformState | None = None) -> FastAPI:
@@ -160,6 +203,7 @@ def create_app(*, platform: PlatformState | None = None) -> FastAPI:
     )
     app.state.platform = platform or build_platform()
     app.include_router(router)
+    app.include_router(auth_router)
 
     @app.middleware("http")
     async def _bind_request_id(request: Request, call_next):

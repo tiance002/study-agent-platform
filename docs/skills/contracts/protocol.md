@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:4158d8597dd757ddf850fb72b60a958f8a59d58c622701d13e3d97588a272562, generated_at=2026-09-19T05:41:06Z -->
-> 生成时间：2026-09-19T05:41:06Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:1019b23e6b3b84b68d8b7e9a76f4e4ceb98d57f24cbc54b5989acc003f7c015b, generated_at=2026-09-19T08:38:36Z -->
+> 生成时间：2026-09-19T08:38:36Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -15,6 +15,8 @@
 
 | 路径 | 方法 | 说明 |
 |---|---|---|
+| `/auth/invitations/exchange` | POST | Exchange Invitation |
+| `/auth/logout` | POST | Logout |
 | `/healthz` | GET | Healthz |
 | `/me` | GET | Me |
 | `/projects/{project_id}/audit` | GET | Audit View |
@@ -27,7 +29,7 @@
 
 ### 稳定错误码
 
-共 34 个，一经发布不得改变语义，只能追加。
+共 36 个，一经发布不得改变语义，只能追加。
 
 | 错误码 |
 |---|
@@ -44,6 +46,7 @@
 | `CHILD_RUN_ENVELOPE_INVALID` |
 | `CROSS_PROJECT_DENIED` |
 | `CROSS_TENANT_DENIED` |
+| `CSRF_DENIED` |
 | `ENDORSEMENT_EXPIRED` |
 | `ENDORSEMENT_REPLAY_DENIED` |
 | `ENDORSEMENT_SINK_MISMATCH` |
@@ -52,6 +55,7 @@
 | `IDEMPOTENCY_IN_PROGRESS` |
 | `IDEMPOTENCY_VIOLATION` |
 | `ILLEGAL_STATE_TRANSITION` |
+| `INVITATION_INVALID` |
 | `NODE_NOT_REGISTERED` |
 | `OBLIGATION_UNSUPPORTED` |
 | `PARAMS_INVALID` |

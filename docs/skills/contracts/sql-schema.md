@@ -3,12 +3,12 @@
 > `skill_id: sql-schema` | version: 0 | expiry: 2027-03-01 | owner: 待指派
 > 权威来源：`specs/2026-09-17-04-multitenancy-and-data-governance.md`、`03-policy-tools-and-execution.md`、`01-learning-loop-and-mastery-evidence.md`
 > **生成区已启用**：由 `tools/skills/gen_contracts.py` 从代码导出，并参与 CI 一致性校验。
-> ⚠️ 当前导出的是**代码层实体**，不是 PostgreSQL 表结构；迁移（alembic）落地后应改由迁移导出 DDL。
+> 生成区**从 alembic 迁移导出**（迁移是数据库的权威定义），不再扫描代码实体 —— 改迁移，本视图随之更新。
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:0e39c9d45552a06979d8903b1fffce39431a3941dd56a8393bb341a6e0e46578, generated_at=2026-09-19T07:36:53Z -->
-> 生成时间：2026-09-19T07:36:53Z
+<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:2f34a0d7d6c07deb84fa643fa4c71277b18a2f8c4cfbd6c38fa3e0581f0b6fb0, generated_at=2026-09-19T08:38:36Z -->
+> 生成时间：2026-09-19T08:38:36Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import pytest
+from app.identity.ports import SystemContext
 
 PROJECT = "proj_demo"
 
@@ -76,7 +77,7 @@ def test_healthz_declares_stub_components(client):
     """健康检查必须如实说明哪些组件是开发适配器。"""
     body = client.get("/healthz").json()
     assert body["status"] == "ok"
-    assert body["components"]["auth"] == "dev_bearer_session"
+    assert body["components"]["auth"] == "cookie_session_bearer_compat"
     assert body["components"]["rls"] == "not_implemented"
     assert body["components"]["sandbox"] == "not_implemented"
 
@@ -176,7 +177,9 @@ def test_all_request_models_forbid_unknown_fields(client, auth_headers, path, pa
 
 def test_project_membership_is_required(client, auth_headers, platform):
     """令牌合法但项目不属于该主体 → 拒绝（对外 404，不暴露存在性）。"""
-    platform.membership.create_project("proj_someone_else", tenant_id="tenant_demo")
+    platform.membership.create_project(
+        SystemContext("tenant_demo"), project_id="proj_someone_else"
+    )
     response = client.get(
         "/projects/proj_someone_else/mastery", headers=auth_headers()
     )
@@ -314,7 +317,9 @@ def test_confirmation_cannot_be_transferred_to_another_principal(client, auth_he
     headers = auth_headers()
     created = _create_confirmation(client, headers, "append_project_evidence", WRITE_PARAMS).json()
 
-    platform.membership.grant_project("tenant_demo", "user_other", PROJECT)
+    platform.membership.grant_project(
+        SystemContext("tenant_demo"), principal_id="user_other", project_id=PROJECT
+    )
     other_headers = auth_headers(principal_id="user_other")
     result = _interact(
         client,

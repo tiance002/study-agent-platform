@@ -59,9 +59,11 @@ TARGETS: dict[str, Target] = {
     "sql-schema": Target(
         name="sql-schema",
         contract_path=SKILLS_DIR / "contracts" / "sql-schema.md",
-        sources=("backend/app/**/*.py", "alembic/versions/**/*.py"),
+        # 渲染器只读迁移 —— sources 收窄到迁移目录，
+        # 否则任何 app 代码改动都会让本视图的 source_hash 无谓漂移。
+        sources=("alembic/versions/**/*.py",),
         renderer="sql_schema",
-        source_label="AST 扫描 backend/app 实体",
+        source_label="由 alembic 迁移导出（数据库的权威定义）",
     ),
     "protocol": Target(
         name="protocol",

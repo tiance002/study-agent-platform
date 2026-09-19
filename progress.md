@@ -218,3 +218,11 @@ PostgreSQL 身份与产品仓储：`identity/ports.py`、`db/identity_store.py`�
 - manifest 校验补参后通过；`gen_contracts.py` 还要求 `--target` 或 `--all`，最终使用 `--all --check` 校验全部生成契约。
 - 规格同步完成：00/02/03/05/06、ADR-014 与实施计划任务 4/5 已统一；完整 pytest 通过，10 项 PostgreSQL 条件测试跳过；manifest、三份生成契约、Markdown 围栏、旧信封字段和 `git diff --check` 全部通过。
 - 提交时工作区禁止创建 `.git/index.lock`；升级授权的自动审批服务首次返回 503（不是安全拒绝），文件变更与验证结果不受影响。
+
+## 任务 2/3：身份仓储与邀请 Cookie 会话（2026-09-19）
+
+- **交付**：`identity/ports.py`（`MembershipRepository` / `InvitationRepository` / `SessionRepository` + 显式 `SystemContext`）；`identity/memory_store.py` 与 `db/identity_store.py` 双适配器；`identity/cookie_auth.py`（HMAC 签名声明）；`api/auth_routes.py`（`POST /auth/invitations/exchange`、`POST /auth/logout`、统一认证入口 `authenticate_request`）。
+- **认证流**：cookie 优先、bearer 兼容兜底（运维/测试显式凭据）。cookie 路径三步不可换：验签 → CSRF 来源检查（仅不安全方法，浏览器必带 Origin）→ **回库查撤销**（可撤销的全部根据）。
+- **统一拒绝**：邀请的未知/过期/已消费/畸形共用 `INVITATION_INVALID` + 一句话 —— 区分原因等于泄露"token 存在过"。
+- **关键坑（实测）**：`INSERT ... RETURNING` 在 RLS 下要求新行**同时通过 SELECT 的 USING 策略**；`projects` 的 USING 是成员感知的，新项目没有授权行 → 创建者自己都"看不见"，RETURNING 稳定报 `InsufficientPrivilege`。无 RETURNING 的同一 INSERT 全部放行。已改由入参构造契约对象，并做反向验证（注入 RETURNING → 测试变红）。
+- **验收**：372 项测试全过（PG 组真实执行无 skip）；适配器契约 18 项（内存+PG 参数化）+ PG 重启恢复（新仓储实例看到同一份状态：消费不可重放、会话仍存活）；八道门禁全绿。

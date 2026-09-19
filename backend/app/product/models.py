@@ -297,12 +297,18 @@ class SourceRecord:
 
 @dataclass(frozen=True)
 class Invitation:
-    """一次性邀请。**只存哈希** —— 原始令牌不进库、不进日志、不进审计载荷。"""
+    """一次性邀请。**只存哈希** —— 原始令牌不进库、不进日志、不进审计载荷。
+
+    `invitee_principal_id` 是**签发时预绑定**的被邀请主体（0003 迁移起为
+    NOT NULL + 组合外键）。这是「客户端不能通过兑换决定自己是谁」的落点：
+    兑换函数从邀请行读出主体，调用方没有身份参数可传。
+    """
 
     invitation_id: str
     tenant_id: str
     token_hash: str
     issued_by: str
+    invitee_principal_id: str
     issued_at: datetime
     expires_at: datetime
     consumed_at: datetime | None = None
@@ -313,6 +319,7 @@ class Invitation:
         require_id(self.tenant_id, "tenant_id")
         require_id(self.token_hash, "token_hash")
         require_id(self.issued_by, "issued_by")
+        require_id(self.invitee_principal_id, "invitee_principal_id")
         require_aware(self.issued_at, "issued_at")
         require_aware(self.expires_at, "expires_at")
         later_than(self.expires_at, self.issued_at, "expires_at")

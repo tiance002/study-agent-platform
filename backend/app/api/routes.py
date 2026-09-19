@@ -4,18 +4,19 @@
 
 **本版的关键变化：请求体里不再有 `tenant_id` / `principal_id` / `learning_project_id`。**
 
-身份只能来自 `Authorization: Bearer <token>`，项目归属来自服务端成员关系。
+身份只能来自两条路径（`api.auth_routes.authenticate_request` 是唯一入口）：
+
+1. **签名 cookie**（主路径）：验签 → CSRF 来源检查 → 回库查撤销；
+2. **`Authorization: Bearer`**（兼容适配器）：测试与运维显式携带凭据。
+
 此前这些字段由客户端提供，等于任何调用方都能声称自己是别的租户 ——
 那不是"校验不足"，是**根本没有认证**。
 
 三条边界在这里合流，且顺序不可交换：
 
-1. **认证**：解析令牌 → `Principal`（失败即拒绝，不区分原因）
-2. **归属**：`membership.assert_can_access` → 该项目是否属于该主体
+1. **认证**：解析凭据 → `Principal`（失败即拒绝，不区分原因）
+2. **归属**：`membership.get` → 该项目是否属于该主体
 3. **上下文**：用前两步的结果组装 `TenantContext`，之后才允许碰数据
-
-⚠️ 仍未实现：令牌签发端点（签发是运维动作，见 `tools/issue_session.py`），
-   PostgreSQL + RLS（当前成员关系在内存，未受数据库级保护）。
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.auth_routes import authenticate_request
 from app.audit.sink import RiskLevel
 from app.budget.ledger import Dimension
 from app.core.authority import Authority
@@ -94,19 +96,24 @@ def _state(request: Request):
 
 
 def _authenticate(request: Request) -> Principal:
-    """解析身份。这是唯一能产生 `Principal` 的入口。"""
-    return _state(request).auth.authenticate(request.headers.get("Authorization"))
+    """解析身份。这是唯一能产生 `Principal` 的入口。
+
+    cookie 与 bearer 两条路径的全部逻辑（验签、CSRF、撤销检查）
+    收在 `api.auth_routes.authenticate_request` —— 认证不许有两个出口。
+    """
+    return authenticate_request(request)
 
 
 def _project_scope(request: Request, project_id: str) -> tuple[Principal, TenantContext]:
     """认证 + 项目归属校验 + 组装租户上下文。
 
     **所有项目级接口的唯一入口。** 三步都不接受客户端输入的身份或归属：
-    身份来自签名令牌，归属来自服务端成员关系，项目来自路径。
+    身份来自签名凭据（cookie 或 bearer），归属来自服务端成员关系，
+    项目来自路径。
     """
     state = _state(request)
     principal = _authenticate(request)
-    state.membership.assert_can_access(principal, project_id)
+    state.membership.get(principal, project_id)
     context = TenantContext(
         tenant_id=principal.tenant_id,
         principal_id=principal.principal_id,
@@ -129,7 +136,7 @@ def healthz(request: Request) -> dict:
         "components": {
             "policy_gateway": "available",
             "audit_sink": "available" if state.audit.available else "unavailable",
-            "auth": "dev_bearer_session",
+            "auth": "cookie_session_bearer_compat",
             "membership": "in_memory_adapter",
             "confirmation": "server_side_records",
             "retrieval": "development_adapter",
@@ -376,6 +383,21 @@ def error_response(exc: PlatformError):
         # 对外不复用内部错误码，也不透露具体失败原因。
         payload = public_error_payload(
             "UNAUTHENTICATED", "未认证或凭据无效", request_id=request_id
+        )
+    elif exc.code is ErrorCode.INVITATION_INVALID:
+        # 邀请兑换失败：401，但**保留** INVITATION_INVALID 码与统一话术 ——
+        # 未知 / 已过期 / 已消费共用这一个码与同一句话，
+        # 区分原因等于告诉探测者"这个 token 存在过"。
+        status = 401
+        payload = public_error_payload(
+            exc.code.value, exc.message, request_id=request_id
+        )
+    elif exc.code is ErrorCode.CSRF_DENIED:
+        # CSRF 拦截：凭据本身有效，是"来源不对" —— 401 会让客户端去重新登录，
+        # 那是误导；403 说的是"这个请求不被接受"。
+        status = 403
+        payload = public_error_payload(
+            exc.code.value, exc.message, request_id=request_id
         )
     elif exc.code in (
         ErrorCode.CROSS_TENANT_DENIED,

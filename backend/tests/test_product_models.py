@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 import pytest
 from app.identity.membership import MembershipStore
 from app.identity.models import LearningProject
+from app.identity.ports import SystemContext
 from app.product.models import (
     Conversation,
     Invitation,
@@ -44,7 +45,9 @@ NOW = datetime(2026, 9, 19, 12, 0, 0, tzinfo=timezone.utc)
 def test_membership_returns_the_canonical_project_type():
     """成员存储返回的项目必须是 `LearningProject`，不是它自己的私有类型。"""
     store = MembershipStore()
-    project = store.create_project("proj_1", tenant_id="tenant_1", name="示例项目")
+    project = store.create_project(
+        SystemContext("tenant_1"), project_id="proj_1", name="示例项目"
+    )
     assert type(project) is LearningProject
     assert project.project_id == "proj_1"
     assert project.tenant_id == "tenant_1"
@@ -54,12 +57,12 @@ def test_membership_returns_the_canonical_project_type():
 @pytest.mark.invariant
 def test_access_check_returns_the_canonical_project_type():
     store = MembershipStore()
-    store.create_project("proj_1", tenant_id="tenant_1", name="示例项目")
-    store.grant_project("tenant_1", "user_1", "proj_1")
+    store.create_project(SystemContext("tenant_1"), project_id="proj_1", name="示例项目")
+    store.grant_project(SystemContext("tenant_1"), principal_id="user_1", project_id="proj_1")
 
     from app.identity.models import Principal
 
-    project = store.assert_can_access(
+    project = store.get(
         Principal(principal_id="user_1", tenant_id="tenant_1"), "proj_1"
     )
     assert type(project) is LearningProject
@@ -97,12 +100,12 @@ def test_product_module_defines_no_project_model():
 def test_listed_projects_carry_full_product_fields():
     """列项目要能直接喂给产品接口：list 返回的不只是 id。"""
     store = MembershipStore()
-    store.create_project("proj_1", tenant_id="tenant_1", name="甲", goal="学会 Harness")
-    store.grant_project("tenant_1", "user_1", "proj_1")
+    store.create_project(SystemContext("tenant_1"), project_id="proj_1", name="甲", goal="学会 Harness")
+    store.grant_project(SystemContext("tenant_1"), principal_id="user_1", project_id="proj_1")
 
     from app.identity.models import Principal
 
-    projects = store.projects_for(Principal(principal_id="user_1", tenant_id="tenant_1"))
+    projects = store.list_for(Principal(principal_id="user_1", tenant_id="tenant_1"))
     assert [type(p) for p in projects] == [LearningProject]
     assert projects[0].goal == "学会 Harness"
 
@@ -209,7 +212,7 @@ def test_task_order_must_be_non_negative():
 @pytest.mark.invariant
 def test_invitation_expiry_must_be_after_issue():
     with pytest.raises(ValueError, match="expires_at"):
-        Invitation("inv1", "t1", "sha256:x", "user_1", NOW, NOW)
+        Invitation("inv1", "t1", "sha256:x", "user_1", "user_2", NOW, NOW)
 
 
 @pytest.mark.invariant

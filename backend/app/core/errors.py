@@ -23,6 +23,12 @@ class ErrorCode(StrEnum):
     TENANT_CONTEXT_MISSING = "TENANT_CONTEXT_MISSING"
     CROSS_TENANT_DENIED = "CROSS_TENANT_DENIED"
     CROSS_PROJECT_DENIED = "CROSS_PROJECT_DENIED"
+    # 邀请兑换失败。**未知 / 已过期 / 已消费 / 格式错统一用这一个码**：
+    # 区分原因等于告诉探测者"这个 token 存在过" —— 存在性本身就是信息。
+    INVITATION_INVALID = "INVITATION_INVALID"
+    # cookie 认证的跨站请求伪造拦截。仅作用于"凭 cookie 认证的不安全方法"；
+    # bearer 兼容路径不经过它（凭据是显式的，不存在环境凭证被利用的问题）。
+    CSRF_DENIED = "CSRF_DENIED"
 
     # ---- 策略（L2 边界层）----
     POLICY_DENIED = "POLICY_DENIED"
