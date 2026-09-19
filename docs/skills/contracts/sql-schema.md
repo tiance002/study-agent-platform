@@ -7,61 +7,167 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:d9e94b9afc94d6a6cfc99867b9f012191df1ebb8c109fd2dc1841395d6dc35c5, generated_at=2026-09-19T05:47:56Z -->
-> 生成时间：2026-09-19T05:47:56Z
+<!-- BEGIN GENERATED: source=AST 扫描 backend/app 实体, source_hash=sha256:449a0aa9d74c7bdd2ac783b2770da1f809c65f6022d4c1218494a54f65d59235, generated_at=2026-09-19T06:46:39Z -->
+> 生成时间：2026-09-19T06:46:39Z
 
-> 由 `tools/skills/gen_contracts.py` 从代码扫描导出，请勿手工编辑本区。
-> **注意**：这是**代码层实体**，不是 PostgreSQL 表。迁移落地后应改由 alembic 导出 DDL。
+> 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
+> 迁移是数据库的权威定义，本区是它的生成视图。
 
-| 实体 | 定义模块 | 字段数 | 含 tenant_id | 含 learning_project_id |
-|---|---|---:|---|---|
-| `AuditRecord` | `app.audit.sink` | 11 | 是 | — |
-| `ChainVerification` | `app.audit.sink` | 5 | — | — |
-| `_BufferedEvent` | `app.audit.sink` | 7 | 是 | — |
-| `Account` | `app.budget.ledger` | 8 | 是 | — |
-| `Reservation` | `app.budget.ledger` | 7 | — | — |
-| `ArtifactRef` | `app.core.artifacts` | 5 | — | — |
-| `PlatformError` | `app.core.errors` | 5 | — | — |
-| `EvidenceAssessment` | `app.core.evidence_issues` | 4 | — | — |
-| `EvidenceIssue` | `app.core.evidence_issues` | 6 | — | — |
-| `ChildEnvelope` | `app.execution.child_run` | 6 | — | — |
-| `Claim` | `app.execution.child_run` | 3 | — | — |
-| `SpawnedChild` | `app.execution.child_run` | 4 | — | — |
-| `BudgetCeiling` | `app.execution.confirmation` | 3 | — | — |
-| `ConfirmationRecord` | `app.execution.confirmation` | 10 | 是 | — |
-| `ConfirmationStore` | `app.execution.confirmation` | 2 | — | — |
-| `ToolOutcome` | `app.execution.outbox` | 7 | — | — |
-| `LogicalAction` | `app.execution.state_machine` | 9 | 是 | — |
-| `MembershipStore` | `app.identity.membership` | 3 | — | — |
-| `ProjectRecord` | `app.identity.membership` | 3 | 是 | — |
-| `Principal` | `app.identity.models` | 4 | 是 | — |
-| `SessionToken` | `app.identity.session` | 8 | 是 | — |
-| `FetchFailure` | `app.knowledge.evidence_state` | 3 | — | — |
-| `RetrievalSignals` | `app.knowledge.evidence_state` | 9 | — | — |
-| `Chunk` | `app.knowledge.retrieval` | 9 | 是 | 是 |
-| `ScoredChunk` | `app.knowledge.retrieval` | 2 | — | — |
-| `ComponentVerdict` | `app.learning.evidence` | 7 | — | — |
-| `EvidenceCorrection` | `app.learning.evidence` | 6 | — | — |
-| `EvidenceEvent` | `app.learning.evidence` | 11 | 是 | — |
-| `ComponentMastery` | `app.learning.projector` | 7 | — | — |
-| `MasteryProjection` | `app.learning.projector` | 6 | — | — |
-| `PlatformState` | `app.main` | 15 | — | — |
-| `ExecutorCapabilities` | `app.policy.gateway` | 1 | — | — |
-| `PolicyDecision` | `app.policy.gateway` | 7 | — | — |
-| `PolicyInput` | `app.policy.gateway` | 16 | 是 | — |
-| `Endorsement` | `app.policy.taint` | 10 | — | — |
-| `TaintedValue` | `app.policy.taint` | 4 | — | — |
-| `CapabilityToken` | `app.policy.token` | 15 | 是 | — |
-| `TokenIssuer` | `app.policy.token` | 1 | — | — |
-| `NodeSpec` | `app.registry.models` | 16 | — | — |
-| `ToolSpec` | `app.registry.models` | 15 | — | — |
-| `TenantContext` | `app.tenancy.context` | 3 | 是 | — |
-| `NodeContext` | `app.workflow.context` | 8 | 是 | — |
-| `InteractionRequest` | `app.workflow.runtime` | 9 | 是 | 是 |
-| `InteractionResult` | `app.workflow.runtime` | 10 | — | — |
-| `_IdempotencyEntry` | `app.workflow.runtime` | 3 | — | — |
+当前 head：`0002`
 
-合计 45 个实体。
+### 表总览
+
+| 表 | 来源迁移 | 隔离级别 | 应用角色权限 | 列数 |
+|---|---|---|---|---:|
+| `action_intents` | 0001 | 项目级 | SELECT, INSERT, UPDATE, DELETE | 11 |
+| `confirmations` | 0001 | 项目级 | SELECT, INSERT, UPDATE, DELETE | 12 |
+| `conversations` | 0002 | 项目级 | SELECT, INSERT, UPDATE, DELETE | 6 |
+| `evidence_events` | 0001 | 项目级 | SELECT, INSERT | 12 |
+| `http_idempotency` | 0002 | 租户级 | SELECT, INSERT, UPDATE | 12 |
+| `invitations` | 0002 | 租户级 | SELECT, INSERT, UPDATE, DELETE | 8 |
+| `learning_plans` | 0002 | 项目级 | SELECT, INSERT, UPDATE, DELETE | 7 |
+| `learning_tasks` | 0002 | 项目级 | SELECT, INSERT, UPDATE, DELETE | 7 |
+| `messages` | 0002 | 项目级 | SELECT, INSERT | 8 |
+| `milestones` | 0002 | 项目级 | SELECT, INSERT, UPDATE, DELETE | 7 |
+| `principals` | 0001 | 租户级 | SELECT, INSERT, UPDATE, DELETE | 4 |
+| `project_grants` | 0001 | 租户级 | SELECT, INSERT, UPDATE, DELETE | 4 |
+| `projects` | 0001 → 0002 改写 | 成员感知 | SELECT, INSERT, UPDATE, DELETE | 7 |
+| `sources` | 0002 | 项目级 | SELECT, INSERT, UPDATE, DELETE | 8 |
+| `tenants` | 0001 | 租户级 | SELECT, INSERT, UPDATE, DELETE | 3 |
+| `user_sessions` | 0002 | 租户级 | SELECT, INSERT, UPDATE, DELETE | 6 |
+
+### 列明细
+
+| 表 | 列 | 类型 |
+|---|---|---|
+| `action_intents` | `logical_action_id` | `text` |
+| `action_intents` | `tenant_id` | `text` |
+| `action_intents` | `project_id` | `text` |
+| `action_intents` | `run_id` | `text` |
+| `action_intents` | `node_instance_id` | `text` |
+| `action_intents` | `tool_id` | `text` |
+| `action_intents` | `idempotency_key` | `text` |
+| `action_intents` | `state` | `text` |
+| `action_intents` | `attempts` | `jsonb` |
+| `action_intents` | `created_at` | `timestamptz` |
+| `action_intents` | `updated_at` | `timestamptz` |
+| `confirmations` | `confirmation_id` | `text` |
+| `confirmations` | `tenant_id` | `text` |
+| `confirmations` | `project_id` | `text` |
+| `confirmations` | `principal_id` | `text` |
+| `confirmations` | `tool_id` | `text` |
+| `confirmations` | `params_hash` | `text` |
+| `confirmations` | `ceiling_dimension` | `text` |
+| `confirmations` | `ceiling_amount` | `bigint` |
+| `confirmations` | `ceiling_note` | `text` |
+| `confirmations` | `issued_at` | `timestamptz` |
+| `confirmations` | `expires_at` | `timestamptz` |
+| `confirmations` | `consumed_at` | `timestamptz` |
+| `conversations` | `conversation_id` | `text` |
+| `conversations` | `tenant_id` | `text` |
+| `conversations` | `project_id` | `text` |
+| `conversations` | `title` | `text` |
+| `conversations` | `last_message_seq` | `bigint` |
+| `conversations` | `created_at` | `timestamptz` |
+| `evidence_events` | `seq` | `bigint` |
+| `evidence_events` | `event_id` | `text` |
+| `evidence_events` | `tenant_id` | `text` |
+| `evidence_events` | `project_id` | `text` |
+| `evidence_events` | `kind` | `text` |
+| `evidence_events` | `task_id` | `text` |
+| `evidence_events` | `contract_id` | `text` |
+| `evidence_events` | `mapping_version` | `text` |
+| `evidence_events` | `graph_version` | `text` |
+| `evidence_events` | `occurred_at` | `timestamptz` |
+| `evidence_events` | `recorded_at` | `timestamptz` |
+| `evidence_events` | `payload` | `jsonb` |
+| `http_idempotency` | `claim_id` | `text` |
+| `http_idempotency` | `tenant_id` | `text` |
+| `http_idempotency` | `principal_id` | `text` |
+| `http_idempotency` | `command_scope` | `text` |
+| `http_idempotency` | `client_key` | `text` |
+| `http_idempotency` | `request_hash` | `text` |
+| `http_idempotency` | `project_id` | `text` |
+| `http_idempotency` | `state` | `text` |
+| `http_idempotency` | `status_code` | `integer` |
+| `http_idempotency` | `response_body` | `jsonb` |
+| `http_idempotency` | `claimed_at` | `timestamptz` |
+| `http_idempotency` | `completed_at` | `timestamptz` |
+| `invitations` | `invitation_id` | `text` |
+| `invitations` | `tenant_id` | `text` |
+| `invitations` | `token_hash` | `text` |
+| `invitations` | `issued_by` | `text` |
+| `invitations` | `issued_at` | `timestamptz` |
+| `invitations` | `expires_at` | `timestamptz` |
+| `invitations` | `consumed_at` | `timestamptz` |
+| `invitations` | `consumed_by` | `text` |
+| `learning_plans` | `plan_id` | `text` |
+| `learning_plans` | `tenant_id` | `text` |
+| `learning_plans` | `project_id` | `text` |
+| `learning_plans` | `version` | `integer` |
+| `learning_plans` | `goal` | `text` |
+| `learning_plans` | `status` | `text` |
+| `learning_plans` | `created_at` | `timestamptz` |
+| `learning_tasks` | `task_id` | `text` |
+| `learning_tasks` | `tenant_id` | `text` |
+| `learning_tasks` | `project_id` | `text` |
+| `learning_tasks` | `milestone_id` | `text` |
+| `learning_tasks` | `order_index` | `integer` |
+| `learning_tasks` | `title` | `text` |
+| `learning_tasks` | `status` | `text` |
+| `messages` | `message_id` | `text` |
+| `messages` | `tenant_id` | `text` |
+| `messages` | `project_id` | `text` |
+| `messages` | `conversation_id` | `text` |
+| `messages` | `seq` | `bigint` |
+| `messages` | `role` | `text` |
+| `messages` | `content` | `text` |
+| `messages` | `created_at` | `timestamptz` |
+| `milestones` | `milestone_id` | `text` |
+| `milestones` | `tenant_id` | `text` |
+| `milestones` | `project_id` | `text` |
+| `milestones` | `plan_id` | `text` |
+| `milestones` | `order_index` | `integer` |
+| `milestones` | `title` | `text` |
+| `milestones` | `description` | `text` |
+| `principals` | `principal_id` | `text` |
+| `principals` | `tenant_id` | `text` |
+| `principals` | `display_name` | `text` |
+| `principals` | `created_at` | `timestamptz` |
+| `project_grants` | `tenant_id` | `text` |
+| `project_grants` | `principal_id` | `text` |
+| `project_grants` | `project_id` | `text` |
+| `project_grants` | `granted_at` | `timestamptz` |
+| `projects` | `project_id` | `text` |
+| `projects` | `tenant_id` | `text` |
+| `projects` | `name` | `text` |
+| `projects` | `created_at` | `timestamptz` |
+| `projects` | `goal` | `text` |
+| `projects` | `version` | `integer` |
+| `projects` | `updated_at` | `timestamptz` |
+| `sources` | `source_id` | `text` |
+| `sources` | `tenant_id` | `text` |
+| `sources` | `project_id` | `text` |
+| `sources` | `display_name` | `text` |
+| `sources` | `media_type` | `text` |
+| `sources` | `identity_hash` | `text` |
+| `sources` | `acquisition` | `jsonb` |
+| `sources` | `registered_at` | `timestamptz` |
+| `tenants` | `tenant_id` | `text` |
+| `tenants` | `name` | `text` |
+| `tenants` | `created_at` | `timestamptz` |
+| `user_sessions` | `session_id` | `text` |
+| `user_sessions` | `tenant_id` | `text` |
+| `user_sessions` | `principal_id` | `text` |
+| `user_sessions` | `issued_at` | `timestamptz` |
+| `user_sessions` | `expires_at` | `timestamptz` |
+| `user_sessions` | `revoked_at` | `timestamptz` |
+
+### 本区不覆盖的内容
+
+策略谓词、`GRANT` 语句、索引与 `CHECK` 约束的**文本**不在本表里 ——
+它们由迁移文件承载，改迁移即可，不需要维护两份。
+本区回答三个问题：有哪些表、每张表怎么隔离、应用角色能做什么。
 <!-- END GENERATED -->
 
 ## 2. 手写区 · 不可协商的数据库约束

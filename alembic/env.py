@@ -38,6 +38,21 @@ DEFAULT_MIGRATION_DSN = "postgresql+psycopg://postgres@127.0.0.1:5432/study_plat
 target_metadata = None
 
 
+def _with_psycopg_driver(dsn: str) -> str:
+    """确保连接串指定 psycopg 3 方言。
+
+    裸 `postgresql://` 会让 SQLAlchemy 去 import **psycopg2**，
+    而本项目依赖的是 psycopg 3。缺了前缀时报的是
+    `No module named 'psycopg2'` —— 一句完全不指向真正原因的错误：
+    人会去查"是不是没装驱动"，而真实原因是"DSN 少写了方言"。
+
+    与其要求每个人记住写 `+psycopg`，不如在这里补上。
+    """
+    if dsn.startswith("postgresql://"):
+        return "postgresql+psycopg://" + dsn[len("postgresql://") :]
+    return dsn
+
+
 def database_url() -> str:
     dsn = os.environ.get("STUDY_PLATFORM_MIGRATION_DSN", DEFAULT_MIGRATION_DSN)
     if not dsn:
@@ -45,7 +60,7 @@ def database_url() -> str:
             "STUDY_PLATFORM_MIGRATION_DSN 为空。迁移需要具备 DDL 权限的连接串，"
             "不能复用应用角色。"
         )
-    return dsn
+    return _with_psycopg_driver(dsn)
 
 
 def run_migrations_offline() -> None:

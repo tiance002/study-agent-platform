@@ -94,3 +94,35 @@ def test_windows_scripts_use_crlf_and_stay_ascii():
             problems.append(f"{rel}：含非 ASCII 字节")
     assert found, "没有找到任何 .cmd/.bat 文件，测试前提不成立（路径或排除规则写错了？）"
     assert not problems, problems
+
+
+#: 零宽类不可见字符。它们不会报错，只会让"看起来一样"的两段文本不相等。
+_INVISIBLE_CHARS = {
+    "零宽空格 ZWSP": "\u200b",
+    "零宽非连接符 ZWNJ": "\u200c",
+    "零宽连接符 ZWJ": "\u200d",
+    "单词连接符 WJ": "\u2060",
+    "BOM": "\ufeff",
+}
+
+
+@pytest.mark.invariant
+def test_text_files_contain_no_invisible_characters():
+    """源码与文档不得含零宽类不可见字符。
+
+    为什么这值得一条机械守卫：**它们不可见，review 抓不到**。危害有三 ——
+
+    1. 字符串比较会莫名失败："看起来一样"的两个字符串不相等；
+    2. 中文输入法切换时会悄悄插入它们，而错误现场离原因很远；
+    3. 它们让 diff 出现无法解释的改动。
+
+    它不是假想的：写这条守卫的当天，我在一个注释里打进了一个零宽空格。
+    靠眼睛是永远发现不了的 —— 只能靠机械检查。
+    """
+    offenders: dict[str, list[str]] = {}
+    for path in _candidate_files(LF_SUFFIXES):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        hits = [name for name, char in _INVISIBLE_CHARS.items() if char in text]
+        if hits:
+            offenders[str(path.relative_to(ROOT))] = hits
+    assert not offenders, f"发现不可见字符（它们只能靠机械检查发现）：{offenders}"

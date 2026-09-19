@@ -94,3 +94,14 @@
 - 模型输出修正、已派发工具调用、同一逻辑动作的执行尝试是三种不同预算。格式或 schema 校验失败发生在 Policy Gateway 和派发前，不占 `max_tool_calls`，但消耗 token 与 step。
 - 证据不足、冲突等属于 knowledge 域状态，不应塞入平台 `ErrorCode`；结构化问题使用独立闭集 `EvidenceIssueCode`。只有工具执行类问题的可重试性可由 `ToolOutcome` 映射。
 - 现有 `unresolved` 已体现“工具失败不等于没有候选”的正确方向，但自然语言列表不可统计、不可稳定驱动状态，需升级为结构化 `issues[]`。
+
+## 2026-09-19 · 第一轮产品化边界
+
+- 当前数据库迁移只有 `0001_core_tables_and_rls.py`，覆盖租户、主体、项目、授权、确认、证据和动作意图；会话、消息、计划、里程碑、任务、资料登记与 HTTP 幂等记录仍缺表。
+- PostgreSQL 事务上下文与确认适配器已经证明 `SET LOCAL`/RLS 路径可行，第一轮应扩展现有模式，不再建立第二套 ORM 数据路径。
+- 用户入口仍依赖粘贴 Bearer token；第一轮采用一次性邀请换 HTTP-only Cookie，会话必须可撤销，邀请只存哈希。
+- 第一轮的“重启不丢数据”指用户身份、项目、会话、消息、计划、资料元数据以及命令幂等状态；模型生成和资料语义处理不进入本轮。
+- 为避免前端绑死内部协议，本轮先建立 product facade API；现有 node/registry/audit/budget 接口继续作为开发与运维表面，不作为后续普通用户界面的数据源。
+- 客户端命令幂等只有一个判定出口：`http_idempotency` 以 `(tenant_id, principal_id, command_scope, client_key)` 唯一定位命令，再用 `request_hash` 区分重放与改体冲突。业务表不保存或解释 `client_key`，其唯一约束只保护领域不变量。
+- 项目模型只有一个权威定义：将 `identity/membership.py` 的私有 `ProjectRecord` 升级为 `identity/models.py` 的 `LearningProject`，成员授权和产品服务共同使用；`product/models.py` 不再复制同一行。
+- 第一轮只记录资料元数据与 `registered_at`，不定义永远不会发生的 `processing`/`ready`。摄取任务、切块和状态机随第二轮真实处理管线一起引入。

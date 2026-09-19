@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import re
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -117,50 +118,209 @@ def source_hash(paths: list[Path]) -> str:
 # --------------------------------------------------------------------- 渲染器
 
 
-def render_sql_schema() -> str:
-    """扫描代码中的实体定义。
-
-    导出**代码层实体**：类名、模块、字段数、是否含 `tenant_id` / `learning_project_id`。
-    「含租户列」这件事能一眼看出来，正是这份契约最该守住的性质。
-    """
-    rows: list[tuple[str, str, int, str, str]] = []
-    for path in sorted((REPO_ROOT / "backend" / "app").rglob("*.py")):
+def _migration_modules() -> list[tuple[str, ast.Module]]:
+    """按文件名排序加载迁移模块（0001 < 0002 …）。"""
+    found: list[tuple[str, ast.Module]] = []
+    for path in sorted((REPO_ROOT / "alembic" / "versions").glob("*.py")):
+        if path.name.startswith("__"):
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        module = path.relative_to(REPO_ROOT / "backend").with_suffix("").as_posix().replace("/", ".")
-        for node in tree.body:
-            if not isinstance(node, ast.ClassDef):
+        found.append((path.name, tree))
+    return found
+
+
+def _module_literal(tree: ast.Module, name: str) -> object | None:
+    """取模块级 `NAME = <字面量>`（含带类型注解的写法）。
+
+    用 `literal_eval` 而不是导入执行：迁移模块只需要被**读**，
+    不应该在生成契约时被跑一遍。
+    """
+    for node in tree.body:
+        value = None
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets, value = [node.target], node.value
+        elif isinstance(node, ast.Assign):
+            targets = [t for t in node.targets if isinstance(t, ast.Name)]
+            value = node.value
+        else:
+            continue
+        if value is not None and any(t.id == name for t in targets):
+            try:
+                return ast.literal_eval(value)
+            except ValueError:
+                return None
+    return None
+
+
+def _create_table_blocks(tree: ast.Module) -> list[str]:
+    """模块里所有含 `CREATE TABLE` 的字符串字面量。"""
+    blocks: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if "CREATE TABLE" in node.value:
+                blocks.append(node.value)
+    return blocks
+
+
+_TABLE_NAME_RE = re.compile(r"CREATE TABLE\s+(\w+)\s*\(")
+_TABLE_BODY_RE = re.compile(r"CREATE TABLE\s+\w+\s*\((.*?)\n\)\s*$", re.DOTALL)
+#: 表级约束不是列。按行首关键字跳过 —— 比靠缩进稳（缩进在 SQL 里没有语义）。
+_TABLE_CONSTRAINT_KEYWORDS = frozenset(
+    {"UNIQUE", "CHECK", "PRIMARY", "FOREIGN", "CONSTRAINT", "EXCLUDE"}
+)
+
+
+def _text_blocks(tree: ast.Module) -> list[str]:
+    """模块里所有字符串字面量（按源码顺序）。
+
+    `ALTER TABLE ... ADD COLUMN` 就是这样被发现的：表结构不只由 `CREATE TABLE`
+    决定，后续迁移加列同样是结构的一部分 —— 漏掉它，契约里的列数就会骗人。
+    """
+    return [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+
+
+_ADD_COLUMN_RE = re.compile(
+    r"ALTER TABLE\s+(\w+)\s+ADD COLUMN\s+(\w+)\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
+
+
+def _table_name(block: str) -> str | None:
+    found = _TABLE_NAME_RE.search(block)
+    return found.group(1) if found else None
+
+
+def _columns_of(block: str) -> list[tuple[str, str]]:
+    """从 `CREATE TABLE` 取 (列名, 类型)。
+
+    跨行的列约束（类型行之后再另起一行的 `CHECK (...)`）会被正确跳过：
+    那一行的首关键字是 `CHECK`。
+    """
+    body = _TABLE_BODY_RE.search(block)
+    if body is None:
+        return []
+    columns: list[tuple[str, str]] = []
+    for raw_line in body.group(1).splitlines():
+        line = raw_line.strip().rstrip(",").strip()
+        if not line:
+            continue
+        parts = line.split()
+        if parts[0].upper() in _TABLE_CONSTRAINT_KEYWORDS:
+            continue
+        columns.append((parts[0], parts[1].lower() if len(parts) > 1 else ""))
+    return columns
+
+
+def _grants_of(table: str, append_only: set[str], no_delete: set[str]) -> str:
+    if table in append_only:
+        return "SELECT, INSERT"
+    if table in no_delete:
+        return "SELECT, INSERT, UPDATE"
+    return "SELECT, INSERT, UPDATE, DELETE"
+
+
+def _head_revision() -> str:
+    """迁移链的 head：出现在 `revision` 却不出现在任何 `down_revision` 里的那个。"""
+    revisions: set[str] = set()
+    downs: set[str] = set()
+    for _filename, tree in _migration_modules():
+        revision = _module_literal(tree, "revision")
+        down = _module_literal(tree, "down_revision")
+        if isinstance(revision, str):
+            revisions.add(revision)
+        if isinstance(down, str):
+            downs.add(down)
+    heads = sorted(revisions - downs)
+    return ", ".join(heads) if heads else "—"
+
+
+def render_sql_schema() -> str:
+    """从 **alembic 迁移**导出表、隔离级别与应用角色的权限。
+
+    为什么读迁移而不是扫描代码：**迁移才是数据库的权威定义**。
+    本函数早先扫描 `backend/app` 的 dataclass，导出的是"代码层实体" ——
+    它与真实表结构之间**没有任何机械联系**：契约可以整体没错，
+    而实际表已经完全不同。改成读迁移后 `source_hash` 覆盖
+    `alembic/versions/**`，任何一次表结构改动都会让这道门禁报警。
+
+    迁移模块暴露的约定（缺省即不生效）：
+
+    | 常量 | 含义 |
+    |---|---|
+    | `TABLES` | 本迁移新建、并启用 FORCE RLS 的表 |
+    | `PROJECT_SCOPED` | 其中属于项目级的（谓词额外要求 `app.project_id`） |
+    | `APPEND_ONLY` | 只给应用角色 `SELECT, INSERT` |
+    | `NO_DELETE` | 只给 `SELECT, INSERT, UPDATE` |
+    | `POLICY_OVERRIDES` | 改写既有表的隔离级别，如 `{"projects": "成员感知"}` |
+    """
+    tables: dict[str, dict[str, object]] = {}
+    for filename, tree in _migration_modules():
+        revision = filename.split("_", 1)[0]
+        project_scoped = set(_module_literal(tree, "PROJECT_SCOPED") or ())
+        append_only = set(_module_literal(tree, "APPEND_ONLY") or ())
+        no_delete = set(_module_literal(tree, "NO_DELETE") or ())
+        overrides = _module_literal(tree, "POLICY_OVERRIDES") or {}
+
+        for block in _create_table_blocks(tree):
+            name = _table_name(block)
+            if name is None:
                 continue
-            decorators = " ".join(ast.unparse(d) for d in node.decorator_list)
-            if "dataclass" not in decorators:
-                continue
-            fields = [
-                item.target.id
-                for item in node.body
-                if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
-            ]
-            if not fields:
-                continue
-            rows.append(
-                (
-                    node.name,
-                    module,
-                    len(fields),
-                    "是" if "tenant_id" in fields else "—",
-                    "是" if "learning_project_id" in fields else "—",
-                )
-            )
+            tables[name] = {
+                "revision": revision,
+                "scope": "项目级" if name in project_scoped else "租户级",
+                "grants": _grants_of(name, append_only, no_delete),
+                "columns": _columns_of(block),
+            }
+
+        # 后续迁移给既有表加列，同样是表结构的一部分。
+        for block in _text_blocks(tree):
+            for table, column, ctype in _ADD_COLUMN_RE.findall(block):
+                info = tables.get(table)
+                if info is None:
+                    continue
+                existing = {name for name, _ in info["columns"]}  # type: ignore[union-attr]
+                if column not in existing:
+                    info["columns"].append((column, ctype.lower()))  # type: ignore[union-attr]
+
+        for name, label in dict(overrides).items():
+            if name in tables:
+                tables[name]["scope"] = label
+                tables[name]["revision"] = f"{tables[name]['revision']} → {revision} 改写"
 
     lines = [
-        "> 由 `tools/skills/gen_contracts.py` 从代码扫描导出，请勿手工编辑本区。",
-        "> **注意**：这是**代码层实体**，不是 PostgreSQL 表。迁移落地后应改由 alembic 导出 DDL。",
+        "> 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。",
+        "> 迁移是数据库的权威定义，本区是它的生成视图。",
         "",
-        "| 实体 | 定义模块 | 字段数 | 含 tenant_id | 含 learning_project_id |",
-        "|---|---|---:|---|---|",
+        f"当前 head：`{_head_revision()}`",
+        "",
+        "### 表总览",
+        "",
+        "| 表 | 来源迁移 | 隔离级别 | 应用角色权限 | 列数 |",
+        "|---|---|---|---|---:|",
     ]
-    for name, module, count, tenant, project in sorted(rows, key=lambda r: (r[1], r[0])):
-        lines.append(f"| `{name}` | `{module}` | {count} | {tenant} | {project} |")
-    lines.append("")
-    lines.append(f"合计 {len(rows)} 个实体。")
+    for name in sorted(tables):
+        info = tables[name]
+        lines.append(
+            f"| `{name}` | {info['revision']} | {info['scope']} | {info['grants']} | "
+            f"{len(info['columns'])} |"
+        )
+
+    lines += ["", "### 列明细", "", "| 表 | 列 | 类型 |", "|---|---|---|"]
+    for name in sorted(tables):
+        for column, ctype in tables[name]["columns"]:  # type: ignore[union-attr]
+            lines.append(f"| `{name}` | `{column}` | `{ctype}` |")
+
+    lines += [
+        "",
+        "### 本区不覆盖的内容",
+        "",
+        "策略谓词、`GRANT` 语句、索引与 `CHECK` 约束的**文本**不在本表里 ——",
+        "它们由迁移文件承载，改迁移即可，不需要维护两份。",
+        "本区回答三个问题：有哪些表、每张表怎么隔离、应用角色能做什么。",
+    ]
     return "\n".join(lines)
 
 
