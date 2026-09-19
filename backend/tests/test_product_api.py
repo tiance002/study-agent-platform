@@ -16,6 +16,12 @@ from fastapi.testclient import TestClient
 ORIGIN = {"Origin": "http://testserver"}
 
 
+def _keyed() -> dict:
+    """写端点必须携带 Idempotency-Key（审查修复）；每次调用唯一，
+    否则同键同内容会命中重放缓存，测不到真实执行。"""
+    return {**ORIGIN, "Idempotency-Key": "prod-" + uuid.uuid4().hex}
+
+
 def _hash(raw: str) -> str:
     import hashlib
 
@@ -37,7 +43,7 @@ def user_with_project(client, platform):
         expires_at=now + __import__("datetime").timedelta(days=1),
     )
     assert client.post("/auth/invitations/exchange", json={"token": token}).status_code == 200
-    created = client.post("/projects", json={"name": "产品 API 项目"}, headers=ORIGIN)
+    created = client.post("/projects", json={"name": "产品 API 项目"}, headers=_keyed())
     assert created.status_code == 201
     return client, created.json()["project_id"]
 
@@ -62,7 +68,7 @@ def test_conversation_message_flow(user_with_project):
     client, project_id = user_with_project
 
     conversation = client.post(
-        f"/projects/{project_id}/conversations", json={"title": "问答"}, headers=ORIGIN
+        f"/projects/{project_id}/conversations", json={"title": "问答"}, headers=_keyed()
     )
     assert conversation.status_code == 201
     conversation_id = conversation.json()["conversation_id"]
@@ -70,7 +76,7 @@ def test_conversation_message_flow(user_with_project):
     first = client.post(
         f"/projects/{project_id}/conversations/{conversation_id}/messages",
         json={"role": "user", "content": "第一问"},
-        headers=ORIGIN,
+        headers=_keyed(),
     )
     assert first.status_code == 201
     assert first.json()["seq"] == 1
@@ -78,7 +84,7 @@ def test_conversation_message_flow(user_with_project):
     reply = client.post(
         f"/projects/{project_id}/conversations/{conversation_id}/messages",
         json={"role": "assistant", "content": "第一答"},
-        headers=ORIGIN,
+        headers=_keyed(),
     )
     assert reply.json()["seq"] == 2, "seq 由服务端分配，请求体没有这个字段可传"
 
@@ -92,12 +98,12 @@ def test_conversation_message_flow(user_with_project):
 def test_message_role_is_closed_set(user_with_project):
     client, project_id = user_with_project
     conversation_id = client.post(
-        f"/projects/{project_id}/conversations", json={}, headers=ORIGIN
+        f"/projects/{project_id}/conversations", json={}, headers=_keyed()
     ).json()["conversation_id"]
     response = client.post(
         f"/projects/{project_id}/conversations/{conversation_id}/messages",
         json={"role": "admin", "content": "非法角色"},
-        headers=ORIGIN,
+        headers=_keyed(),
     )
     assert response.status_code == 422, "角色是闭集：未知角色不能被当成 user 放过去"
 
@@ -112,7 +118,7 @@ def test_plan_replace_and_current(user_with_project):
     empty = client.get(f"/projects/{project_id}/plan")
     assert empty.status_code == 204, "没有计划是 204，不是 404 也不是空对象"
 
-    first = client.put(f"/projects/{project_id}/plan", json=PLAN_BODY, headers=ORIGIN)
+    first = client.put(f"/projects/{project_id}/plan", json=PLAN_BODY, headers=_keyed())
     assert first.status_code == 200
     body = first.json()
     assert body["plan"]["version"] == 1
@@ -126,7 +132,7 @@ def test_plan_replace_and_current(user_with_project):
         json={**PLAN_BODY, "goal": "第四周收尾", "milestones": [
             {"title": "冲刺", "tasks": [{"title": "总复习"}]},
         ]},
-        headers=ORIGIN,
+        headers=_keyed(),
     )
     assert second.json()["plan"]["version"] == 2
     assert len(second.json()["milestones"]) == 1, "整版替换：旧里程碑不残留"
@@ -150,13 +156,13 @@ def test_source_registration_is_idempotent_on_same_acquisition(user_with_project
     first = client.post(
         f"/projects/{project_id}/sources",
         json={"display_name": "讲义.pdf", "media_type": "application/pdf", "acquisition": acquisition},
-        headers=ORIGIN,
+        headers=_keyed(),
     )
     assert first.status_code == 201
     second = client.post(
         f"/projects/{project_id}/sources",
         json={"display_name": "讲义(重传).pdf", "acquisition": acquisition},
-        headers=ORIGIN,
+        headers=_keyed(),
     )
     assert second.status_code == 201
     assert second.json()["source_id"] == first.json()["source_id"], (
@@ -173,7 +179,7 @@ def test_products_are_invisible_to_other_users(platform, client, user_with_proje
     client_a, project_id = user_with_project
 
     conversation_id = client_a.post(
-        f"/projects/{project_id}/conversations", json={}, headers=ORIGIN
+        f"/projects/{project_id}/conversations", json={}, headers=_keyed()
     ).json()["conversation_id"]
 
     other_token = "other-" + uuid.uuid4().hex
@@ -197,11 +203,11 @@ def test_products_are_invisible_to_other_users(platform, client, user_with_proje
         other.post(
             f"/projects/{project_id}/conversations/{conversation_id}/messages",
             json={"role": "user", "content": "越权"},
-            headers=ORIGIN,
+            headers=_keyed(),
         ).status_code
         == 404
     )
-    assert other.put(f"/projects/{project_id}/plan", json=PLAN_BODY, headers=ORIGIN).status_code == 404
+    assert other.put(f"/projects/{project_id}/plan", json=PLAN_BODY, headers=_keyed()).status_code == 404
     assert other.post(
-        f"/projects/{project_id}/sources", json={"display_name": "x"}, headers=ORIGIN
+        f"/projects/{project_id}/sources", json={"display_name": "x"}, headers=_keyed()
     ).status_code == 404

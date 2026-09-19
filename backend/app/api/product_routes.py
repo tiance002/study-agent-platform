@@ -13,6 +13,7 @@ milestone_id / source_id 全部由服务端生成并随响应返回——客户�
 from __future__ import annotations
 
 from hashlib import sha256
+from typing import Literal
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -21,6 +22,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.core.hashing import canonical_json
 from app.core.ids import new_id
 from app.identity.models import Principal
+from app.learning.evidence import Direction, EvidenceKind, Validity
+from app.learning.ports import GRAPH_VERSION_V1
 from app.product.models import (
     LearningPlan,
     LearningTask,
@@ -83,6 +86,14 @@ class PlanBody(BaseModel):
 
     goal: str = Field(min_length=1, max_length=GOAL_MAX_CHARS)
     milestones: list[MilestoneInput] = Field(min_length=1)
+
+
+class TaskTransitionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    #: Literal 让非法状态名在请求校验层就 422，不进业务层。
+    expected_status: Literal["pending", "in_progress", "done", "skipped"]
+    next_status: Literal["pending", "in_progress", "done", "skipped"]
 
 
 class SourceBody(BaseModel):
@@ -303,3 +314,97 @@ def list_sources(request: Request, project_id: str) -> dict:
     state = _state(request)
     rows = state.products.list_sources(_actor(request), project_id)
     return {"sources": [s.to_dict() for s in rows]}
+
+
+# ------------------------------------------------- 任务流转 / 详情 / 掌握度
+
+
+@router.get("/projects/{project_id}/tasks/{task_id}")
+def get_task(request: Request, project_id: str, task_id: str) -> dict:
+    """任务详情。`verified` 是**计算结论**：存在 >=1 条有效正向学习证据。
+
+    它不存库 —— 存库就需要第二处写入者去维护它，而"已验证"的本质是
+    对证据的聚合，不是一个新的可变状态。
+    """
+    state = _state(request)
+    actor = _actor(request)
+    task = state.products.get_task(actor, project_id, task_id)
+    events = state.evidence.events_for(actor, project_id)
+    return {**task.to_dict(), "verified": _task_verified(events, task_id)}
+
+
+def _task_verified(events, task_id: str) -> bool:
+    """verified 的唯一定义：该任务存在 kind=LEARNING 且含有效正向裁决的证据。
+
+    无效裁决（INCONCLUSIVE/VOIDED）与负向证据都不能让任务变绿 ——
+    否则"掌握度只由合法证据更新"就会在这里漏一个口子。
+    """
+    for event in events:
+        if event.task_id != task_id or event.kind is not EvidenceKind.LEARNING:
+            continue
+        for verdict in event.verdicts:
+            if (
+                verdict.assessment_validity is Validity.VALID
+                and verdict.direction is Direction.POSITIVE
+            ):
+                return True
+    return False
+
+
+@router.post(
+    "/projects/{project_id}/tasks/{task_id}/transition",
+    response_model=None,
+)
+def transition_task(
+    request: Request, project_id: str, task_id: str, body: TaskTransitionBody
+) -> dict | JSONResponse:
+    """任务状态流转。非法迁移与并发过期都返回 409，但错误码不同：
+
+    ILLEGAL_STATE_TRANSITION（迁移本身不合法）与 VERSION_CONFLICT
+    （迁移合法但状态已被别人改掉）混在一起，客户端就无法区分
+    "我的请求写错了"和"该刷新重试"。
+    """
+    from app.api.http_idempotency import idempotent_write
+
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+        state = _state(request)
+        task = state.products.transition_task(
+            guard.principal,
+            project_id,
+            task_id,
+            expected_status=TaskStatus(body.expected_status),
+            next_status=TaskStatus(body.next_status),
+        )
+        result = {
+            **task.to_dict(),
+            "verified": _task_verified(
+                state.evidence.events_for(guard.principal, project_id), task_id
+            ),
+        }
+        guard.complete(200, result)
+        return result
+
+
+@router.get("/projects/{project_id}/mastery")
+def get_mastery(request: Request, project_id: str) -> dict:
+    """掌握度投影：**唯一**由证据回放生成，无任何直接写入路径。
+
+    投影每次全量重算（可重建读模型）—— 没有"掌握度表"，就没有
+    "投影与事实源不一致"的可能性。
+    """
+    state = _state(request)
+    actor = _actor(request)
+    events = state.evidence.events_for(actor, project_id)
+    corrections = state.evidence.corrections_for(
+        actor, project_id, {e.event_id for e in events}
+    )
+    projection = state.projector.project_from(
+        events=events, corrections=corrections, graph_version=GRAPH_VERSION_V1
+    )
+    return projection.to_dict()

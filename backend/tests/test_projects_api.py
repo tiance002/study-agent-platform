@@ -15,6 +15,11 @@ from app.main import DEMO_PRINCIPAL, DEMO_TENANT
 ORIGIN = {"Origin": "http://testserver"}
 
 
+def _keyed() -> dict:
+    """写端点必须携带 Idempotency-Key（审查修复）；每次调用唯一。"""
+    return {**ORIGIN, "Idempotency-Key": "proj-" + uuid.uuid4().hex}
+
+
 @pytest.fixture
 def cookie_user(client, platform):
     """邀请兑换出一个已登录用户（演示租户成员），返回 client（cookie 已种）。"""
@@ -39,7 +44,7 @@ def cookie_user(client, platform):
 
 @pytest.mark.invariant
 def test_create_project_grants_creator_immediately(cookie_user):
-    created = cookie_user.post("/projects", json={"name": "审计入门", "goal": "学会看日志"}, headers=ORIGIN)
+    created = cookie_user.post("/projects", json={"name": "审计入门", "goal": "学会看日志"}, headers=_keyed())
     assert created.status_code == 201, created.text
     body = created.json()
     assert body["name"] == "审计入门"
@@ -56,11 +61,11 @@ def test_create_project_grants_creator_immediately(cookie_user):
 
 @pytest.mark.invariant
 def test_create_rejects_blank_name_and_extra_fields(cookie_user):
-    assert cookie_user.post("/projects", json={"name": ""}, headers=ORIGIN).status_code == 422
+    assert cookie_user.post("/projects", json={"name": ""}, headers=_keyed()).status_code == 422
     response = cookie_user.post(
         "/projects",
         json={"name": "x", "tenant_id": "tenant_evil"},
-        headers=ORIGIN,
+        headers=_keyed(),
     )
     assert response.status_code == 422, "归属字段出现在请求体必须当场被拒"
 
@@ -71,13 +76,13 @@ def test_create_rejects_blank_name_and_extra_fields(cookie_user):
 @pytest.mark.invariant
 def test_patch_optimistic_lock_flow(cookie_user):
     project_id = cookie_user.post(
-        "/projects", json={"name": "初版"}, headers=ORIGIN
+        "/projects", json={"name": "初版"}, headers=_keyed()
     ).json()["project_id"]
 
     renamed = cookie_user.patch(
         f"/projects/{project_id}",
         json={"name": "第二版", "expected_version": 1},
-        headers=ORIGIN,
+        headers=_keyed(),
     )
     assert renamed.status_code == 200
     assert renamed.json()["version"] == 2
@@ -86,7 +91,7 @@ def test_patch_optimistic_lock_flow(cookie_user):
     stale = cookie_user.patch(
         f"/projects/{project_id}",
         json={"name": "迟到的编辑", "expected_version": 1},
-        headers=ORIGIN,
+        headers=_keyed(),
     )
     assert stale.status_code == 409
     assert stale.json()["code"] == "VERSION_CONFLICT"
@@ -98,10 +103,10 @@ def test_patch_optimistic_lock_flow(cookie_user):
 @pytest.mark.invariant
 def test_patch_requires_at_least_one_field(cookie_user):
     project_id = cookie_user.post(
-        "/projects", json={"name": "x"}, headers=ORIGIN
+        "/projects", json={"name": "x"}, headers=_keyed()
     ).json()["project_id"]
     response = cookie_user.patch(
-        f"/projects/{project_id}", json={"expected_version": 1}, headers=ORIGIN
+        f"/projects/{project_id}", json={"expected_version": 1}, headers=_keyed()
     )
     assert response.status_code == 422 or response.json()["code"] == "PARAMS_INVALID"
 
@@ -113,7 +118,7 @@ def test_patch_requires_at_least_one_field(cookie_user):
 def test_projects_are_invisible_to_other_users(platform, client, cookie_user):
     """同租户的另一个用户看不到、改不了别人的项目 —— 统一 404。"""
     project_id = cookie_user.post(
-        "/projects", json={"name": "我的项目"}, headers=ORIGIN
+        "/projects", json={"name": "我的项目"}, headers=_keyed()
     ).json()["project_id"]
 
     other_token = "other-user-" + uuid.uuid4().hex
@@ -138,7 +143,7 @@ def test_projects_are_invisible_to_other_users(platform, client, cookie_user):
     patched = other.patch(
         f"/projects/{project_id}",
         json={"name": "抢改", "expected_version": 1},
-        headers=ORIGIN,
+        headers=_keyed(),
     )
     assert patched.status_code == 404
 

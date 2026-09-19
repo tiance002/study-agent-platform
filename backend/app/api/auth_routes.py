@@ -78,14 +78,14 @@ def _token_hash(raw_token: str) -> str:
 # ------------------------------------------------------------ CSRF / 客户端键
 
 
-def _request_host_origin(request: Request, *, behind_proxy: bool) -> str | None:
+def _request_host_origin(request: Request) -> str | None:
     """本次请求自身的 Origin（scheme://host[:port]）。
 
-    反向代理场景只有在显式声明 behind_proxy 时才采信 X-Forwarded-* ——
+    反向代理场景只有在请求确实来自**可信代理**时才采信 X-Forwarded-* ——
     这些头客户端可以随便造，无条件信任等于让 CSRF 白名单形同虚设。
     """
     headers = request.headers
-    if behind_proxy:
+    if _peer_is_trusted_proxy(request):
         host = (
             headers.get("x-forwarded-host", "").split(",")[0].strip()
             or headers.get("host", "").strip()
@@ -125,7 +125,7 @@ def _require_same_origin(request: Request, state: "PlatformState") -> None:
     if request.method in _SAFE_METHODS:
         return
     trusted = set(state.trusted_origins)
-    host_origin = _request_host_origin(request, behind_proxy=state.behind_proxy)
+    host_origin = _request_host_origin(request)
     if host_origin is not None:
         trusted.add(host_origin)
 
@@ -145,15 +145,85 @@ def _require_same_origin(request: Request, state: "PlatformState") -> None:
     raise deny(ErrorCode.CSRF_DENIED, "请求缺少 Origin/Referer，无法确认同源")
 
 
+def _peer_is_trusted_proxy(request: Request) -> bool:
+    """请求的 TCP 对端是否在可信代理清单里。
+
+    behind_proxy=1 但对端不可信（或没配可信清单）时，X-Forwarded-* 一律
+    不采信 —— 审查实测的缺陷：无条件信任 XFF 首值，攻击者轮换该值
+    即可无限重置限流桶。
+    """
+    state = _state(request)
+    if not state.behind_proxy:
+        return False
+    peer = request.client.host if request.client is not None else None
+    if peer is None or not state.trusted_proxies:
+        return False
+    return _matches_proxy_entry(peer, state.trusted_proxies)
+
+
+def _matches_proxy_entry(value: str, proxies: tuple[str, ...]) -> bool:
+    """value 是否命中任一可信代理条目（IP 精确 / CIDR 网段 / 显式列出的标识）。
+
+    非 IP 的对端标识（如 TestClient 的 "testclient"）只允许**精确匹配**；
+    CIDR 匹配只在条目与值都可解析为 IP 时进行，解析失败不放大权限。
+    """
+    import ipaddress
+
+    for entry in proxies:
+        if entry == value:
+            return True
+        try:
+            addr = ipaddress.ip_address(value)
+        except ValueError:
+            continue
+        try:
+            if "/" in entry:
+                if addr in ipaddress.ip_network(entry, strict=False):
+                    return True
+            elif addr == ipaddress.ip_address(entry):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def _client_key(request: Request, state: "PlatformState") -> str:
-    """限流客户端键：显式反代模式取 X-Forwarded-For 首跳，否则取 TCP 对端。"""
-    if state.behind_proxy:
-        first = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-        if first:
-            return first
-    if request.client is not None:
-        return request.client.host
-    return "unknown"
+    """限流客户端键。
+
+    - 未声明反代：TCP 对端（客户端影响不了它）；
+    - 声明反代且对端可信：从 X-Forwarded-For **从右往左**跳过可信代理，
+      取第一个不可信地址 —— 直接取首值会把攻击者可控的最左项当真，
+      而从右往左走是 XFF 语义里唯一站得住的方向（最右由最近的代理写入，
+      最左是客户端自报的）；
+    - 其余情况（对端不可信 / XFF 解析不出）：TCP 对端。
+    """
+    peer = request.client.host if request.client is not None else "unknown"
+    if not state.behind_proxy:
+        return peer
+    if peer == "unknown" or not state.trusted_proxies:
+        return peer
+    if not _matches_proxy_entry(peer, state.trusted_proxies):
+        # 请求不来自可信代理：XFF 是客户端自说自话，不采信。
+        return peer
+    forwarded = [
+        part.strip()
+        for part in request.headers.get("x-forwarded-for", "").split(",")
+        if part.strip()
+    ]
+    for candidate in reversed(forwarded):
+        if _matches_proxy_entry(candidate, state.trusted_proxies):
+            continue
+        # 键必须是可解析的地址：解析不了说明有人塞了垃圾，
+        # 退回 TCP 对端 —— 绝不让任意字符串进入限流桶。
+        import ipaddress
+
+        try:
+            ipaddress.ip_address(candidate)
+        except ValueError:
+            return peer
+        return candidate
+    # 全部条目都是可信代理（内级调用）：用 TCP 对端兜底。
+    return peer
 
 
 # --------------------------------------------------------------------- 认证
@@ -242,6 +312,8 @@ def exchange_invitation(request: Request, body: ExchangeBody) -> JSONResponse:
         raise
     if session is None:
         # 审计同一条事件、载荷不带失败原因（未知/过期/已消费不可区分）。
+        # 未发生任何业务写入，这里保持同步写链式 sink：sink 不可用时
+        # fail-closed 是真实的 —— 拒绝响应的同时确实什么都没发生。
         state.audit.append(
             "invitation_rejected",
             {"client_key": client_key},
@@ -250,12 +322,12 @@ def exchange_invitation(request: Request, body: ExchangeBody) -> JSONResponse:
         # 统一拒绝：不给"token 存在但已被用掉"留任何可区分的信号。
         raise deny(ErrorCode.INVITATION_INVALID, "邀请无效、已过期或已被使用")
 
-    state.audit.append(
-        "invitation_exchanged",
-        {"session_id": session.session_id, "principal_id": session.principal_id},
-        risk=RiskLevel.HIGH,
-        tenant_id=session.tenant_id,
-    )
+    # 成功路径的审计事实已与业务**同一事务**写入审计 outbox
+    # （数据库版）/同一临界区（内存版）—— sink 不可用不再可能
+    # "邀请已消费却返回 503"。这里只负责把事实投影进链式 sink；
+    # 投影失败时事件保持 pending 可观测，待后续请求补投影。
+    if state.audit_outbox is not None:
+        state.audit_outbox.flush_pending(session.tenant_id)
 
     cookie_value = state.cookie_auth.issue(session)
     response = JSONResponse(

@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:dee754fa535210051a7190862f25721163048a9ec4f91d74f15d353e9c7161f6, generated_at=2026-09-19T14:46:48Z -->
-> 生成时间：2026-09-19T14:46:48Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:e451e1056e7f45730b539615937e8eac148fbd27dfb97b75a692b9af36df000c, generated_at=2026-09-19T18:20:37Z -->
+> 生成时间：2026-09-19T18:20:37Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -32,18 +32,20 @@
 | `/projects/{project_id}/conversations/{conversation_id}/messages` | GET | List Messages |
 | `/projects/{project_id}/conversations/{conversation_id}/messages` | POST | Append Message |
 | `/projects/{project_id}/interactions` | POST | Interact |
-| `/projects/{project_id}/mastery` | GET | Mastery |
+| `/projects/{project_id}/mastery` | GET | Get Mastery |
 | `/projects/{project_id}/plan` | GET | Current Plan |
 | `/projects/{project_id}/plan` | PUT | Replace Plan |
 | `/projects/{project_id}/plan/history` | GET | Plan History |
 | `/projects/{project_id}/retrieval/chunks` | POST | Ingest |
 | `/projects/{project_id}/sources` | GET | List Sources |
 | `/projects/{project_id}/sources` | POST | Register Source |
+| `/projects/{project_id}/tasks/{task_id}` | GET | Get Task |
+| `/projects/{project_id}/tasks/{task_id}/transition` | POST | Transition Task |
 | `/registry` | GET | Registry View |
 
 ### 稳定错误码
 
-共 39 个，一经发布不得改变语义，只能追加。
+共 40 个，一经发布不得改变语义，只能追加。
 
 | 错误码 |
 |---|
@@ -67,6 +69,7 @@
 | `EVIDENCE_IMMUTABLE` |
 | `EVIDENCE_UNMAPPED` |
 | `IDEMPOTENCY_IN_PROGRESS` |
+| `IDEMPOTENCY_KEY_REQUIRED` |
 | `IDEMPOTENCY_VIOLATION` |
 | `ILLEGAL_STATE_TRANSITION` |
 | `INTERNAL_CONSISTENCY_ERROR` |

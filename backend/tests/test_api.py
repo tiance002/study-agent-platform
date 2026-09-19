@@ -10,10 +10,19 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from app.identity.ports import SystemContext
 
 PROJECT = "proj_demo"
+
+# 每次调用生成唯一幂等键：变更接口必须携带 Idempotency-Key（审查修复），
+# 且不同调用不得共用键 —— 同键同内容会命中重放缓存，测不到真实执行。
+
+
+def _idem_key() -> str:
+    return "key-" + uuid.uuid4().hex
 
 # 执行 validate_and_record 时提交的参数。
 # **创建确认时提交同一份参数** —— 确认绑定的是「你提交的那次请求的参数」，
@@ -44,7 +53,7 @@ def _ingest(client, headers, *, project: str = PROJECT) -> dict:
             "source_id": "src_1",
             "chunks": ["Agent harness 负责编排工具调用与循环退出条件", "异步与并发决定吞吐上限"],
         },
-        headers=headers,
+        headers={**headers, "Idempotency-Key": _idem_key()},
     )
     assert response.status_code == 200, response.text
     return response.json()
@@ -57,7 +66,11 @@ def _interact(client, headers, node_id: str, *, project: str = PROJECT, **extra)
         "params": {"targets": ["agent.harness"]},
     }
     payload.update(extra)
-    response = client.post(f"/projects/{project}/interactions", json=payload, headers=headers)
+    response = client.post(
+        f"/projects/{project}/interactions",
+        json=payload,
+        headers={**headers, "Idempotency-Key": _idem_key()},
+    )
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -66,7 +79,7 @@ def _create_confirmation(client, headers, tool_id: str, params: dict, *, project
     return client.post(
         f"/projects/{project}/confirmations",
         json={"tool_id": tool_id, "params": params},
-        headers=headers,
+        headers={**headers, "Idempotency-Key": _idem_key()},
     )
 
 

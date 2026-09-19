@@ -39,6 +39,7 @@ from app.product.models import (
     SourceRecord,
     TaskStatus,
 )
+from app.product.transitions import assert_transition_legal
 
 _CONVERSATION_COLUMNS = (
     "conversation_id, tenant_id, project_id, title, last_message_seq, created_at"
@@ -453,10 +454,103 @@ class PostgresProductRepository:
         return _source_from_row(row)
 
 
+    # ------------------------------------------------------------------ 任务
+
+    def get_task(
+        self, actor: Principal, project_id: str, task_id: str
+    ) -> LearningTask:
+        self.membership.get(actor, project_id)
+        with tenant_transaction(
+            tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
+        ) as conn:
+            row = conn.execute(
+                "SELECT " + _TASK_COLUMNS
+                + " FROM learning_tasks WHERE task_id = %s",
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            # RLS 已按租户 + 项目过滤：剩下的只有"不存在"一种解释。
+            raise deny(
+                ErrorCode.CROSS_TENANT_DENIED,
+                "无权访问该项目",
+                task_id=task_id,
+            )
+        return _task_from_row(row)
+
+    def transition_task(
+        self,
+        actor: Principal,
+        project_id: str,
+        task_id: str,
+        *,
+        expected_status: TaskStatus,
+        next_status: TaskStatus,
+    ) -> LearningTask:
+        # 静态合法性先行：非法迁移不看存储直接拒绝（判定出口唯一）。
+        assert_transition_legal(expected_status, next_status)
+        self.membership.get(actor, project_id)
+        with tenant_transaction(
+            tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
+        ) as conn:
+            # 条件更新即并发控制：命中行 = 状态确实是 expected 才写入。
+            row = conn.execute(
+                "UPDATE learning_tasks SET status = %s"
+                " WHERE task_id = %s AND status = %s"
+                " RETURNING " + _TASK_COLUMNS,
+                (next_status.value, task_id, expected_status.value),
+            ).fetchone()
+            if row is None:
+                # 零行有两种原因，必须区分（与项目 UPDATE 同一套判别法）：
+                # 不可见 → 404；可见但状态已变 → 冲突或幂等重放。
+                current = conn.execute(
+                    "SELECT status FROM learning_tasks WHERE task_id = %s",
+                    (task_id,),
+                ).fetchone()
+                if current is None:
+                    raise deny(
+                        ErrorCode.CROSS_TENANT_DENIED,
+                        "无权访问该项目",
+                        task_id=task_id,
+                    )
+                if current[0] == next_status.value:
+                    # 幂等重放：目标状态已达成（重试语义），返回现状。
+                    row = conn.execute(
+                        "SELECT " + _TASK_COLUMNS
+                        + " FROM learning_tasks WHERE task_id = %s",
+                        (task_id,),
+                    ).fetchone()
+                else:
+                    raise deny(
+                        ErrorCode.VERSION_CONFLICT,
+                        "任务状态已被其他操作改变；请刷新后基于最新状态重试",
+                        task_id=task_id,
+                        current_status=current[0],
+                    )
+        assert row is not None
+        return _task_from_row(row)
+
+
 def _jsonb(value: dict) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+_TASK_COLUMNS = (
+    "task_id, tenant_id, project_id, milestone_id, order_index, title, status"
+)
+
+
+def _task_from_row(row: tuple) -> LearningTask:
+    return LearningTask(
+        task_id=row[0],
+        tenant_id=row[1],
+        project_id=row[2],
+        milestone_id=row[3],
+        order_index=row[4],
+        title=row[5],
+        status=TaskStatus(row[6]),
+    )
 
 
 def replace_plan_version(plan: LearningPlan, version: int) -> LearningPlan:

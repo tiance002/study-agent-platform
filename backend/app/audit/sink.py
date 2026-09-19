@@ -204,6 +204,18 @@ class AuditSink:
         self._last_hash: str | None = self._read_last_hash()
         self._seq: int = self._read_last_seq()
 
+    def refresh_chain_head(self) -> None:
+        """Reload the file head before a cross-process serialized append.
+
+        Each worker has its own in-memory ``_seq`` and ``_last_hash``. A
+        database advisory lock serializes workers, but it cannot refresh that
+        cached state; without this reload a later worker can still write a
+        second ``seq=1`` record after acquiring the lock.
+        """
+        with self._lock:
+            self._last_hash = self._read_last_hash()
+            self._seq = self._read_last_seq()
+
     # ------------------------------------------------------------------ 状态
 
     @property

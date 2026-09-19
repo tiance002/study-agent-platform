@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.auth_routes import authenticate_request
@@ -144,6 +145,11 @@ def healthz(request: Request) -> dict:
             "persistence": state.persistence_backend,
             "rls": state.rls_label,
         },
+        # 审计 outbox 里尚未投影进链式 sink 的事件数。
+        # >0 不是错误（事实已可靠落库），但是必须被消化的积压信号。
+        "audit_outbox_pending": (
+            state.audit_outbox.pending_count() if state.audit_outbox else 0
+        ),
     }
 
 
@@ -191,8 +197,8 @@ def registry_view(request: Request) -> dict:
     }
 
 
-@router.post("/projects/{project_id}/retrieval/chunks")
-def ingest(request: Request, project_id: str, body: IngestBody) -> dict:
+@router.post("/projects/{project_id}/retrieval/chunks", response_model=None)
+def ingest(request: Request, project_id: str, body: IngestBody) -> dict | JSONResponse:
     """【演示管线夹具】往检索索引塞 chunk。
 
     ⚠️ 这**不是**产品语义的"资料登记"（那是 `product_routes.register_source`，
@@ -201,36 +207,55 @@ def ingest(request: Request, project_id: str, body: IngestBody) -> dict:
     那个路径现在属于产品资料登记，两个语义不能共用一个 URL。
     第 4 轮 RAG 落地时本夹具与演示节点一并退役。
     """
+    from app.api.http_idempotency import idempotent_write
+
     state = _state(request)
-    _, context = _project_scope(request, project_id)
-    scoped_project = context.require_project()
-
-    created: list[str] = []
-    with tenant_scope(context):
-        for index, text in enumerate(body.chunks):
-            chunk = Chunk(
-                chunk_id=f"{body.source_id}#{index}",
-                tenant_id=context.tenant_id,
-                learning_project_id=scoped_project,
-                source_id=body.source_id,
-                span=(index * 100, index * 100 + len(text)),
-                text=text,
-                origin=TaintSource(body.origin),
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
             )
-            state.chunk_index.add(chunk)
-            created.append(chunk.chunk_id)
-            state.audit.append(
-                "source_ingested",
-                {"source_id": body.source_id, "chunk_id": chunk.chunk_id},
-                risk=RiskLevel.LOW,
-                tenant_id=context.tenant_id,
-                project_id=scoped_project,
-            )
-    return {"project_id": project_id, "ingested": created}
+        principal = guard.principal
+        state.membership.get(principal, project_id)
+        context = TenantContext(
+            tenant_id=principal.tenant_id,
+            principal_id=principal.principal_id,
+            project_id=project_id,
+        )
+        scoped_project = context.require_project()
+
+        created: list[str] = []
+        with tenant_scope(context):
+            for index, text in enumerate(body.chunks):
+                chunk = Chunk(
+                    chunk_id=f"{body.source_id}#{index}",
+                    tenant_id=context.tenant_id,
+                    learning_project_id=scoped_project,
+                    source_id=body.source_id,
+                    span=(index * 100, index * 100 + len(text)),
+                    text=text,
+                    origin=TaintSource(body.origin),
+                )
+                state.chunk_index.add(chunk)
+                created.append(chunk.chunk_id)
+                state.audit.append(
+                    "source_ingested",
+                    {"source_id": body.source_id, "chunk_id": chunk.chunk_id},
+                    risk=RiskLevel.LOW,
+                    tenant_id=context.tenant_id,
+                    project_id=scoped_project,
+                )
+        result = {"project_id": project_id, "ingested": created}
+        guard.complete(200, result)
+        return result
 
 
-@router.post("/projects/{project_id}/confirmations")
-def create_confirmation(request: Request, project_id: str, body: ConfirmationBody) -> dict:
+@router.post("/projects/{project_id}/confirmations", response_model=None)
+def create_confirmation(
+    request: Request, project_id: str, body: ConfirmationBody
+) -> dict | JSONResponse:
     """创建服务端确认记录。
 
     这是「用户点了确认」在服务端的落点。回应包含确认界面必须展示的内容：
@@ -239,73 +264,113 @@ def create_confirmation(request: Request, project_id: str, body: ConfirmationBod
     只有高影响动作（A2 及以上）才需要确认；对低影响动作创建确认会被拒绝 ——
     否则确认会变成一种"随手点掉"的仪式。
     """
+    from app.api.http_idempotency import idempotent_write
+
     state = _state(request)
-    principal, context = _project_scope(request, project_id)
-
-    spec = state.registry.tool(body.tool_id)
-    if spec.min_authority < Authority.A2:
-        raise deny(
-            ErrorCode.POLICY_DENIED,
-            f"工具 {body.tool_id} 属于 {spec.min_authority.label}，不属于高影响动作，无需确认",
-            tool_id=body.tool_id,
-        )
-
-    with tenant_scope(context):
-        record = state.confirmations.create(
-            tenant_id=context.tenant_id,
-            project_id=project_id,
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+        principal = guard.principal
+        state.membership.get(principal, project_id)
+        context = TenantContext(
+            tenant_id=principal.tenant_id,
             principal_id=principal.principal_id,
-            tool_id=body.tool_id,
-            params=body.params,
-            # 成本上界必须是**具体数值**，不能是一句说明。
-            # 用户点确认时同意的是这个数；执行时会拿实际预留与它比对，超出即拒绝
-            # （见 ConfirmationStore.consume 的 reserved_budget 参数）。
-            # 少了这个数，确认就成了一张金额留空的支票。
-            budget_ceiling=BudgetCeiling(
-                dimension=str(Dimension.CURRENCY_MICROS),
-                amount=max(1, spec.max_cost_units),
-                note=f"{spec.tool_id} 单次调用的成本上界（工具声明值）",
-            ),
-            issued_at=state.clock.now(),
+            project_id=project_id,
         )
 
-    return {
-        **record.to_dict(),
-        "tool": {
-            "tool_id": spec.tool_id,
-            "intent_tag": spec.intent_tag,
-            "sink_class": str(spec.sink_class),
-            "min_authority": spec.min_authority.label,
-            "idempotency": str(spec.idempotency),
-            "reversible": spec.idempotency.value != "unsafe_to_retry",
-            "network_domains": list(spec.network_domains),
-        },
-    }
+        spec = state.registry.tool(body.tool_id)
+        if spec.min_authority < Authority.A2:
+            raise deny(
+                ErrorCode.POLICY_DENIED,
+                f"工具 {body.tool_id} 属于 {spec.min_authority.label}，不属于高影响动作，无需确认",
+                tool_id=body.tool_id,
+            )
+
+        with tenant_scope(context):
+            record = state.confirmations.create(
+                tenant_id=context.tenant_id,
+                project_id=project_id,
+                principal_id=principal.principal_id,
+                tool_id=body.tool_id,
+                params=body.params,
+                # 成本上界必须是**具体数值**，不能是一句说明。
+                # 用户点确认时同意的是这个数；执行时会拿实际预留与它比对，超出即拒绝
+                # （见 ConfirmationStore.consume 的 reserved_budget 参数）。
+                # 少了这个数，确认就成了一张金额留空的支票。
+                budget_ceiling=BudgetCeiling(
+                    dimension=str(Dimension.CURRENCY_MICROS),
+                    amount=max(1, spec.max_cost_units),
+                    note=f"{spec.tool_id} 单次调用的成本上界（工具声明值）",
+                ),
+                issued_at=state.clock.now(),
+            )
+
+        result = {
+            **record.to_dict(),
+            "tool": {
+                "tool_id": spec.tool_id,
+                "intent_tag": spec.intent_tag,
+                "sink_class": str(spec.sink_class),
+                "min_authority": spec.min_authority.label,
+                "idempotency": str(spec.idempotency),
+                "reversible": spec.idempotency.value != "unsafe_to_retry",
+                "network_domains": list(spec.network_domains),
+            },
+        }
+        guard.complete(200, result)
+        return result
 
 
-@router.post("/projects/{project_id}/interactions")
-def interact(request: Request, project_id: str, body: InteractionBody) -> dict:
+@router.post("/projects/{project_id}/interactions", response_model=None)
+def interact(
+    request: Request, project_id: str, body: InteractionBody
+) -> dict | JSONResponse:
     """执行一次交互。node 必须已注册，否则拒绝且不留预算。
 
     追踪 id **复用中间件绑定的那个**，不在这里另生成：否则响应头、响应体、
     错误体与审计事件会各带一个不同的 id，出问题时无法把它们串起来。
+
+    幂等双层（铁律 27）：``Idempotency-Key`` 头是 HTTP 命令层防重放
+    （必填）；请求体里的 ``idempotency_key`` 是 runtime 执行层的业务幂等。
+    两层各管各的，不合并。
     """
+    from app.api.http_idempotency import idempotent_write
+
     state = _state(request)
-    principal, context = _project_scope(request, project_id)
-    result = state.runtime.run(
-        InteractionRequest(
-            request_id=current_request_id() or new_request_id(),
-            tenant_id=context.tenant_id,
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+        principal = guard.principal
+        state.membership.get(principal, project_id)
+        context = TenantContext(
+            tenant_id=principal.tenant_id,
             principal_id=principal.principal_id,
-            learning_project_id=context.require_project(),
-            node_id=body.node_id,
-            user_input=body.user_input,
-            params=body.params,
-            confirmation_id=body.confirmation_id,
-            idempotency_key=body.idempotency_key,
+            project_id=project_id,
         )
-    )
-    return result.to_dict()
+        result = state.runtime.run(
+            InteractionRequest(
+                request_id=current_request_id() or new_request_id(),
+                tenant_id=context.tenant_id,
+                principal_id=principal.principal_id,
+                learning_project_id=context.require_project(),
+                node_id=body.node_id,
+                user_input=body.user_input,
+                params=body.params,
+                confirmation_id=body.confirmation_id,
+                idempotency_key=body.idempotency_key,
+            )
+        )
+        payload = result.to_dict()
+        guard.complete(200, payload)
+        return payload
 
 
 @router.get("/projects/{project_id}/mastery")
@@ -405,9 +470,24 @@ def error_response(exc: PlatformError):
         payload = public_error_payload(
             exc.code.value, exc.message, request_id=request_id
         )
-    elif exc.code is ErrorCode.IDEMPOTENCY_VIOLATION:
-        # 幂等键被复用于不同内容：409 —— 客户端要换 key，不是重新登录。
+    elif exc.code is ErrorCode.IDEMPOTENCY_IN_PROGRESS:
+        # 并发重试撞上未完成的占用：409 + Retry-After。
+        # 审查发现的缺陷：这里早先复制的还是 IDEMPOTENCY_VIOLATION 分支，
+        # IN_PROGRESS 落进默认 403"禁止访问" —— 客户端会以为被拒而放弃
+        # 一个本来稍后重试就能成功的请求（铁律 18：两种失败必须可区分）。
         status = 409
+        response = JSONResponse(status_code=status, content=payload)
+        response.headers["Retry-After"] = "1"
+        return response
+    elif exc.code is ErrorCode.IDEMPOTENCY_KEY_REQUIRED:
+        # 缺 Idempotency-Key：客户端 bug（缺请求头），400 可修复。
+        status = 400
+        payload = public_error_payload(
+            exc.code.value, exc.message, request_id=request_id
+        )
+    elif exc.code is ErrorCode.PARAMS_INVALID:
+        # 参数非法（含 key 超长）：400 —— 可修复的客户端错误，不是 403 禁止。
+        status = 400
         payload = public_error_payload(
             exc.code.value, exc.message, request_id=request_id
         )

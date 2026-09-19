@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -196,6 +197,78 @@ def test_app_role_has_no_table_privileges_on_rate_limit_table():
             # 权限错误会中止当前事务；不回滚的话第二条语句只会报
             # InFailedSqlTransaction，把"第二条是否也被拒"这件事掩盖掉。
             conn.rollback()
+
+
+@pytest.mark.invariant
+def test_auth_audit_outbox_is_tenant_isolated():
+    """带 tenant_id 的审计事实表必须受 FORCE RLS 保护。"""
+    other_tenant = "t_hard_pg_other"
+    event_mine = "aud_" + uuid.uuid4().hex
+    event_other = "aud_" + uuid.uuid4().hex
+    with psycopg.connect(MIGRATION_DSN) as conn:
+        with conn.transaction():
+            conn.execute(
+                "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)"
+                " ON CONFLICT (tenant_id) DO NOTHING",
+                (other_tenant, other_tenant),
+            )
+            conn.execute(
+                "INSERT INTO auth_audit_outbox"
+                " (event_id, event_type, payload, risk, tenant_id)"
+                " VALUES (%s, 'test', '{}'::jsonb, 'high', %s),"
+                "        (%s, 'test', '{}'::jsonb, 'high', %s)",
+                (event_mine, TENANT, event_other, other_tenant),
+            )
+
+    with psycopg.connect(APP_DSN) as conn:
+        conn.execute("SELECT set_config('app.tenant_id', %s, false)", (TENANT,))
+        visible = conn.execute(
+            "SELECT event_id FROM auth_audit_outbox"
+            " WHERE event_id IN (%s, %s) ORDER BY event_id",
+            (event_mine, event_other),
+        ).fetchall()
+        assert visible == [(event_mine,)]
+        changed = conn.execute(
+            "UPDATE auth_audit_outbox SET projected_at = now() WHERE event_id = %s",
+            (event_other,),
+        )
+        assert changed.rowcount == 0
+
+
+@pytest.mark.invariant
+def test_two_audit_projectors_keep_one_valid_hash_chain(tmp_path):
+    """两个 worker 各持独立 sink 缓存时，数据库锁仍必须保持单链。"""
+    from app.audit.outbox import PostgresAuditOutbox
+    from app.audit.sink import AuditSink
+
+    event_ids = ["aud_" + uuid.uuid4().hex for _ in range(12)]
+    with psycopg.connect(MIGRATION_DSN) as conn:
+        with conn.transaction():
+            conn.execute("TRUNCATE auth_audit_outbox")
+            conn.cursor().executemany(
+                "INSERT INTO auth_audit_outbox"
+                " (event_id, event_type, payload, risk, tenant_id)"
+                " VALUES (%s, 'projector_test', '{}'::jsonb, 'high', %s)",
+                [(event_id, TENANT) for event_id in event_ids],
+            )
+
+    # 两个实例都在文件为空时构造，模拟两个 worker 各自缓存旧链头。
+    sink_a = AuditSink(tmp_path / "audit")
+    sink_b = AuditSink(tmp_path / "audit")
+    outbox_a = PostgresAuditOutbox(sink_a, APP_DSN)
+    outbox_b = PostgresAuditOutbox(sink_b, APP_DSN)
+    threads = [
+        threading.Thread(target=outbox_a.flush_pending, args=(TENANT,)),
+        threading.Thread(target=outbox_b.flush_pending, args=(TENANT,)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    reloaded = AuditSink(tmp_path / "audit")
+    assert len(reloaded.read_all()) == len(event_ids)
+    assert reloaded.verify_chain()
 
 
 # ------------------------------------------------------- 启动自检

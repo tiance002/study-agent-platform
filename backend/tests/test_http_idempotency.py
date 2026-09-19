@@ -8,10 +8,14 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 import uuid
 
+import psycopg
 import pytest
 from app.api.http_idempotency import (
+    MAX_CACHED_RESPONSE_BYTES,
     InMemoryHttpIdempotencyStore,
     PostgresHttpIdempotencyStore,
 )
@@ -21,6 +25,10 @@ from app.main import DEMO_PRINCIPAL, DEMO_TENANT, create_app
 from fastapi.testclient import TestClient
 
 ORIGIN = {"Origin": "http://testserver"}
+MIGRATION_DSN = os.environ.get(
+    "STUDY_PLATFORM_MIGRATION_DSN",
+    "postgresql://postgres@127.0.0.1:5432/study_platform",
+)
 
 
 @pytest.fixture
@@ -86,11 +94,48 @@ def test_same_key_same_body_replays_cached_response(client):
 
 
 @pytest.mark.invariant
-def test_no_key_is_passthrough(client):
-    """不带 Idempotency-Key：两次请求就是两次执行（无幂等要求）。"""
-    first = client.post("/projects", json={"name": "a"}, headers=ORIGIN)
-    second = client.post("/projects", json={"name": "a"}, headers=ORIGIN)
-    assert first.json()["project_id"] != second.json()["project_id"]
+def test_no_key_is_rejected(client):
+    """审查 P1 修复：不带 Idempotency-Key 的变更请求必须被拒绝。
+
+    早先"缺头直通"让守卫形同虚设 —— 客户端超时重试仍会重复创建项目。
+    冻结规格要求变更接口必须携带该头。
+    """
+    denied = client.post("/projects", json={"name": "a"}, headers=ORIGIN)
+    assert denied.status_code == 400
+    assert denied.json()["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+
+
+@pytest.mark.invariant
+def test_key_over_max_length_is_rejected(client):
+    """client_key 上限 200 字符（0007 规格冻结的数据边界）。"""
+    headers = {**ORIGIN, "Idempotency-Key": "k" * 201}
+    denied = client.post("/projects", json={"name": "a"}, headers=headers)
+    assert denied.status_code == 400
+    assert denied.json()["code"] == "PARAMS_INVALID"
+
+
+@pytest.mark.invariant
+def test_oversized_response_is_not_cached_verbatim():
+    """缓存响应有界：超大响应落显式标记，不给 JSONB 无界放大留门。
+
+    直击 store 层：端点响应受请求字段上限约束很难合法超过 64KB，
+    但"缓存体必须有界"是存储层的 invariant，在 store 上钉住最直接。
+    """
+    store = InMemoryHttpIdempotencyStore()
+    keys = dict(tenant_id="t", principal_id="u", command_scope="POST /x", client_key="k")
+    fp = "sha256:big"
+
+    first = store.claim(**keys, fingerprint=fp)
+    assert first.kind == "claimed"
+    huge = {"payload": "y" * (MAX_CACHED_RESPONSE_BYTES + 1)}
+    store.complete(**keys, status_code=201, response_body=huge, owner_token=first.owner_token)
+
+    replay = store.claim(**keys, fingerprint=fp)
+    assert replay.kind == "replay"
+    assert replay.cached_body is not None
+    assert replay.cached_body != huge, "原文不得进缓存"
+    assert replay.cached_body.get("idempotency_cache") == "response_too_large"
+    assert replay.cached_body.get("limit_bytes") == MAX_CACHED_RESPONSE_BYTES
 
 
 # ------------------------------------------------------------ 冲突
@@ -129,6 +174,38 @@ def test_failed_request_releases_claim_for_retry(client):
     # 同键打合法端点：不同 scope（路由模板不同）→ 正常执行，不受影响。
     ok = client.post("/projects", json={"name": "新项目"}, headers=headers)
     assert ok.status_code == 201
+
+
+@pytest.mark.invariant
+def test_cache_completion_failure_keeps_claim_ambiguous(platform, client):
+    """业务成功后缓存写失败时不得 release，否则重试会重复业务。"""
+
+    class CompletionFailsStore(InMemoryHttpIdempotencyStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.release_calls = 0
+
+        def complete(self, **kwargs) -> None:
+            raise RuntimeError("simulated cache completion failure")
+
+        def release(self, **kwargs) -> None:
+            self.release_calls += 1
+            super().release(**kwargs)
+
+    store = CompletionFailsStore()
+    platform.http_idempotency = store
+    before = len(client.get("/projects").json()["projects"])
+    headers = {**ORIGIN, "Idempotency-Key": "cache-failure-1"}
+
+    with pytest.raises(RuntimeError, match="cache completion failure"):
+        client.post("/projects", json={"name": "只创建一次"}, headers=headers)
+
+    assert store.release_calls == 0
+    assert len(client.get("/projects").json()["projects"]) == before + 1
+    retry = client.post("/projects", json={"name": "只创建一次"}, headers=headers)
+    assert retry.status_code == 409
+    assert retry.json()["code"] == "IDEMPOTENCY_IN_PROGRESS"
+    assert len(client.get("/projects").json()["projects"]) == before + 1
 
 
 @pytest.mark.invariant
@@ -199,7 +276,10 @@ def test_pg_idempotency_survives_store_restart():
     )
     first = store_a.claim(**keys, fingerprint=fingerprint)
     assert first.kind == "claimed"
-    store_a.complete(**keys, status_code=201, response_body={"project_id": project_id})
+    store_a.complete(
+        **keys, status_code=201, response_body={"project_id": project_id},
+        owner_token=first.owner_token,
+    )
 
     # 「重启」：全新实例。
     store_b = PostgresHttpIdempotencyStore(dsn=os_environ_dsn)
@@ -223,9 +303,212 @@ def test_memory_store_shared_dict_visibility():
     store_a = InMemoryHttpIdempotencyStore()
     keys = dict(tenant_id="t", principal_id="u", command_scope="POST /x", client_key="k")
     fp = "sha256:abc"
-    assert store_a.claim(**keys, fingerprint=fp).kind == "claimed"
-    store_a.complete(**keys, status_code=200, response_body={"ok": 1})
+    claimed = store_a.claim(**keys, fingerprint=fp)
+    assert claimed.kind == "claimed"
+    store_a.complete(**keys, status_code=200, response_body={"ok": 1}, owner_token=claimed.owner_token)
 
     store_b = InMemoryHttpIdempotencyStore()
     # 不共享 —— 内存版重启即失是**已知且已文档化**的行为，这里只验证同实例语义。
     assert store_b.claim(**keys, fingerprint=fp).kind == "claimed"
+
+
+@pytest.mark.invariant
+def test_memory_claim_is_atomic_between_threads():
+    """开发适配器也必须保证同一逻辑键只有一个占用者。"""
+
+    class SlowGetDict(dict):
+        def get(self, key, default=None):
+            value = super().get(key, default)
+            time.sleep(0.05)
+            return value
+
+    store = InMemoryHttpIdempotencyStore()
+    store._rows = SlowGetDict()
+    keys = dict(
+        tenant_id="t",
+        principal_id="u",
+        command_scope="POST /projects",
+        client_key="concurrent",
+        fingerprint="sha256:concurrent",
+    )
+    outcomes: list[str] = []
+    start = threading.Barrier(2)
+
+    def claim() -> None:
+        start.wait()
+        outcomes.append(store.claim(**keys).kind)
+
+    threads = [threading.Thread(target=claim) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(outcomes) == ["claimed", "in_progress"]
+
+
+# ------------------------------------------------------- 审查回归（claim_id / 租约）
+
+
+@pytest.mark.invariant
+def test_same_client_key_across_users_and_commands_no_collision():
+    """审查 P1 回归：同 client_key 跨用户、跨命令互不干扰。
+
+    早先 claim_id 只哈希 client_key 且作为全局主键 —— 两个用户用同一
+    客户端 key 时第二个必然主键冲突 500。claim_id 必须从完整逻辑键派生。
+    """
+    store = InMemoryHttpIdempotencyStore()
+    fp = "sha256:xyz"
+    user_a = dict(tenant_id="t", principal_id="user_a", command_scope="POST /projects")
+    user_b = dict(tenant_id="t", principal_id="user_b", command_scope="POST /projects")
+    other_cmd = dict(tenant_id="t", principal_id="user_a", command_scope="POST /other")
+
+    assert store.claim(**user_a, client_key="same-key", fingerprint=fp).kind == "claimed"
+    assert store.claim(**user_b, client_key="same-key", fingerprint=fp).kind == "claimed", (
+        "另一主体用同一 client_key 必须独立占用，不得主键冲突"
+    )
+    assert store.claim(**other_cmd, client_key="same-key", fingerprint=fp).kind == "claimed", (
+        "同一主体在另一命令上用同一 client_key 必须独立占用"
+    )
+
+
+@pytest.mark.invariant
+def test_expired_pending_claim_requires_reconciliation():
+    """超时 pending 的结果未知，不得通过自动重执行猜测它失败了。"""
+    store = InMemoryHttpIdempotencyStore(lease_seconds=0)
+    keys = dict(tenant_id="t", principal_id="u", command_scope="POST /x", client_key="k")
+    fp = "sha256:lease"
+
+    first = store.claim(**keys, fingerprint=fp)
+    assert first.kind == "claimed"
+
+    expired = store.claim(**keys, fingerprint=fp)
+    assert expired.kind == "reconciliation_required"
+    row = store._rows[store._key("t", "u", "POST /x", "k")]
+    assert row["state"] == "indeterminate"
+
+
+@pytest.mark.invariant
+def test_stale_owner_cannot_complete_or_release_indeterminate_claim():
+    """进入不确定态后，迟到的旧持有者不得再改写结果。"""
+    store = InMemoryHttpIdempotencyStore()  # 默认租约 120s
+    keys = dict(tenant_id="t", principal_id="u", command_scope="POST /x", client_key="k")
+    fp = "sha256:owner"
+
+    def age_row_by(seconds: float) -> None:
+        row = store._rows[store._key("t", "u", "POST /x", "k")]
+        row["claimed_at"] -= seconds
+
+    stale = store.claim(**keys, fingerprint=fp)
+    assert stale.kind == "claimed"
+
+    # 租约到期：转为不确定态，禁止直接重执行。
+    age_row_by(600)
+    expired = store.claim(**keys, fingerprint=fp)
+    assert expired.kind == "reconciliation_required"
+
+    # 旧持有者迟到完成：不得把新持有者的占用标记成自己的结果。
+    store.complete(
+        **keys, status_code=200, response_body={"from": "stale"},
+        owner_token=stale.owner_token,
+    )
+    row = store._rows[store._key("t", "u", "POST /x", "k")]
+    store.release(**keys, owner_token=stale.owner_token)
+    assert row["state"] == "indeterminate"
+    assert store.claim(**keys, fingerprint=fp).kind == "reconciliation_required"
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not _pg_reachable(), reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）"
+)
+def test_pg_claim_id_does_not_collide_across_users():
+    """PG 版对照：同一 client_key 跨主体/跨命令都能独立占用（claim_id 全键派生）。
+
+    审查实测：claim_id 只哈希 client_key 时，第二个用户立即主键冲突 500。
+    """
+    tenant = "t_idem_collision"
+    principal_a = "u_idem_collision_a"
+    principal_b = "u_idem_collision_b"
+    with psycopg.connect(MIGRATION_DSN) as conn:
+        with conn.transaction():
+            conn.execute(
+                "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)"
+                " ON CONFLICT (tenant_id) DO NOTHING",
+                (tenant, tenant),
+            )
+            conn.cursor().executemany(
+                "INSERT INTO principals (principal_id, tenant_id) VALUES (%s, %s)"
+                " ON CONFLICT (principal_id) DO NOTHING",
+                [(principal_a, tenant), (principal_b, tenant)],
+            )
+
+    store = PostgresHttpIdempotencyStore()
+    fp = "sha256:" + uuid.uuid4().hex
+    user_a = dict(tenant_id=tenant, principal_id=principal_a, command_scope="POST /projects")
+    user_b = dict(tenant_id=tenant, principal_id=principal_b, command_scope="POST /projects")
+    client_key = "shared-" + uuid.uuid4().hex
+
+    assert store.claim(**user_a, client_key=client_key, fingerprint=fp).kind == "claimed"
+    assert store.claim(**user_b, client_key=client_key, fingerprint=fp).kind == "claimed"
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not _pg_reachable(), reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）"
+)
+def test_pg_expired_pending_requires_reconciliation():
+    """PG 状态机同样把超时占用推进到 indeterminate，绝不接管重执行。"""
+    tenant = "t_idem_expired"
+    principal = "u_idem_expired"
+    with psycopg.connect(MIGRATION_DSN) as conn:
+        with conn.transaction():
+            conn.execute(
+                "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)"
+                " ON CONFLICT (tenant_id) DO NOTHING",
+                (tenant, tenant),
+            )
+            conn.execute(
+                "INSERT INTO principals (principal_id, tenant_id) VALUES (%s, %s)"
+                " ON CONFLICT (principal_id) DO NOTHING",
+                (principal, tenant),
+            )
+
+    store = PostgresHttpIdempotencyStore()
+    keys = dict(
+        tenant_id=tenant,
+        principal_id=principal,
+        command_scope="POST /projects",
+        client_key="expired-" + uuid.uuid4().hex,
+    )
+    fingerprint = "sha256:" + uuid.uuid4().hex
+    assert store.claim(**keys, fingerprint=fingerprint).kind == "claimed"
+
+    with psycopg.connect(MIGRATION_DSN) as conn:
+        with conn.transaction():
+            conn.execute(
+                "UPDATE http_idempotency SET claimed_at = now() - interval '10 minutes'"
+                " WHERE tenant_id = %s AND principal_id = %s"
+                " AND command_scope = %s AND client_key = %s",
+                (
+                    keys["tenant_id"],
+                    keys["principal_id"],
+                    keys["command_scope"],
+                    keys["client_key"],
+                ),
+            )
+
+    assert store.claim(**keys, fingerprint=fingerprint).kind == "reconciliation_required"
+    with psycopg.connect(MIGRATION_DSN) as conn:
+        state = conn.execute(
+            "SELECT state FROM http_idempotency"
+            " WHERE tenant_id = %s AND principal_id = %s"
+            " AND command_scope = %s AND client_key = %s",
+            (
+                keys["tenant_id"],
+                keys["principal_id"],
+                keys["command_scope"],
+                keys["client_key"],
+            ),
+        ).fetchone()[0]
+    assert state == "indeterminate"

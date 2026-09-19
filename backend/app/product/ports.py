@@ -34,10 +34,12 @@ from app.identity.models import LearningProject, Principal
 from app.product.models import (
     Conversation,
     LearningPlan,
+    LearningTask,
     Message,
     MessageRole,
     PlanBundle,
     SourceRecord,
+    TaskStatus,
 )
 
 
@@ -141,8 +143,36 @@ class SourceRepository(Protocol):
     ) -> SourceRecord: ...
 
 
+class TaskRepository(Protocol):
+    """任务读取与状态流转。任务挂在计划下，但生命周期独立于计划版本。"""
+
+    def get_task(
+        self, actor: Principal, project_id: str, task_id: str
+    ) -> LearningTask:
+        """取单个任务。不可见（未授予/跨租户）与不存在同码同话术 —— 统一拒绝。"""
+        ...
+
+    def transition_task(
+        self,
+        actor: Principal,
+        project_id: str,
+        task_id: str,
+        *,
+        expected_status: TaskStatus,
+        next_status: TaskStatus,
+    ) -> LearningTask:
+        """状态流转。
+
+        `expected_status` 是并发控制：实现必须以「条件更新命中行数」判定，
+        而不是先读后写（check-then-act 会丢并发转移）。
+        迁移合法性由 `product.transitions` 统一判定 —— 判定出口只有一个。
+        """
+        ...
+
+
 class ProductRepository(
-    ConversationRepository, MessageRepository, PlanRepository, SourceRepository, Protocol
+    ConversationRepository, MessageRepository, PlanRepository, SourceRepository,
+    TaskRepository, Protocol,
 ):
     """聚合协议：装配层持有的产品仓储入口。
 

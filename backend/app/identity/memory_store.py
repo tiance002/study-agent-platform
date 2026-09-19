@@ -19,13 +19,18 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from typing import TYPE_CHECKING
 
+from app.audit.sink import RiskLevel
 from app.core.clock import Clock, SystemClock
 from app.core.errors import ErrorCode, deny
 from app.identity.limits import MAX_SESSION_TTL
 from app.identity.models import Principal
 from app.identity.ports import SystemContext
 from app.product.models import Invitation, UserSession
+
+if TYPE_CHECKING:  # 类型标注专用：避免运行时循环导入
+    from app.audit.outbox import InMemoryAuditOutbox
 
 
 @dataclass
@@ -41,6 +46,9 @@ class InMemoryInvitationRepository:
     clock: Clock = field(default_factory=SystemClock)
     #: 会话仓储。兑换出的会话落在这里，认证路径才能回库查到。
     sessions: InMemorySessionRepository | None = None
+    #: 审计 outbox。兑换成功的审计事实在**同一临界区**内登记
+    #: （与数据库版的"同一事务"对齐）；投影由端点在业务成功后进行。
+    outbox: "InMemoryAuditOutbox | None" = None
     #: 允许注入共享字典：重启恢复测试用它模拟"两个进程看同一份存储"。
     _by_hash: dict[str, Invitation] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -112,6 +120,14 @@ class InMemoryInvitationRepository:
                 consumed_at=now,
                 consumed_by=invitation.invitee_principal_id,
             )
+            if self.outbox is not None:
+                # 与 PG 版同一语义：审计事实与业务在同一临界区落定。
+                self.outbox.stage(
+                    "invitation_exchanged",
+                    {"principal_id": session.principal_id},
+                    risk=RiskLevel.HIGH,
+                    tenant_id=invitation.tenant_id,
+                )
             return session
 
     @staticmethod

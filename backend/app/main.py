@@ -24,6 +24,7 @@ uvicorn app.main:app --app-dir backend --reload
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -39,6 +40,11 @@ from app.api.http_idempotency import (
 from app.api.product_routes import router as product_router
 from app.api.projects_routes import router as projects_router
 from app.api.routes import error_response, router
+from app.audit.outbox import (
+    AuditOutbox,
+    InMemoryAuditOutbox,
+    PostgresAuditOutbox,
+)
 from app.audit.sink import AuditSink
 from app.budget.ledger import BudgetLedger
 from app.core.clock import SystemClock
@@ -46,6 +52,7 @@ from app.core.errors import PlatformError
 from app.core.ids import new_request_id
 from app.core.request_context import bind_request_id, reset_request_id
 from app.db.confirmation_store import PostgresConfirmationStore
+from app.db.evidence_store import PostgresEvidenceRepository
 from app.db.idempotency_store import PostgresHttpIdempotencyStore
 from app.db.identity_store import (
     PostgresInvitationRepository,
@@ -75,6 +82,8 @@ from app.identity.rate_limit import InMemoryRateLimiter, RateLimiter
 from app.identity.session import SessionIssuer
 from app.knowledge.retrieval import ChunkIndex
 from app.learning.evidence import EvidenceLog
+from app.learning.memory_store import InMemoryEvidenceRepository
+from app.learning.ports import EvidenceRepository
 from app.learning.projector import Projector
 from app.policy.gateway import PolicyGateway
 from app.policy.token import TokenIssuer
@@ -99,7 +108,7 @@ DEMO_PROJECT = "proj_demo"
 DEFAULT_SESSION_TTL = timedelta(hours=8)
 
 #: 代码预期的数据库迁移版本。启动自检核对它；新增迁移必须同步更新。
-EXPECTED_SCHEMA_VERSION = "0004"
+EXPECTED_SCHEMA_VERSION = "0006"
 
 
 @dataclass
@@ -132,14 +141,21 @@ class PlatformState:
     # 产品仓储（会话/消息/计划/资料）。必填同理：产品端点不能等第一个请求才暴露装配缺失。
     products: ProductRepository
     # HTTP 命令幂等的存储。None = 幂等关闭（客户端不带 Idempotency-Key 时无感）。
-    http_idempotency: HttpIdempotencyStore | None = None
+    http_idempotency: HttpIdempotencyStore | None
+    # 学习证据仓储（append-only）。掌握度投影的唯一事实源入口。
+    evidence: EvidenceRepository
     #: 会话 cookie 的有效期（也是兑换出的数据库会话的过期时间）。
     session_ttl: timedelta = DEFAULT_SESSION_TTL
     #: 生产环境置 True（HTTPS-only cookie）。测试与本机开发保持 False：
     #: TestClient 走 http，Secure cookie 不会被回传，等于开了箱就坏。
     cookie_secure: bool = False
     trusted_origins: tuple[str, ...] = ()
+    #: 可信代理链（IP/CIDR）。behind_proxy=True 时必须非空（启动自检强制）。
+    trusted_proxies: tuple[str, ...] = ()
     behind_proxy: bool = False
+    #: 认证审计的可靠中转（transactional outbox）。兑换成功的审计事实
+    #: 与业务同事务/同临界区落在这里，再由端点投影进链式 sink。
+    audit_outbox: AuditOutbox | None = None
     #: 是否保留 Bearer 兼容通道。生产形态必须为 False。
     bearer_enabled: bool = True
     settings: DeploymentSettings | None = None
@@ -183,6 +199,19 @@ def build_platform(
     loaded = settings or DeploymentSettings.load()
     loaded.validate_for_startup()
 
+    # 文件审计 sink 的哈希链只能由**单一写入进程**维护：多 worker 各自
+    # 持有独立的 seq 与链尾哈希，互不衔接，链当场分裂（审查 P2）。
+    # worker 数由启动命令传入，应用只能靠运维显式声明来核对 ——
+    # 声明 >1 直接拒绝启动；没声明则按 1 处理。
+    if loaded.is_production:
+        raw_workers = (os.environ.get("STUDY_PLATFORM_WEB_WORKERS") or "1").strip()
+        if raw_workers.isdigit() and int(raw_workers) > 1:
+            raise RuntimeError(
+                "STUDY_PLATFORM_WEB_WORKERS>1 与文件审计 sink 不兼容："
+                "多进程会产生分裂的审计哈希链。在审计链落库（单写入者或"
+                "数据库存储）之前，请保持 1 个 worker 进程。"
+            )
+
     base = var_dir or VAR_DIR
     registry = build_registry()
     gateway = PolicyGateway()
@@ -214,6 +243,8 @@ def build_platform(
     confirmations: ConfirmationRepository
     products: ProductRepository
     http_idempotency: HttpIdempotencyStore | None
+    evidence: EvidenceRepository
+    audit_outbox: AuditOutbox
 
     if loaded.use_postgres:
         dsn = loaded.dsn or DEFAULT_APP_DSN
@@ -224,10 +255,14 @@ def build_platform(
         membership = PostgresMembershipRepository(clock, dsn)
         pg_sessions = PostgresSessionRepository(clock, dsn)
         session_store = pg_sessions
-        invitations = PostgresInvitationRepository(clock, dsn, sessions=pg_sessions)
+        audit_outbox = PostgresAuditOutbox(sink=audit, dsn=dsn)
+        invitations = PostgresInvitationRepository(
+            clock, dsn, sessions=pg_sessions, outbox=audit_outbox
+        )
         confirmations = PostgresConfirmationStore(dsn)
         products = PostgresProductRepository(membership=membership, clock=clock, dsn=dsn)
         http_idempotency = PostgresHttpIdempotencyStore(dsn)
+        evidence = PostgresEvidenceRepository(clock, dsn)
         rate_limiter: RateLimiter = PostgresRateLimiter(
             limit=loaded.exchange_limit,
             window_seconds=loaded.exchange_window_seconds,
@@ -268,11 +303,14 @@ def build_platform(
             confirmations=confirmations,
             products=products,
             http_idempotency=http_idempotency,
+            evidence=evidence,
             session_ttl=loaded.session_ttl,
             cookie_secure=loaded.cookie_secure,
             rate_limiter=rate_limiter,
             trusted_origins=loaded.trusted_origins,
+            trusted_proxies=loaded.trusted_proxies,
             behind_proxy=loaded.behind_proxy,
+            audit_outbox=audit_outbox,
             # 生产形态关闭 bearer 兜底；开发态用 PG 演练时保留它方便测试工具。
             bearer_enabled=not loaded.is_production,
             settings=loaded,
@@ -287,10 +325,14 @@ def build_platform(
     membership = MembershipStore()
     memory_sessions = InMemorySessionRepository(clock=clock)
     session_store = memory_sessions
-    invitations = InMemoryInvitationRepository(clock=clock, sessions=memory_sessions)
+    audit_outbox = InMemoryAuditOutbox(sink=audit)
+    invitations = InMemoryInvitationRepository(
+        clock=clock, sessions=memory_sessions, outbox=audit_outbox
+    )
     confirmations = ConfirmationStore()
     products = InMemoryProductRepository(membership=membership)
     http_idempotency = InMemoryHttpIdempotencyStore()
+    evidence = InMemoryEvidenceRepository(clock=clock)
     rate_limiter = InMemoryRateLimiter(
         limit=loaded.exchange_limit,
         window_seconds=loaded.exchange_window_seconds,
@@ -329,11 +371,14 @@ def build_platform(
         confirmations=confirmations,
         products=products,
         http_idempotency=http_idempotency,
+        evidence=evidence,
         session_ttl=loaded.session_ttl,
         cookie_secure=loaded.cookie_secure,
         rate_limiter=rate_limiter,
         trusted_origins=loaded.trusted_origins,
+        trusted_proxies=loaded.trusted_proxies,
         behind_proxy=loaded.behind_proxy,
+        audit_outbox=audit_outbox,
         bearer_enabled=True,
         settings=loaded,
     )

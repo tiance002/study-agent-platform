@@ -204,7 +204,7 @@ def test_idempotency_key_is_bounded_in_length(client, auth_headers):
             "user_input": "x",
             "idempotency_key": "k" * 10_000,
         },
-        headers=auth_headers(),
+        headers={**auth_headers(), "Idempotency-Key": "trace-header-1"},
     )
     assert response.status_code == 422, response.text
 
@@ -215,7 +215,7 @@ def test_idempotency_key_is_bounded_in_length(client, auth_headers):
 @pytest.mark.invariant
 def test_tracing_id_is_identical_across_header_body_and_error(client, auth_headers):
     """响应头、响应体、错误体必须是**同一个**追踪 id，且审计用同一个。"""
-    headers = auth_headers()
+    headers = {**auth_headers(), "Idempotency-Key": "trace-id-1"}
     response = client.post(
         f"/projects/{'proj_demo'}/interactions",
         json={"node_id": "nonexistent_node", "user_input": "x"},
@@ -235,22 +235,44 @@ def test_http_requests_never_share_a_tracing_id(client, auth_headers):
     """每次 HTTP 请求都是新的追踪 id（因此它做不了幂等键）。"""
     headers = auth_headers()
     payload = {"node_id": "nonexistent_node", "user_input": "x"}
-    first = client.post("/projects/proj_demo/interactions", json=payload, headers=headers)
-    second = client.post("/projects/proj_demo/interactions", json=payload, headers=headers)
+    first = client.post(
+        "/projects/proj_demo/interactions",
+        json=payload,
+        headers={**headers, "Idempotency-Key": "trace-id-2"},
+    )
+    second = client.post(
+        "/projects/proj_demo/interactions",
+        json=payload,
+        headers={**headers, "Idempotency-Key": "trace-id-3"},
+    )
     assert first.json()["request_id"] != second.json()["request_id"]
 
 
 @pytest.mark.invariant
 def test_idempotency_key_is_accepted_through_the_api(client, auth_headers):
-    """API 上幂等键是独立字段，且与追踪 id 并存不冲突。"""
+    """API 上幂等键是独立字段，且与追踪 id 并存不冲突。
+
+    两层幂等并存（铁律 27）：``Idempotency-Key`` 头是 HTTP 命令层
+    （必填、防重复执行），请求体里的 ``idempotency_key`` 是 runtime
+    执行层的业务幂等（防重复计证据）。每次请求用不同的头键 ——
+    否则第二次会命中 HTTP 层缓存重放，测不到 runtime 层。
+    """
     headers = auth_headers()
     payload = {
         "node_id": "intake_goal",
         "user_input": "我想学 Agent 工程",
         "idempotency_key": "client-key-1",
     }
-    first = client.post("/projects/proj_demo/interactions", json=payload, headers=headers)
-    second = client.post("/projects/proj_demo/interactions", json=payload, headers=headers)
+    first = client.post(
+        "/projects/proj_demo/interactions",
+        json=payload,
+        headers={**headers, "Idempotency-Key": "http-key-1"},
+    )
+    second = client.post(
+        "/projects/proj_demo/interactions",
+        json=payload,
+        headers={**headers, "Idempotency-Key": "http-key-2"},
+    )
 
     assert first.status_code == 200, first.text
     assert first.json()["output"].get("idempotent_replay") is not True

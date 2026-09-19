@@ -102,3 +102,26 @@ def principal_transaction(
         with conn.transaction():
             set_principal_context(conn, tenant_id=tenant_id, principal_id=principal_id)
             yield conn
+
+
+@contextmanager
+def full_transaction(
+    *,
+    tenant_id: str,
+    project_id: str,
+    principal_id: str,
+    dsn: str | None = None,
+) -> Iterator[psycopg.Connection]:
+    """租户 + 项目 + 主体三层上下文的事务。
+
+    第 3 轮的 `task_submissions` / `diagnoses` 策略同时约束三个维度
+    （铁律 33：有主体列就必须约束主体维度）—— 少设一层，写入直接被
+    RLS 拒绝，而"查不到"的错误信息完全不指向真正原因。
+    """
+    with connect(dsn) as conn:
+        with conn.transaction():
+            set_tenant_context(conn, tenant_id=tenant_id, project_id=project_id)
+            conn.execute(
+                "SELECT set_config('app.principal_id', %s, true)", (principal_id,)
+            )
+            yield conn

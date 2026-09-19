@@ -27,6 +27,8 @@ from datetime import datetime
 
 from psycopg import errors as pg_errors
 
+from app.audit.outbox import PostgresAuditOutbox
+from app.audit.sink import RiskLevel
 from app.core.clock import Clock, SystemClock
 from app.core.errors import ErrorCode, deny
 from app.db.session import (
@@ -240,19 +242,26 @@ class PostgresMembershipRepository:
 
 
 class PostgresInvitationRepository:
-    """邀请的 PostgreSQL 实现。兑换走 `exchange_invitation()` 引导函数。"""
+    """邀请的 PostgreSQL 实现。兑换走 `exchange_invitation()` 引导函数。
+
+    审计事实经 `outbox` 与业务**同事务**落库（transactional outbox，
+    见 `app.audit.outbox`）：审查发现的缺陷是兑换先提交、审计后写，
+    sink 不可用时返回 503 而邀请已消费 —— fail-closed 名存实亡。
+    """
 
     def __init__(
         self,
         clock: Clock | None = None,
         dsn: str | None = None,
         sessions: PostgresSessionRepository | None = None,
+        outbox: "PostgresAuditOutbox | None" = None,
     ) -> None:
         self._clock = clock or SystemClock()
         self._dsn = dsn
         # 允许装配层注入**同一个**会话仓储：兑换写入与认证回读必须落在同一
         # 适配器/同一 DSN 上，各建各的实例在传入不同 dsn 时会静默分叉。
         self._sessions = sessions or PostgresSessionRepository(clock=self._clock, dsn=dsn)
+        self._outbox = outbox
 
     def issue(
         self,
@@ -310,6 +319,22 @@ class PostgresInvitationRepository:
                     " FROM exchange_invitation(%s, %s, %s)",
                     (token_hash, session_id, session_expires_at),
                 ).fetchall()
+                if rows and self._outbox is not None:
+                    # 高风险审计事实与业务**同一事务**落库：
+                    # commit 成功 = 邀请消费 + 会话创建 + 审计事实三者同生共死。
+                    # 事件投影进链式 sink 是提交后的事（见 outbox.flush_pending）。
+                    _sid, tenant_id, principal_id, _expires = rows[0]
+                    conn.execute(
+                        "SELECT set_config('app.tenant_id', %s, true)",
+                        (tenant_id,),
+                    )
+                    self._outbox.stage_in_transaction(
+                        conn,
+                        event_type="invitation_exchanged",
+                        payload={"principal_id": principal_id},
+                        risk=RiskLevel.HIGH,
+                        tenant_id=tenant_id,
+                    )
                 conn.commit()
         except pg_errors.CheckViolation as exc:
             # 0004 起函数对会话期限做硬上限校验、表上也有同名 CHECK。

@@ -33,7 +33,9 @@ from app.product.models import (
     Milestone,
     PlanBundle,
     SourceRecord,
+    TaskStatus,
 )
+from app.product.transitions import assert_transition_legal
 
 
 @dataclass
@@ -279,3 +281,71 @@ class InMemoryProductRepository:
                 source_id=source_id,
             )
         return record
+
+    # ------------------------------------------------------------------ 任务
+
+    def _find_task(self, task_id: str) -> tuple[str, int, LearningTask] | None:
+        """在锁内定位任务（plan_id, 下标, 任务）。task_id 全局唯一。"""
+        for plan_id, tasks in self._tasks.items():
+            for index, task in enumerate(tasks):
+                if task.task_id == task_id:
+                    return plan_id, index, task
+        return None
+
+    def get_task(
+        self, actor: Principal, project_id: str, task_id: str
+    ) -> LearningTask:
+        self.membership.get(actor, project_id)
+        with self._lock:
+            found = self._find_task(task_id)
+        if (
+            found is None
+            or found[2].project_id != project_id
+            or found[2].tenant_id != actor.tenant_id
+        ):
+            raise deny(
+                ErrorCode.CROSS_TENANT_DENIED,
+                "无权访问该项目",
+                task_id=task_id,
+            )
+        return found[2]
+
+    def transition_task(
+        self,
+        actor: Principal,
+        project_id: str,
+        task_id: str,
+        *,
+        expected_status: TaskStatus,
+        next_status: TaskStatus,
+    ) -> LearningTask:
+        # 静态合法性先行：非法迁移不看存储直接拒绝（判定出口唯一）。
+        assert_transition_legal(expected_status, next_status)
+        self.membership.get(actor, project_id)
+        with self._lock:
+            found = self._find_task(task_id)
+            if (
+                found is None
+                or found[2].project_id != project_id
+                or found[2].tenant_id != actor.tenant_id
+            ):
+                raise deny(
+                    ErrorCode.CROSS_TENANT_DENIED,
+                    "无权访问该项目",
+                    task_id=task_id,
+                )
+            plan_id, index, task = found
+            if task.status == next_status:
+                # 幂等重放：目标状态已达成（重试语义），返回现状不报错。
+                return task
+            if task.status != expected_status:
+                raise deny(
+                    ErrorCode.VERSION_CONFLICT,
+                    "任务状态已被其他操作改变；请刷新后基于最新状态重试",
+                    task_id=task_id,
+                    current_status=task.status.value,
+                )
+            assert_transition_legal(task.status, next_status)
+            updated = replace(task, status=next_status)
+            self._tasks[plan_id][index] = updated
+            return updated

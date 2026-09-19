@@ -37,6 +37,15 @@ DEV_COOKIE_SECRET = "dev-only-cookie-secret-change-me"
 DEV_TOKEN_SECRET = "dev-only-placeholder-change-me"
 _DEV_SECRETS = frozenset({DEV_SESSION_SECRET, DEV_COOKIE_SECRET, DEV_TOKEN_SECRET})
 
+#: 生产密钥的最短字节数。HMAC 密钥的有效熵上限是其字节长度；
+#: 一字节的密钥可以被在线穷举，任何"格式正确"的校验都救不了它。
+#: 32 字节 = 256 位，与主流 HMAC-SHA256 推荐下限一致。
+MIN_SECRET_BYTES = 32
+
+#: 反代模式下信任的代理链（IP / CIDR，逗号分隔）。behind_proxy=1 时必须显式配置：
+#: 没有可信代理清单，"信任 X-Forwarded-For" 就等于"信任任意客户端的自报家门"，
+#: 限流键、CSRF Origin 全部可以被轮换伪造（审查实测：换一个 XFF 值即重置限流桶）。
+
 #: 邀请兑换的默认限流：每个客户端键每个窗口允许的尝试次数。
 DEFAULT_EXCHANGE_LIMIT = 20
 DEFAULT_EXCHANGE_WINDOW_SECONDS = 600
@@ -93,6 +102,9 @@ class DeploymentSettings:
     cookie_secure: bool
     trusted_origins: tuple[str, ...]
     invalid_origins: tuple[str, ...]
+    #: 可信代理链（IP/CIDR）。behind_proxy=True 时必须非空，否则拒绝启动。
+    trusted_proxies: tuple[str, ...]
+    invalid_proxies: tuple[str, ...]
     behind_proxy: bool
     session_ttl: timedelta
     exchange_limit: int
@@ -155,6 +167,21 @@ class DeploymentSettings:
             else:
                 trusted.append(normalized)
 
+        # 可信代理链：只做"形状"校验（非空、无空白），IP/CIDR 的语义校验在
+        # 使用处（ipaddress 解析失败即视为不可信，不会放大权限）。
+        # TestClient 的对端标识不是 IP（如 "testclient"），所以这里不能
+        # 硬性要求 IP 格式 —— 那会把所有 API 测试拒之门外。
+        trusted_proxies: list[str] = []
+        invalid_proxies: list[str] = []
+        for raw_proxy in env.get("STUDY_PLATFORM_TRUSTED_PROXIES", "").split(","):
+            entry = raw_proxy.strip()
+            if not entry:
+                continue
+            if any(ch.isspace() for ch in entry) or "," in entry:
+                invalid_proxies.append(entry)
+            else:
+                trusted_proxies.append(entry)
+
         ttl_minutes = int(env.get("STUDY_PLATFORM_SESSION_TTL_MINUTES", "480"))
         exchange_limit = int(env.get("STUDY_PLATFORM_EXCHANGE_LIMIT", str(DEFAULT_EXCHANGE_LIMIT)))
         exchange_window = int(
@@ -176,6 +203,8 @@ class DeploymentSettings:
             cookie_secure=_env_bool("STUDY_PLATFORM_COOKIE_SECURE", env=env),
             trusted_origins=tuple(dict.fromkeys(trusted)),
             invalid_origins=tuple(invalid_origins),
+            trusted_proxies=tuple(dict.fromkeys(trusted_proxies)),
+            invalid_proxies=tuple(invalid_proxies),
             behind_proxy=_env_bool("STUDY_PLATFORM_BEHIND_PROXY", env=env),
             session_ttl=timedelta(minutes=ttl_minutes),
             exchange_limit=exchange_limit,
@@ -207,6 +236,17 @@ class DeploymentSettings:
             )
         for raw in self.invalid_origins:
             problems.append(f"可信 Origin 无法解析（应为 scheme://host[:port]）：{raw!r}")
+        for raw in self.invalid_proxies:
+            problems.append(
+                f"可信代理条目不能包含空白或逗号（应为 IP 或 CIDR）：{raw!r}"
+            )
+        if self.behind_proxy and not self.trusted_proxies:
+            problems.append(
+                "开启 STUDY_PLATFORM_BEHIND_PROXY=1 必须同时配置 "
+                "STUDY_PLATFORM_TRUSTED_PROXIES（可信代理 IP/CIDR 清单）："
+                "没有可信清单时 X-Forwarded-For 完全由客户端可控，"
+                "限流键与转发头都可被轮换伪造"
+            )
 
         if not self.is_production:
             return problems
@@ -232,12 +272,40 @@ class DeploymentSettings:
                 problems.append(
                     f"{name} 仍然是仓库内的开发占位密钥，生产必须由 KMS/Secret Manager 注入"
                 )
+            elif len(secret.encode("utf-8")) < MIN_SECRET_BYTES:
+                problems.append(
+                    f"{name} 至少需要 {MIN_SECRET_BYTES} 字节随机材料"
+                    f"（当前 {len(secret.encode('utf-8'))} 字节）："
+                    "短密钥可被在线穷举，格式校验救不了熵不足"
+                )
 
         if self.cookie_secret == self.session_secret:
             problems.append(
                 "cookie 签名密钥必须与会话令牌密钥分离（泄露隔离）："
                 "请单独设置 STUDY_PLATFORM_COOKIE_SECRET"
             )
+
+        # 全量交叉复用检查：session / cookie / token / 历史 cookie 密钥
+        # 两两互不相同。任一用途泄漏都不应波及其他用途的凭证 ——
+        # 只查 cookie != session 一对，挡不住 token_secret 复用 cookie 密钥。
+        named = {
+            "SESSION": self.session_secret,
+            "COOKIE": self.cookie_secret,
+            "TOKEN": self.token_secret,
+        }
+        for index, old in enumerate(self.cookie_previous_secrets):
+            named[f"COOKIE_PREVIOUS[{index}]"] = old
+        seen: dict[str, str] = {}
+        for label, secret in named.items():
+            if not secret:
+                continue
+            if secret in seen:
+                problems.append(
+                    f"{label} 密钥与 {seen[secret]} 密钥重复："
+                    "所有用途的密钥必须两两互异（泄露隔离）"
+                )
+            else:
+                seen[secret] = label
         if not self.cookie_secure:
             problems.append(
                 "生产模式必须设置 STUDY_PLATFORM_COOKIE_SECURE=1（HTTPS-only cookie）"

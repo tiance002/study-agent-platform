@@ -143,11 +143,14 @@ def test_forwarded_headers_ignored_unless_behind_proxy(tmp_path):
     )
     assert evil.status_code == 403
 
-    # 显式声明反代后，转发头参与计算，外部来源被接受。
+    # 显式声明反代 + 可信代理链后，转发头参与计算，外部来源被接受。
+    # （审查修复：behind_proxy=1 必须配置 STUDY_PLATFORM_TRUSTED_PROXIES，
+    # 且只有请求确实来自可信代理时转发头才被采信。）
     settings = DeploymentSettings.load(
         {
             "STUDY_PLATFORM_BEHIND_PROXY": "1",
             "STUDY_PLATFORM_TRUSTED_ORIGINS": "https://external.example",
+            "STUDY_PLATFORM_TRUSTED_PROXIES": "testclient,10.0.0.0/8",
         }
     )
     platform2 = build_platform(var_dir=tmp_path / "p2", settings=settings)
@@ -163,6 +166,84 @@ def test_forwarded_headers_ignored_unless_behind_proxy(tmp_path):
         },
     )
     assert ok.status_code == 200
+
+
+@pytest.mark.invariant
+def test_behind_proxy_without_trusted_proxies_is_rejected():
+    """审查 P1 回归：behind_proxy=1 而不配可信代理清单 = 拒绝启动。
+
+    没有可信清单时 XFF 完全由客户端可控（限流键、转发头都可轮换伪造）。
+    """
+    problems = DeploymentSettings.load(
+        {"STUDY_PLATFORM_BEHIND_PROXY": "1"}
+    ).configuration_problems()
+    assert any("TRUSTED_PROXIES" in p for p in problems)
+
+
+@pytest.mark.invariant
+def test_xff_rotation_cannot_reset_rate_limit_bucket(tmp_path):
+    """审查 P1 回归实测复现：轮换 X-Forwarded-For 首值不得重置限流桶。
+
+    请求不来自可信代理（TestClient 对端 "testclient" 不在清单里）时，
+    XFF 完全不采信 —— 早先取 XFF 首值，攻击者换一个值就得一个新的
+    限流桶，429 后立即恢复 401。
+    """
+    settings = DeploymentSettings.load(
+        {
+            "STUDY_PLATFORM_EXCHANGE_LIMIT": "2",
+            "STUDY_PLATFORM_BEHIND_PROXY": "1",
+            # 可信代理只配了一个内网地址 —— testclient 不在其中。
+            "STUDY_PLATFORM_TRUSTED_PROXIES": "10.9.9.9",
+        }
+    )
+    platform = build_platform(var_dir=tmp_path, settings=settings)
+    client = _client(platform)
+
+    statuses = []
+    for i, xff in enumerate(["1.2.3.4", "5.6.7.8", "9.9.9.9"]):
+        statuses.append(
+            client.post(
+                "/auth/invitations/exchange",
+                json={"token": f"tok-{i}"},
+                headers={"X-Forwarded-For": xff},
+            ).status_code
+        )
+    # 三次请求同属一个桶（对端不可信 → 键恒为 TCP 对端）：第 3 次 429。
+    assert statuses == [401, 401, 429], f"轮换 XFF 不得重置限流桶：{statuses}"
+
+
+@pytest.mark.invariant
+def test_xff_is_honored_from_trusted_proxy(tmp_path):
+    """可信代理转发的 XFF 参与限流：不同客户端 IP 各自计数。"""
+    settings = DeploymentSettings.load(
+        {
+            "STUDY_PLATFORM_EXCHANGE_LIMIT": "1",
+            "STUDY_PLATFORM_BEHIND_PROXY": "1",
+            "STUDY_PLATFORM_TRUSTED_PROXIES": "testclient",
+        }
+    )
+    platform = build_platform(var_dir=tmp_path, settings=settings)
+    client = _client(platform)
+
+    # 经可信代理转发的两个不同客户端：各自一个桶，互不影响。
+    first = client.post(
+        "/auth/invitations/exchange",
+        json={"token": "a"},
+        headers={"X-Forwarded-For": "203.0.113.7"},
+    )
+    second = client.post(
+        "/auth/invitations/exchange",
+        json={"token": "b"},
+        headers={"X-Forwarded-For": "203.0.113.8"},
+    )
+    assert (first.status_code, second.status_code) == (401, 401)
+    # 同一客户端第三次：429。
+    third = client.post(
+        "/auth/invitations/exchange",
+        json={"token": "c"},
+        headers={"X-Forwarded-For": "203.0.113.7"},
+    )
+    assert third.status_code == 429
 
 
 @pytest.mark.invariant
@@ -264,6 +345,24 @@ def test_rate_limiter_windows_align_between_memory_and_formula():
 
 def _event_types(platform) -> list[str]:
     return [record.get("event_type") for record in platform.audit.read_all()]
+
+
+@pytest.mark.invariant
+def test_exchange_audit_redacts_session_material(ready):
+    """兑换审计可关联主体，但不得复制会话标识。"""
+    response = _client(ready).post(
+        "/auth/invitations/exchange", json={"token": "token-live"}
+    )
+    assert response.status_code == 200
+
+    records = [
+        record
+        for record in ready.audit.read_all()
+        if record.get("event_type") == "invitation_exchanged"
+    ]
+    assert len(records) == 1
+    assert "session_id" not in records[0]["payload"]
+    assert records[0]["payload"]["principal_id"] == DEMO_PRINCIPAL
 
 
 @pytest.mark.invariant
@@ -564,6 +663,68 @@ def test_production_rejects_cookie_secret_equal_session_secret():
         }
     )
     assert any("分离" in p for p in settings.configuration_problems())
+
+
+@pytest.mark.invariant
+def test_production_rejects_short_secrets():
+    """审查 P1 回归：一字节的生产密钥必须被拒绝。
+
+    审查实测曾通过：session="a", cookie="b", token="b" —— 一字节 HMAC
+    密钥可被在线穷举。
+    """
+    settings = DeploymentSettings.load(
+        {
+            "STUDY_PLATFORM_ENV": "production",
+            "STUDY_PLATFORM_DSN": "postgresql://study_app:dev-only-change-me@h/db",
+            "STUDY_PLATFORM_SESSION_SECRET": "a",
+            "STUDY_PLATFORM_COOKIE_SECRET": "b",
+            "STUDY_PLATFORM_TOKEN_SECRET": "b",
+            "STUDY_PLATFORM_COOKIE_SECURE": "1",
+            "STUDY_PLATFORM_TRUSTED_ORIGINS": "https://app.example.com",
+            "STUDY_PLATFORM_TRUSTED_PROXIES": "10.0.0.1",
+        }
+    )
+    problems = settings.configuration_problems()
+    joined = "\n".join(problems)
+    assert "SESSION_SECRET" in joined and "32" in joined, "短密钥必须被点名"
+    # token 与 cookie 同为 "b"：交叉复用必须被点名（不止 cookie/session 一对）。
+    assert any("TOKEN" in p and "重复" in p for p in problems)
+
+
+@pytest.mark.invariant
+def test_production_rejects_cross_reuse_with_previous_cookie_secret():
+    """历史轮换密钥也参与交叉复用检查：新密钥不得复用任何在用/历史密钥。"""
+    base = {
+        "STUDY_PLATFORM_ENV": "production",
+        "STUDY_PLATFORM_DSN": "postgresql://study_app:dev-only-change-me@h/db",
+        "STUDY_PLATFORM_SESSION_SECRET": "session-secret-0123456789abcdef00",
+        "STUDY_PLATFORM_COOKIE_SECRET": "cookie-secret-0123456789abcdef0000",
+        "STUDY_PLATFORM_TOKEN_SECRET": "token-secret-0123456789abcdef00000",
+        "STUDY_PLATFORM_COOKIE_SECRET_PREVIOUS": "session-secret-0123456789abcdef00",
+        "STUDY_PLATFORM_COOKIE_SECURE": "1",
+        "STUDY_PLATFORM_TRUSTED_ORIGINS": "https://app.example.com",
+        "STUDY_PLATFORM_TRUSTED_PROXIES": "10.0.0.1",
+    }
+    problems = DeploymentSettings.load(base).configuration_problems()
+    assert any("COOKIE_PREVIOUS" in p and "重复" in p for p in problems)
+
+
+@pytest.mark.invariant
+def test_production_accepts_strong_distinct_secrets():
+    """正面用例：足够长且两两互异的密钥通过自检（其余生产项已满足）。"""
+    settings = DeploymentSettings.load(
+        {
+            "STUDY_PLATFORM_ENV": "production",
+            "STUDY_PLATFORM_DSN": "postgresql://study_app:dev-only-change-me@h/db",
+            "STUDY_PLATFORM_SESSION_SECRET": "session-secret-0123456789abcdef00",
+            "STUDY_PLATFORM_COOKIE_SECRET": "cookie-secret-0123456789abcdef0000",
+            "STUDY_PLATFORM_TOKEN_SECRET": "token-secret-0123456789abcdef00000",
+            "STUDY_PLATFORM_COOKIE_SECURE": "1",
+            "STUDY_PLATFORM_TRUSTED_ORIGINS": "https://app.example.com",
+            "STUDY_PLATFORM_TRUSTED_PROXIES": "10.0.0.1",
+        }
+    )
+    assert settings.configuration_problems() == []
 
 
 @pytest.mark.invariant

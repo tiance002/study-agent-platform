@@ -7,13 +7,13 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:1c0ade5df6f7d0ff18c92564188320fededd11703dbab62bf0743a4d0387c626, generated_at=2026-09-19T10:36:37Z -->
-> 生成时间：2026-09-19T10:36:37Z
+<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:93407af711baa61af423ad0757f38d87c01462a8b1b8c17917fa24abef52cebb, generated_at=2026-09-19T18:20:37Z -->
+> 生成时间：2026-09-19T18:20:37Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
 
-当前 head：`0004`
+当前 head：`0006`
 
 ### 表总览
 
@@ -21,10 +21,12 @@
 |---|---|---|---|---:|
 | `action_intents` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 11 |
 | `auth_attempt_counters` | 0004 | 系统级（无租户，认证前设施） | 无表权限（仅 SECURITY DEFINER 函数 EXECUTE） | 4 |
+| `auth_audit_outbox` | 0006 → 0006 改写 | 系统级（认证前审计事实中转；应用 INSERT/SELECT/UPDATE，无 DELETE） | SELECT, INSERT, UPDATE | 9 |
 | `confirmations` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 12 |
 | `conversations` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 6 |
+| `diagnoses` | 0005 | 租户+项目+主体 | SELECT, INSERT | 9 |
 | `evidence_events` | 0001 | 租户+项目 | SELECT, INSERT | 12 |
-| `http_idempotency` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE | 12 |
+| `http_idempotency` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE | 13 |
 | `invitations` | 0002 | 租户 | SELECT, INSERT, UPDATE, DELETE | 9 |
 | `learning_plans` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 7 |
 | `learning_tasks` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 7 |
@@ -34,6 +36,8 @@
 | `project_grants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | 4 |
 | `projects` | 0001 → 0002 改写 | 成员感知 | SELECT, INSERT, UPDATE, DELETE | 7 |
 | `sources` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 8 |
+| `task_assessments` | 0005 | 租户+项目 | SELECT, INSERT | 10 |
+| `task_submissions` | 0005 | 租户+项目+主体 | SELECT, INSERT | 11 |
 | `tenants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | 3 |
 | `user_sessions` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE, DELETE | 6 |
 
@@ -56,6 +60,15 @@
 | `auth_attempt_counters` | `window_start` | `timestamptz` |
 | `auth_attempt_counters` | `attempts` | `integer` |
 | `auth_attempt_counters` | `last_at` | `timestamptz` |
+| `auth_audit_outbox` | `event_id` | `text` |
+| `auth_audit_outbox` | `event_type` | `text` |
+| `auth_audit_outbox` | `payload` | `jsonb` |
+| `auth_audit_outbox` | `risk` | `text` |
+| `auth_audit_outbox` | `tenant_id` | `text` |
+| `auth_audit_outbox` | `project_id` | `text` |
+| `auth_audit_outbox` | `request_id` | `text` |
+| `auth_audit_outbox` | `created_at` | `timestamptz` |
+| `auth_audit_outbox` | `projected_at` | `timestamptz` |
 | `confirmations` | `confirmation_id` | `text` |
 | `confirmations` | `tenant_id` | `text` |
 | `confirmations` | `project_id` | `text` |
@@ -74,6 +87,15 @@
 | `conversations` | `title` | `text` |
 | `conversations` | `last_message_seq` | `bigint` |
 | `conversations` | `created_at` | `timestamptz` |
+| `diagnoses` | `diagnosis_id` | `text` |
+| `diagnoses` | `tenant_id` | `text` |
+| `diagnoses` | `project_id` | `text` |
+| `diagnoses` | `principal_id` | `text` |
+| `diagnoses` | `answers` | `jsonb` |
+| `diagnoses` | `summary` | `text` |
+| `diagnoses` | `created_at` | `timestamptz` |
+| `diagnoses` | `REFERENCES` | `projects` |
+| `diagnoses` | `REFERENCES` | `principals` |
 | `evidence_events` | `seq` | `bigint` |
 | `evidence_events` | `event_id` | `text` |
 | `evidence_events` | `tenant_id` | `text` |
@@ -98,6 +120,7 @@
 | `http_idempotency` | `response_body` | `jsonb` |
 | `http_idempotency` | `claimed_at` | `timestamptz` |
 | `http_idempotency` | `completed_at` | `timestamptz` |
+| `http_idempotency` | `owner_token` | `text` |
 | `invitations` | `invitation_id` | `text` |
 | `invitations` | `tenant_id` | `text` |
 | `invitations` | `token_hash` | `text` |
@@ -159,6 +182,27 @@
 | `sources` | `identity_hash` | `text` |
 | `sources` | `acquisition` | `jsonb` |
 | `sources` | `registered_at` | `timestamptz` |
+| `task_assessments` | `assessment_id` | `text` |
+| `task_assessments` | `tenant_id` | `text` |
+| `task_assessments` | `project_id` | `text` |
+| `task_assessments` | `task_id` | `text` |
+| `task_assessments` | `component_id` | `text` |
+| `task_assessments` | `contract_id` | `text` |
+| `task_assessments` | `mapping_version` | `text` |
+| `task_assessments` | `created_at` | `timestamptz` |
+| `task_assessments` | `REFERENCES` | `projects` |
+| `task_assessments` | `REFERENCES` | `learning_tasks` |
+| `task_submissions` | `submission_id` | `text` |
+| `task_submissions` | `tenant_id` | `text` |
+| `task_submissions` | `project_id` | `text` |
+| `task_submissions` | `task_id` | `text` |
+| `task_submissions` | `principal_id` | `text` |
+| `task_submissions` | `mode` | `text` |
+| `task_submissions` | `content` | `text` |
+| `task_submissions` | `created_at` | `timestamptz` |
+| `task_submissions` | `REFERENCES` | `projects` |
+| `task_submissions` | `REFERENCES` | `learning_tasks` |
+| `task_submissions` | `REFERENCES` | `principals` |
 | `tenants` | `tenant_id` | `text` |
 | `tenants` | `name` | `text` |
 | `tenants` | `created_at` | `timestamptz` |

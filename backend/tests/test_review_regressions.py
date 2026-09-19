@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from app.audit.sink import AuditSink, RiskLevel
 from app.budget.ledger import BudgetLedger, Dimension
@@ -73,7 +75,7 @@ def test_matching_project_is_accepted(client, auth_headers):
     response = client.post(
         f"/projects/{PROJECT}/interactions",
         json={"node_id": "intake_goal", "user_input": "x", "params": {}},
-        headers=auth_headers(),
+        headers={**auth_headers(), "Idempotency-Key": "regress-" + uuid.uuid4().hex},
     )
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "ok"
@@ -122,7 +124,7 @@ def test_audit_api_is_scoped_to_authenticated_tenant(client, auth_headers):
     client.post(
         f"/projects/{PROJECT}/retrieval/chunks",
         json={"source_id": "s1", "chunks": ["内容"]},
-        headers=headers,
+        headers={**headers, "Idempotency-Key": "regress-" + uuid.uuid4().hex},
     )
     mine = client.get(f"/projects/{PROJECT}/audit", headers=headers).json()
     assert mine["records"] > 0
@@ -193,7 +195,7 @@ def test_budget_api_is_scoped_to_authenticated_tenant(client, auth_headers):
             "user_input": "x",
             "params": {"targets": ["agent.harness"]},
         },
-        headers=headers,
+        headers={**headers, "Idempotency-Key": "regress-" + uuid.uuid4().hex},
     )
     body = client.get(f"/projects/{PROJECT}/budget", headers=headers).json()
     assert body["open_reservations"] == []
