@@ -59,6 +59,9 @@ class ErrorCode(StrEnum):
     # 前者是"等一下再来"，后者是"你这把钥匙用错了"。混为一谈会让客户端
     # 把并发重试当成参数冲突处理，从而放弃一个本来会成功的请求。
     IDEMPOTENCY_IN_PROGRESS = "IDEMPOTENCY_IN_PROGRESS"
+    # 乐观锁冲突：`expected_version` 与当前版本不符。**可重试但必须先读最新状态**，
+    # 与"资源不存在"（404）严格区分 —— 混在一起客户端会误判成权限问题。
+    VERSION_CONFLICT = "VERSION_CONFLICT"
     ILLEGAL_STATE_TRANSITION = "ILLEGAL_STATE_TRANSITION"
     RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
 

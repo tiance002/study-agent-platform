@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:54b9131cb9d2bd3fa84e89d1d629ae8e915314eb26a40df6247430b250b5526d, generated_at=2026-09-19T12:33:19Z -->
-> 生成时间：2026-09-19T12:33:19Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:d8a1583e7129544307f5359a8a6c73cbebbc1d26b6e52b6707472a16d5c59b08, generated_at=2026-09-19T13:02:11Z -->
+> 生成时间：2026-09-19T13:02:11Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -20,6 +20,10 @@
 | `/auth/logout/all` | POST | Logout All |
 | `/healthz` | GET | Healthz |
 | `/me` | GET | Me |
+| `/projects` | GET | List Projects |
+| `/projects` | POST | Create Project |
+| `/projects/{project_id}` | GET | Get Project |
+| `/projects/{project_id}` | PATCH | Update Project |
 | `/projects/{project_id}/audit` | GET | Audit View |
 | `/projects/{project_id}/budget` | GET | Budget View |
 | `/projects/{project_id}/confirmations` | POST | Create Confirmation |
@@ -30,7 +34,7 @@
 
 ### 稳定错误码
 
-共 38 个，一经发布不得改变语义，只能追加。
+共 39 个，一经发布不得改变语义，只能追加。
 
 | 错误码 |
 |---|
@@ -72,6 +76,7 @@
 | `TOOL_INTENT_CONFLICT` |
 | `TOOL_NOT_ALLOWED_FOR_NODE` |
 | `TOOL_NOT_REGISTERED` |
+| `VERSION_CONFLICT` |
 
 ### typed node 输入输出 schema
 

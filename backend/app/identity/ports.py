@@ -71,6 +71,31 @@ class MembershipRepository(Protocol):
         """该主体被授予的项目，按 project_id 稳定排序。返回完整契约。"""
         ...
 
+    def create_project_for(
+        self, actor: Principal, *, project_id: str, name: str, goal: str
+    ) -> LearningProject:
+        """产品路径的建项目：**创建即授予创建者**，一个不可分的行为。
+
+        与 `create_project`（SystemContext 供给路径）的区别不在权限而在
+        原子性：没有"建了项目但自己看不见"的窗口 —— PostgreSQL 实现
+        必须把 projects 与 project_grants 两条 INSERT 放进同一事务。
+        """
+        ...
+
+    def update(
+        self,
+        actor: Principal,
+        project_id: str,
+        *,
+        name: str | None,
+        goal: str | None,
+        expected_version: int,
+    ) -> LearningProject:
+        """乐观锁更新。`expected_version` 不匹配抛 VERSION_CONFLICT；
+        项目不可见（RLS 过滤后无行）与一切访问失败同语义 —— 无权访问。
+        """
+        ...
+
     def get(self, actor: Principal, project_id: str) -> LearningProject:
         """访问判定。**一切失败模式（不存在/跨租户/未授予）返回同一种拒绝**，
         不让人通过错误差异探测别的租户有哪些项目。

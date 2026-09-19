@@ -132,6 +132,84 @@ class PostgresMembershipRepository:
                 project_id=project_id,
             ) from exc
 
+    def create_project_for(
+        self, actor: Principal, *, project_id: str, name: str, goal: str
+    ) -> LearningProject:
+        """创建即授予：两条 INSERT 同一事务。
+
+        用 `principal_transaction`（租户 + 主体）而非 `tenant_only_transaction`：
+        授权行的主体维度来自 actor，同一上下文天然覆盖两条写入。
+        """
+        stamp = self._clock.now()
+        try:
+            with principal_transaction(
+                tenant_id=actor.tenant_id, principal_id=actor.principal_id, dsn=self._dsn
+            ) as conn:
+                conn.execute(
+                    "INSERT INTO projects (project_id, tenant_id, name, goal,"
+                    " created_at, updated_at)"
+                    " VALUES (%s, %s, %s, %s, %s, %s)",
+                    (project_id, actor.tenant_id, name, goal, stamp, stamp),
+                )
+                conn.execute(
+                    "INSERT INTO project_grants (tenant_id, principal_id, project_id)"
+                    " VALUES (%s, %s, %s)",
+                    (actor.tenant_id, actor.principal_id, project_id),
+                )
+        except pg_errors.UniqueViolation as exc:
+            raise deny(ErrorCode.BUDGET_TREE_INVALID, f"项目已存在：{project_id}") from exc
+        # 契约对象由入参构造（同一事务内已可见，但 RETURNING 在成员感知
+        # USING 下不可用 —— 见 create_project 的注释）。
+        return LearningProject(
+            project_id=project_id,
+            tenant_id=actor.tenant_id,
+            name=name,
+            goal=goal,
+            created_at=stamp,
+            updated_at=stamp,
+        )
+
+    def update(
+        self,
+        actor: Principal,
+        project_id: str,
+        *,
+        name: str | None,
+        goal: str | None,
+        expected_version: int,
+    ) -> LearningProject:
+        stamp = self._clock.now()
+        with principal_transaction(
+            tenant_id=actor.tenant_id, principal_id=actor.principal_id, dsn=self._dsn
+        ) as conn:
+            row = conn.execute(
+                "UPDATE projects"
+                " SET name = COALESCE(%s, name), goal = COALESCE(%s, goal),"
+                " version = version + 1, updated_at = %s"
+                " WHERE project_id = %s AND version = %s"
+                " RETURNING " + _PROJECT_COLUMNS,
+                (name, goal, stamp, project_id, expected_version),
+            ).fetchone()
+            if row is None:
+                # 零行有两种原因，必须区分：不可见（404 语义）与版本过期（409）。
+                # 再查一次可见性 —— RLS 的 USING 会替我们做出区分。
+                visible = conn.execute(
+                    "SELECT project_id FROM projects WHERE project_id = %s",
+                    (project_id,),
+                ).fetchone()
+                if visible is None:
+                    raise deny(
+                        ErrorCode.CROSS_TENANT_DENIED,
+                        "无权访问该项目",
+                        project_id=project_id,
+                    )
+                raise deny(
+                    ErrorCode.VERSION_CONFLICT,
+                    "项目已被他人修改；请刷新后基于最新版本编辑",
+                    expected_version=expected_version,
+                )
+        return _project_from_row(row)
+
     def list_for(self, actor: Principal) -> tuple[LearningProject, ...]:
         with principal_transaction(
             tenant_id=actor.tenant_id, principal_id=actor.principal_id, dsn=self._dsn

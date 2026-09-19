@@ -88,6 +88,47 @@ class MembershipStore:
             )
         self._grants.setdefault((context.tenant_id, principal_id), set()).add(project_id)
 
+    def create_project_for(
+        self, actor: Principal, *, project_id: str, name: str, goal: str
+    ) -> LearningProject:
+        """创建即授予。内存版顺序：先建后授 —— 中途失败留给 GC 无从谈起，
+        dict 赋值不会失败；PG 版由同事务保证等价语义（见 identity_store）。
+        """
+        context = SystemContext(actor.tenant_id, "用户创建项目")
+        project = self.create_project(context, project_id=project_id, name=name, goal=goal)
+        self.grant_project(context, principal_id=actor.principal_id, project_id=project_id)
+        return project
+
+    def update(
+        self,
+        actor: Principal,
+        project_id: str,
+        *,
+        name: str | None,
+        goal: str | None,
+        expected_version: int,
+    ) -> LearningProject:
+        """乐观锁更新。访问判定在前（统一拒绝），版本比对在后。"""
+        project = self.get(actor, project_id)
+        if project.version != expected_version:
+            raise deny(
+                ErrorCode.VERSION_CONFLICT,
+                "项目已被他人修改；请刷新后基于最新版本编辑",
+                expected_version=expected_version,
+                current_version=project.version,
+            )
+        updated = LearningProject(
+            project_id=project.project_id,
+            tenant_id=project.tenant_id,
+            name=name if name is not None else project.name,
+            goal=goal if goal is not None else project.goal,
+            created_at=project.created_at,
+            updated_at=self.clock.now(),
+            version=project.version + 1,
+        )
+        self._projects[project_id] = updated
+        return updated
+
     # ------------------------------------------------------------------ 访问
 
     def list_for(self, actor: Principal) -> tuple[LearningProject, ...]:

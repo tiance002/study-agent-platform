@@ -392,6 +392,13 @@ def error_response(exc: PlatformError):
         payload = public_error_payload(
             exc.code.value, exc.message, request_id=request_id
         )
+    elif exc.code is ErrorCode.VERSION_CONFLICT:
+        # 乐观锁冲突：409。404 会让客户端误判成权限问题去重新登录；
+        # 412 语义上也贴切但极少用 —— 409 是编辑冲突的事实标准。
+        status = 409
+        payload = public_error_payload(
+            exc.code.value, exc.message, request_id=request_id
+        )
     elif exc.code is ErrorCode.CSRF_DENIED:
         # CSRF 拦截：凭据本身有效，是"来源不对" —— 401 会让客户端去重新登录，
         # 那是误导；403 说的是"这个请求不被接受"。

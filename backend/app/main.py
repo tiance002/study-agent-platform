@@ -32,6 +32,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.api.auth_routes import router as auth_router
+from app.api.projects_routes import router as projects_router
 from app.api.routes import error_response, router
 from app.audit.sink import AuditSink
 from app.budget.ledger import BudgetLedger
@@ -370,6 +371,7 @@ def create_app(*, platform: PlatformState | None = None) -> FastAPI:
     app.state.platform = platform or build_platform()
     app.include_router(router)
     app.include_router(auth_router)
+    app.include_router(projects_router)
 
     @app.middleware("http")
     async def _bind_request_id(request: Request, call_next):

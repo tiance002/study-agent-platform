@@ -485,3 +485,66 @@ def test_memory_state_visible_through_second_instance():
         )
         is None
     )
+
+# ------------------------------------------------------ 创建即授予 / 乐观锁
+
+
+@pytest.mark.invariant
+def test_create_project_for_grants_creator_immediately(repos):
+    """创建即授予：同一行为里创建者必须立刻可见新项目。
+
+    PostgreSQL 实现把 projects 与 project_grants 两条 INSERT 放进同一事务 ——
+    不存在"建了项目但自己看不见"的窗口。
+    """
+    membership, _, _ = repos
+    project = membership.create_project_for(
+        _alice(), project_id=_unique("proj"), name="自建项目", goal="学会审计"
+    )
+
+    assert project.version == 1
+    assert {p.project_id for p in membership.list_for(_alice())} >= {project.project_id}
+    assert membership.get(_alice(), project.project_id).goal == "学会审计"
+
+
+@pytest.mark.invariant
+def test_update_with_expected_version_increments(repos):
+    membership, _, _ = repos
+    project = membership.create_project_for(
+        _alice(), project_id=_unique("proj"), name="初版", goal=""
+    )
+
+    updated = membership.update(
+        _alice(), project.project_id, name="改名", goal=None, expected_version=1
+    )
+    assert updated.version == 2
+    assert updated.name == "改名"
+    assert updated.goal == "", "name=None 表示不动 goal，不是清空"
+
+
+@pytest.mark.invariant
+def test_update_with_stale_version_conflicts(repos):
+    membership, _, _ = repos
+    project = membership.create_project_for(
+        _alice(), project_id=_unique("proj"), name="初版", goal=""
+    )
+    membership.update(_alice(), project.project_id, name="第二版", goal=None, expected_version=1)
+
+    with pytest.raises(PlatformError) as excinfo:
+        membership.update(_alice(), project.project_id, name="迟到的编辑", goal=None, expected_version=1)
+    assert excinfo.value.code is ErrorCode.VERSION_CONFLICT
+    # 冲突不产生部分改动。
+    assert membership.get(_alice(), project.project_id).name == "第二版"
+
+
+@pytest.mark.invariant
+def test_update_denies_ungranted_like_any_access(repos):
+    membership, _, _ = repos
+    project = membership.create_project_for(
+        _alice(), project_id=_unique("proj"), name="甲的项目", goal=""
+    )
+
+    with pytest.raises(PlatformError) as excinfo:
+        membership.update(_bob(), project.project_id, name="抢改", goal=None, expected_version=1)
+    # 统一拒绝：未授予者的更新失败与"项目不存在"同码同话术。
+    assert excinfo.value.code is ErrorCode.CROSS_TENANT_DENIED
+    assert membership.get(_alice(), project.project_id).name == "甲的项目"
