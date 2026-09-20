@@ -6,9 +6,30 @@
 
 > 每个片段的内容**就是原文的一个精确切片**：`text[span] == chunk.content`。
 
-这条性质不是在切块器里"小心算偏移"实现的，而是 `StoredChunk` 的类型约束
-（`span_end - span_start == len(content)`）。切块器算错一个字符，第一个片段
-构造时就炸 —— 而不是等到用户点开引用、发现引的是别处的文字。
+这条性质由本模块保证（片段内容一律取自 `text[start:end]`），并且**在写入前
+再核验一次**（`assert_chunks_match_document`，对着**持久化原文**）。
+
+⚠️ `StoredChunk` 的类型约束（`span_end - span_start == len(content)`）**只**
+保证长度对口，不能替代上面那句话 —— `content_hash` 也是对片段自身取哈希。
+两者都自洽而与原文无关：实测把片段内容换成等长短文本，构造层过得去（R4-05）。
+
+## 媒体类型决定解析路径
+
+`text/plain` 与 `text/markdown` 走**两条**解析路径，而不是"一套 Markdown 规则
+容忍纯文本"：
+
+| 类型 | 标题 | 围栏 | `# 开头的一行` |
+|---|---|---|---|
+| `text/markdown` | 识别 ATX 标题 | 识别代码围栏 | 标题 |
+| `text/plain` | 不识别（路径恒为空） | 不识别 | **普通文字** |
+
+原因是实测的后果不对称：`# plain heading` 是一份**完全合法**的纯文本，
+按 Markdown 规则却成了"只有标题、没有正文"的节 → 整篇被丢弃、产出**零片段**。
+用户看到的是"上传成功但搜不到"，而库里确实什么都没有。
+
+纯文本那边因此有一条更强的性质：**非空内容必然产出至少一个片段**。
+（Markdown 允许"只有标题"的文档产出零片段 —— 它确实没有可检索的正文，
+这是刻意的语义，见 `_is_heading_only`。）
 
 ## 只增加结构元数据，不改写原文
 
@@ -31,7 +52,9 @@
 代码块的中间一行往往看起来像标题（`# 这是注释`）。逐行扫描会把它们当成
 真标题，于是后续所有片段的 `heading_path` 全错 —— 而错的是"路径"，
 检索加权与展示缩进都会跟着错，但内容看起来完全正常。
-因此围栏状态必须在扫描前建立。
+因此围栏状态必须在扫描前建立，而且**开围栏的长度必须存下来**：
+四反引号里包三反引号是合法的 Markdown 示例写法，只比字符不比长度会让
+内部那三个反引号"提前闭合"外层围栏，代码里的 `#` 随即变成标题（R4-07）。
 """
 
 from __future__ import annotations
@@ -56,8 +79,34 @@ _ATX_RE = re.compile(r"^(#{1,6})(?:[ \t]+(.*?))?[ \t]*$")
 #: 标题末尾的闭合井号序列（CommonMark 允许 `## 标题 ##`）。
 _ATX_CLOSING_RE = re.compile(r"[ \t]+#+[ \t]*$")
 
-#: 围栏起始：三个及以上的反引号或波浪号。
-_FENCE_OPEN_RE = re.compile(r"^(`{3,}|~{3,})")
+#: 围栏起始：**任意缩进**，然后是三个及以上的反引号或波浪号。
+#:
+#: ⚠️ 这里刻意比 CommonMark 宽松（它只允许最多三个前导空格，四个空格算缩进
+#: 代码块）。取舍写清楚：放宽的收益是"缩进代码里的 `#` 不会被当成标题"
+#: （这正是本模块最怕的错——`heading_path` 是排序权重输入，错了看不出来），
+#: 代价是把某些缩进代码块整块当成围栏（于是它们不被检索加权）。
+#: 两边的错不对称：前者静默污染后续所有片段，后者只是少算一点权重。
+#:
+#: 用 `line.text` 而不是 `line.stripped` 匹配：前者保留"这一行到底长什么样"，
+#: 后续若要收紧规则（比如恢复 CommonMark 的三格上限）不必先改匹配口径。
+_FENCE_OPEN_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+
+#: 围栏结束：同样任意缩进、同种字符、**长度不短于开围栏**，其后只有空白。
+_FENCE_CLOSE_RE = re.compile(r"^\s*([`~]{3,})[ \t]*$")
+
+
+@dataclass(frozen=True)
+class _Fence:
+    """一个代码围栏的开头。**长度必须存下来**（R4-07）。
+
+    CommonMark 规定：闭围栏的字符数不得少于开围栏。只比字符不比长度时，
+    四反引号围栏会被内部的三反引号提前闭合 —— 而"四反引号里包三反引号"
+    正是**展示 Markdown 语法示例的标准写法**，于是示例里代码的 `#`
+    会被当成真标题，污染其后所有片段的 `heading_path`（也就是排序权重输入）。
+    """
+
+    char: str
+    length: int
 
 
 @dataclass(frozen=True)
@@ -106,13 +155,34 @@ def _split_lines(text: str) -> list[_Line]:
     return lines
 
 
-def _fence_marker(line: _Line) -> str | None:
-    match = _FENCE_OPEN_RE.match(line.stripped)
-    return match.group(1)[0] if match else None
+def _fence_open(line: _Line) -> _Fence | None:
+    """这一行是不是围栏开头。
+
+    反引号围栏的 info string **不允许含反引号**（CommonMark）：`` ```a`b ``
+    不是围栏开头。少了这条，`` ``` `` 后面跟一段含反引号的行会被当成围栏，
+    于是接下来的正文全被当成代码。
+    """
+    match = _FENCE_OPEN_RE.match(line.text)
+    if match is None:
+        return None
+    marker, info = match.group(1), match.group(2)
+    if marker[0] == "`" and "`" in info:
+        return None
+    return _Fence(char=marker[0], length=len(marker))
 
 
-def _closes_fence(line: _Line, marker: str) -> bool:
-    return re.fullmatch(re.escape(marker) + r"{3,}", line.stripped) is not None
+def _closes_fence(line: _Line, fence: _Fence) -> bool:
+    """这一行能不能闭合 `fence`。
+
+    三个条件缺一不可：**同种字符**、**长度不短于开围栏**、其后只有空白。
+    波浪号围栏不会被反引号闭合（反之亦然）—— 只比"有没有三个同字符"
+    会让两种围栏互相闭合，而混用是真实文本里常见的写法。
+    """
+    match = _FENCE_CLOSE_RE.match(line.text)
+    if match is None:
+        return False
+    marker = match.group(1)
+    return marker[0] == fence.char and len(marker) >= fence.length
 
 
 def _heading(line: _Line) -> tuple[int, str] | None:
@@ -132,11 +202,11 @@ def _heading(line: _Line) -> tuple[int, str] | None:
 
 
 def _normalize_units(lines: list[_Line]) -> list[_Unit]:
-    """把行序列归并成结构块（标题行 / 段落 / 整块围栏代码）。"""
+    """把行序列归并成结构块（标题行 / 段落 / 整块围栏代码）—— **Markdown 路径**。"""
     units: list[_Unit] = []
     stack: list[tuple[int, str]] = []
     pending: list[_Line] = []
-    fence: str | None = None
+    fence: _Fence | None = None
     fenced: list[_Line] = []
 
     def flush_pending() -> None:
@@ -155,10 +225,10 @@ def _normalize_units(lines: list[_Line]) -> list[_Unit]:
                 fence = None
             continue
 
-        marker = _fence_marker(line)
-        if marker is not None:
+        opening = _fence_open(line)
+        if opening is not None:
             flush_pending()
-            fence = marker
+            fence = opening
             fenced = [line]
             continue
 
@@ -193,6 +263,36 @@ def _normalize_units(lines: list[_Line]) -> list[_Unit]:
     if fence is not None and fenced:
         path = tuple(title for _level, title in stack)
         units.append(_Unit(fenced[0].start, fenced[-1].end, path))
+    flush_pending()
+    return units
+
+
+def _normalize_plain_units(lines: list[_Line]) -> list[_Unit]:
+    """纯文本的行序列 → 结构块。**只有段落一种块**（R4-06）。
+
+    刻意不复用 `_normalize_units`，也不给它加开关：那条路径里"标题/围栏"
+    是语法，纯文本里同样的字符只是文字。用一个布尔参数分叉会让两条路径
+    共享一段读起来像"同一个算法"的代码，而它们的**语义完全不同** ——
+    将来任何一处改动都要重新论证"对另一条路径还成立吗"。
+
+    纯文本没有层级可言，因此 `heading_path` 恒为空元组（与
+    `test_plain_text_has_empty_heading_path` 的既有断言一致）。
+    段落之间由空行分隔：空行是唯一的结构信号，而它只影响"在哪里切"，
+    不影响内容（块边界之后仍按行偏移取切片）。
+    """
+    units: list[_Unit] = []
+    pending: list[_Line] = []
+
+    def flush_pending() -> None:
+        if pending:
+            units.append(_Unit(pending[0].start, pending[-1].end, ()))
+            pending.clear()
+
+    for line in lines:
+        if line.is_blank:
+            flush_pending()
+            continue
+        pending.append(line)
     flush_pending()
     return units
 
@@ -276,11 +376,23 @@ class DocumentProcessor:
 
         输入是**已验证的** `SourceDocument`：媒体类型、语言、UTF-8 合法性
         都在上游边界判定（`knowledge.models` 与 HTTP 请求校验）。
-        切块器不猜标题、不猜语言、不做字符集探测 —— 那些都会写出原文里没有的事实。
+        切块器不猜媒体类型、不猜语言、不做字符集探测 —— 那些都会写出
+        原文里没有的事实。**未知媒体类型直接拒绝**，而不是当成纯文本放过去。
+
+        媒体类型决定走哪条解析路径（见模块 docstring）：`text/plain` 不识别
+        标题与围栏，`#` 只是普通文字。
         """
         text = document.content
         lines = _split_lines(text)
-        units = _normalize_units(lines)
+        if document.media_type == "text/markdown":
+            units = _normalize_units(lines)
+        elif document.media_type == "text/plain":
+            units = _normalize_plain_units(lines)
+        else:  # pragma: no cover - `SourceDocument` 已经拒绝过它
+            raise ValueError(
+                f"未知的 media_type：{document.media_type!r}；"
+                "切块器不猜语义，未知类型一律拒绝"
+            )
         line_ends = [line.end for line in lines if line.end > line.start]
 
         created_at = self._clock.now()
