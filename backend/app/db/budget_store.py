@@ -15,6 +15,8 @@ PG 与内存适配器跑的是同一份。
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from app.budget.ports import (
     BudgetAccountFacts,
     ReservationState,
@@ -154,6 +156,78 @@ def hold_to_in_flight_in_conn(conn, *, run_id: str) -> int:
     _move(conn, run_id, from_col="reserved_micro", amount=estimated_micro)
     _add(conn, run_id, col="in_flight_micro", amount=estimated_micro)
     return int(estimated_micro)
+
+
+def resize_held_in_conn(
+    conn,
+    *,
+    run_id: str,
+    estimated_input_tokens: int,
+    estimated_output_tokens: int,
+    max_input_tokens: int,
+    max_output_tokens: int,
+) -> None:
+    """在派发前把占位预留扩大到冻结请求的完整上界。"""
+    from app.budget.ports import estimate_micro
+
+    reservation = conn.execute(
+        "SELECT reservation_id, tenant_id, project_id, state, estimated_micro"
+        " FROM teaching_reservations WHERE run_id = %s FOR UPDATE",
+        (run_id,),
+    ).fetchone()
+    if reservation is None:
+        raise PlatformError(ErrorCode.BUDGET_TREE_INVALID, "运行没有预算预留")
+    reservation_id, tenant_id, project_id, state, old_micro = reservation
+    if state != str(ReservationState.HELD):
+        raise PlatformError(
+            ErrorCode.BUDGET_TREE_INVALID,
+            f"派发前预留必须为 held，当前为 {state}",
+        )
+    # 与 reserve_in_conn 相同的锁顺序：租户后项目。
+    tenant_row = conn.execute(
+        "SELECT total_micro, reserved_micro, in_flight_micro, spent_micro, price_version"
+        " FROM teaching_tenant_budgets WHERE tenant_id = %s FOR UPDATE",
+        (tenant_id,),
+    ).fetchone()
+    project_row = conn.execute(
+        "SELECT total_micro, reserved_micro, in_flight_micro, spent_micro, price_version"
+        " FROM teaching_budgets WHERE tenant_id = %s AND project_id = %s FOR UPDATE",
+        (tenant_id, project_id),
+    ).fetchone()
+    if tenant_row is None or project_row is None:
+        raise PlatformError(ErrorCode.TENANT_CONTEXT_MISSING, "预算账户读取失败")
+    new_micro = estimate_micro(estimated_input_tokens, estimated_output_tokens)
+    tenant_facts = _facts("tenant", tenant_row)
+    project_facts = _facts("project", project_row)
+    assert_capacity(
+        replace(tenant_facts, reserved_micro=tenant_facts.reserved_micro - old_micro),
+        replace(project_facts, reserved_micro=project_facts.reserved_micro - old_micro),
+        estimated_micro=new_micro,
+        estimated_input_tokens=estimated_input_tokens,
+        estimated_output_tokens=estimated_output_tokens,
+        max_input_tokens=max_input_tokens,
+        max_output_tokens=max_output_tokens,
+    )
+    delta = new_micro - int(old_micro)
+    for table, where, params in (
+        ("teaching_tenant_budgets", "tenant_id = %s", (tenant_id,)),
+        (
+            "teaching_budgets",
+            "tenant_id = %s AND project_id = %s",
+            (tenant_id, project_id),
+        ),
+    ):
+        conn.execute(
+            f"UPDATE {table} SET reserved_micro = reserved_micro + %s, updated_at = now()"
+            f" WHERE {where}",
+            (delta, *params),
+        )
+    conn.execute(
+        "UPDATE teaching_reservations SET estimated_micro = %s,"
+        " estimated_input_tokens = %s, estimated_output_tokens = %s, updated_at = now()"
+        " WHERE reservation_id = %s",
+        (new_micro, estimated_input_tokens, estimated_output_tokens, reservation_id),
+    )
 
 
 def settle_in_conn(

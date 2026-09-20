@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+from app.budget.ports import estimate_micro
 from app.core.artifacts import DisplayPolicy
 from app.core.hashing import content_hash
 from app.identity.membership import MembershipStore
@@ -196,10 +197,23 @@ def _snapshot(world: World) -> dict:
     return world.teaching.budget_snapshot(world.actor, world.project_id)
 
 
-#: start_run 的**预留**金额：输入估计（逐字符）+ 输出上界，模拟单价 1/2。
-RESERVE_MICRO = len(QUESTION) * 1 + 2000 * 2
 #: **结算**金额：ScriptedProvider 默认用量（输入 100、输出 50）。
 SETTLED_MICRO = 100 * 1 + 50 * 2
+
+
+def _full_reserve_micro(world: World, run) -> int:
+    """第六轮起按冻结后的完整 prompt 预留，而不只按问题字符数。"""
+    from app.teaching.context import build_context
+
+    context = build_context(
+        run,
+        world.actor,
+        world.project_id,
+        knowledge=world.knowledge,
+        history=(),
+    )
+    input_tokens = sum(len(message.content.encode("utf-8")) + 8 for message in context.messages) + 16
+    return estimate_micro(input_tokens, 2000)
 
 
 # ------------------------------------------------------------ 正常路径
@@ -318,7 +332,7 @@ def test_provider_timeout_goes_to_reconciliation_and_never_redispatches():
     assert world.provider.call_count == 1
 
     snapshot = _snapshot(world)
-    assert snapshot["project"]["in_flight_micro"] == RESERVE_MICRO  # 费用敞口保留
+    assert snapshot["project"]["in_flight_micro"] == _full_reserve_micro(world, run)
 
     # reconciliation 是终态：再跑 worker 不会再派发（自动调用次数仍为 1）。
     assert run_once(world.platform, worker_id="w2") == "idle"
@@ -353,10 +367,10 @@ def test_missing_usage_keeps_exposure_not_zero_cost():
             )
         ]
     )
-    _start_run(world)
+    run = _start_run(world)
     assert run_once(world.platform, worker_id="w1") == "succeeded"
     snapshot = _snapshot(world)
-    assert snapshot["project"]["in_flight_micro"] == RESERVE_MICRO  # 敞口保留
+    assert snapshot["project"]["in_flight_micro"] == _full_reserve_micro(world, run)
     assert snapshot["project"]["spent_micro"] == 0  # 绝不按零结算
     messages = world.products.list_messages(
         world.actor, world.project_id, world.conversation_id
@@ -377,11 +391,11 @@ def test_out_of_bounds_usage_is_not_silently_truncated():
             )
         ]
     )
-    _start_run(world)
+    run = _start_run(world)
     assert run_once(world.platform, worker_id="w1") == "succeeded"
     snapshot = _snapshot(world)
     assert snapshot["project"]["spent_micro"] == 0
-    assert snapshot["project"]["in_flight_micro"] == RESERVE_MICRO
+    assert snapshot["project"]["in_flight_micro"] == _full_reserve_micro(world, run)
 
 
 def test_fake_citations_and_prompt_injection_yield_inference_only():

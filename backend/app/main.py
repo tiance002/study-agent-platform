@@ -32,6 +32,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.auth_routes import router as auth_router
 from app.api.http_idempotency import (
@@ -121,7 +122,7 @@ DEMO_PROJECT = "proj_demo"
 DEFAULT_SESSION_TTL = timedelta(hours=8)
 
 #: 代码预期的数据库迁移版本。启动自检核对它；新增迁移必须同步更新。
-EXPECTED_SCHEMA_VERSION = "0010"
+EXPECTED_SCHEMA_VERSION = "0011"
 
 
 @dataclass
@@ -511,6 +512,9 @@ def create_app(*, platform: PlatformState | None = None) -> FastAPI:
             "以及 cookie 会话认证与 PostgreSQL 持久化装配。"
         ),
     )
+    # The first-party workbench is static so the API and browser share one origin.
+    # That keeps the HttpOnly cookie and strict same-origin CSRF path intact.
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIR), name="frontend-assets")
     app.state.platform = platform or build_platform()
     app.include_router(router)
     app.include_router(auth_router)

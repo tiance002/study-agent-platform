@@ -319,9 +319,17 @@ PostgreSQL 身份与产品仓储：`identity/ports.py`、`db/identity_store.py`�
 - **机械验证**：后端 **493 项**全量测试通过（PG 无 skip）；
   Ruff、mypy、`gen_contracts.py --all --check`、`git diff --check` 通过；临时空库完成
   `upgrade head → downgrade 0004 → upgrade head`，最终版本 `0006`，临时库已删除。
-- **下一轮**：已写
-  `docs/superpowers/plans/2026-09-20-round-4-source-ingestion-retrieval.md`；按用户要求仅给计划，
+- **下一轮**：已写 `docs/superpowers/plans/2026-09-20-round-4-source-ingestion-retrieval.md`；按用户要求仅给计划，
   不实施。范围限定为 durable 摄取、纯文本/Markdown 结构化切块、中文关键词基线、可核验引用。
+
+## 2026-09-20 · 第六轮完成与第七轮启动
+
+- 第六轮先行反例覆盖：过期已派发 attempt 不再重复调用、派发后无权威用量进入待对账、完整上下文预算在调用前拒绝、未来消息不进入旧运行、配置按 run 冻结、已校验引用对用户可见。
+- 新增迁移 `0011_teaching_request_snapshot`：provider attempt 持久化不可变请求快照，失败 attempt 写入满足 PostgreSQL CHECK 的安全 failure payload。
+- 内存与 PostgreSQL 的派发前预算预留都按完整冻结上下文 resize，锁顺序统一为租户账户后项目账户；worker 恢复读取 attempt 状态并拒绝未知结果重派。
+- 新增 `OpenAIResponsesProvider`：官方 Responses HTTP 形状、usage 解析、请求体上界、无隐藏重试；429/5xx/网络不确定结果交给对账语义。未提供云凭据，因此没有宣称真实云端冒烟通过。
+- 强制门禁 `tools/run_round6_gate.py` 实测：全量 `760 passed, 1 skipped`；`-m postgres` 子集 `124 passed`。唯一全量 skip 为非 PostgreSQL 条件用例；PG 持久化集合没有 skip。
+- 第七轮已获实施指令：以 React 为前端约束，把邀请兑换、项目/会话、资料、计划、教学运行与引用回读收进普通用户工作台；先沿用关键词检索和现有异步 worker。
 
 ## 第 4 轮：资料摄取与可核验引用（2026-09-20，8071bcd / a7eaece / 任务 14）
 
@@ -494,4 +502,13 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 ### 第 5 轮起点
 
 - 第 5 轮计划的**任务 0（第四轮修复与前置验收）已完成**；接下来任务 1：provider 与模型边界。
-- 第 6 轮：React 普通用户界面、可访问性与浏览器工作流测试。
+- 第 6 轮：教学可靠性、真实 provider 离线适配器与强制 PostgreSQL 门禁已完成。
+
+## 2026-09-20 · 第七轮完成
+
+- 用本地 React 18 UMD 运行时替换开发演示页，FastAPI 通过 `/assets` 同源提供界面、样式与运行时；页面不再保存或发送 Bearer token。
+- 普通用户浏览器路径已实现：邀请兑换、项目列表/创建、会话创建、异步教学运行轮询、计划保存、资料登记与引用状态展示。
+- 页面处理空数据、加载、服务关闭、预算不足、待对账和会话失效；最后一次教学运行指针保存在浏览器本地并刷新恢复，敏感会话仍只在 HttpOnly Cookie 中。
+- 新增 `backend/tests/test_frontend_assets.py`，守住同源资源与“前端不携带 Authorization”约束。
+- 浏览器验收脚本 `tools/check_round7_browser.py` 已通过：桌面流程完成 Cookie 登录、创建项目、会话、资料、计划和教学关闭态；390px 视口无横向溢出。
+- 最终门禁：全量 `761 passed, 1 skipped`；PostgreSQL 子集 `124 passed`；Ruff、mypy、迁移链、Node 语法检查通过。真实 provider 云端联调和部署发布门仍是上线前阻塞项。

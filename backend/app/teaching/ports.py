@@ -93,6 +93,14 @@ class TeachingRunRepository(Protocol):
         """租户级与项目级账户事实（`BudgetAccountFacts.to_dict`）。"""
         ...
 
+    def get_run_limits(self, claim: RunClaim) -> tuple[int, int]:
+        """读取创建时冻结的输入/输出上限，不能使用 worker 当前配置替代。"""
+        ...
+
+    def attempt_state(self, claim: RunClaim) -> str:
+        """返回该运行唯一 attempt 的状态：none/dispatched/completed/failed/unknown。"""
+        ...
+
     # ------------------------------------------------------------ worker 路径
 
     def claim_run(self, *, worker_id: str, lease_seconds: int) -> RunClaim | None:
@@ -106,6 +114,7 @@ class TeachingRunRepository(Protocol):
         attempt_id: str,
         estimated_input_tokens: int,
         estimated_output_tokens: int,
+        request_payload: dict | None = None,
     ) -> None:
         """派发前持久化：写 attempt 行 + 预算 held → in_flight。
 
@@ -136,6 +145,8 @@ class TeachingRunRepository(Protocol):
         answer_text: str,
         grounding: Grounding,
         usage: TokenUsage | None,
+        citations: tuple[dict, ...] = (),
+        citation_rejections: tuple[dict, ...] = (),
     ) -> TeachingRun:
         """原子落定：唯一 assistant 消息 + 费用结算 + 终态事件 + run succeeded。
 

@@ -404,6 +404,36 @@ def test_finish_without_usage_keeps_exposure_and_succeeds(env):
 
 
 @pytest.mark.invariant
+def test_dispatched_provider_failure_with_usage_commits_failure_payload(env):
+    """失败 attempt 也必须满足 PG 的 result_payload 状态约束。"""
+    actor, project_id, conversation_id = _world(env)
+    run = _start(env, actor, project_id, conversation_id)
+    claim, attempt_id = _claim_and_dispatch(env, run)
+
+    finished = env.teaching.fail_run(
+        claim,
+        error_code="PROVIDER_REFUSED",
+        safe_detail="provider 拒绝",
+        dispatch_happened=True,
+        usage=USAGE,
+    )
+
+    assert finished.status is RunStatus.FAILED
+    snapshot = env.teaching.budget_snapshot(actor, project_id)
+    assert snapshot["project"]["spent_micro"] == EST_MICRO
+    assert snapshot["project"]["in_flight_micro"] == 0
+    if env.is_postgres:
+        dsn = pg_support.require_test_database(pg_support.migration_dsn())
+        with psycopg.connect(dsn) as conn:
+            row = conn.execute(
+                "SELECT status, result_payload FROM provider_attempts WHERE attempt_id = %s",
+                (attempt_id,),
+            ).fetchone()
+        assert row[0] == "failed"
+        assert row[1]["kind"] == "failure"
+
+
+@pytest.mark.invariant
 def test_pre_dispatch_failure_releases_reservation(env):
     actor, project_id, conversation_id = _world(env)
     run = _start(env, actor, project_id, conversation_id)

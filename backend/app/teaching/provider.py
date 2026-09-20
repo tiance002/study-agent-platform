@@ -1,7 +1,8 @@
 """provider 适配器。
 
-首版只带 `ScriptedProvider`（模拟器）：真实云 provider 的适配器在拿到
-可用凭据后按同一协议接入（见 `docs/adr/ADR-015-teaching-provider.md`）。
+首版同时带 `ScriptedProvider`（模拟器）和一个离线可契约测试的真实 HTTP
+适配器；真实云端是否可用仍由部署凭据与启动配置决定（见
+`docs/adr/ADR-015-teaching-provider.md`）。
 模拟器存在的意义不只是开发期占位 —— 反例矩阵里的"派发后超时""缺 usage"
 "错误引用"等场景，在单测里**必须**由它复现，而不是等真服务偶尔抽风。
 
