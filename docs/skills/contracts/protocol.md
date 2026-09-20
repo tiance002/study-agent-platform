@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:917db0a82d2fd8016d5d6c041f207991f70b4164b4cffdc789f201da92078011, generated_at=2026-09-20T04:57:27Z -->
-> 生成时间：2026-09-20T04:57:27Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:b8b72a066ee56020d913847e75ddc18cae064b9b66144287aae6d9083db2496c, generated_at=2026-09-20T08:54:02Z -->
+> 生成时间：2026-09-20T08:54:02Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -31,6 +31,7 @@
 | `/projects/{project_id}/conversations` | POST | Create Conversation |
 | `/projects/{project_id}/conversations/{conversation_id}/messages` | GET | List Messages |
 | `/projects/{project_id}/conversations/{conversation_id}/messages` | POST | Append Message |
+| `/projects/{project_id}/conversations/{conversation_id}/teaching-runs` | POST | Create Teaching Run |
 | `/projects/{project_id}/diagnosis` | GET | Latest Diagnosis |
 | `/projects/{project_id}/diagnosis` | POST | Create Diagnosis |
 | `/projects/{project_id}/ingestion-jobs/{job_id}` | GET | Get Ingestion Job |
@@ -50,11 +51,13 @@
 | `/projects/{project_id}/tasks/{task_id}/submissions` | GET | List Task Submissions |
 | `/projects/{project_id}/tasks/{task_id}/submissions` | POST | Submit Task |
 | `/projects/{project_id}/tasks/{task_id}/transition` | POST | Transition Task |
+| `/projects/{project_id}/teaching-runs/{run_id}` | GET | Get Teaching Run |
+| `/projects/{project_id}/teaching-runs/{run_id}/events` | GET | Stream Teaching Events |
 | `/registry` | GET | Registry View |
 
 ### 稳定错误码
 
-共 40 个，一经发布不得改变语义，只能追加。
+共 41 个，一经发布不得改变语义，只能追加。
 
 | 错误码 |
 |---|
@@ -92,6 +95,7 @@
 | `RATE_LIMITED` |
 | `RECONCILIATION_REQUIRED` |
 | `TAINT_REQUIRES_ENDORSEMENT` |
+| `TEACHING_PROVIDER_DISABLED` |
 | `TENANT_CONTEXT_MISSING` |
 | `TOOL_DECLARATION_INVALID` |
 | `TOOL_INTENT_CONFLICT` |

@@ -41,6 +41,7 @@ from app.api.http_idempotency import (
 from app.api.product_routes import router as product_router
 from app.api.projects_routes import router as projects_router
 from app.api.routes import error_response, request_validation_response, router
+from app.api.teaching_routes import router as teaching_router
 from app.audit.outbox import (
     AuditOutbox,
     InMemoryAuditOutbox,
@@ -515,6 +516,7 @@ def create_app(*, platform: PlatformState | None = None) -> FastAPI:
     app.include_router(auth_router)
     app.include_router(projects_router)
     app.include_router(product_router)
+    app.include_router(teaching_router)
 
     @app.middleware("http")
     async def _bind_request_id(request: Request, call_next):

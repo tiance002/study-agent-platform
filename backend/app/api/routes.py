@@ -531,6 +531,11 @@ def error_response(exc: PlatformError):
         )
     elif exc.code in (ErrorCode.AUDIT_SINK_UNAVAILABLE, ErrorCode.POLICY_GATEWAY_UNAVAILABLE):
         status = 503
+    elif exc.code is ErrorCode.TEACHING_PROVIDER_DISABLED:
+        # 教学功能未启用：配置事实，不是权限问题（403 会误导客户端去
+        # 检查凭据）也不是故障（5xx 会触发重试风暴）。503 + 稳定码 =
+        # "这个功能现在没有，找管理员"。
+        status = 503
     elif exc.code is ErrorCode.RATE_LIMITED:
         # 引导端点限流：可重试的 429，带 Retry-After（秒）。
         status = 429

@@ -66,6 +66,11 @@ class ErrorCode(StrEnum):
     ILLEGAL_STATE_TRANSITION = "ILLEGAL_STATE_TRANSITION"
     RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
 
+    # ---- 模型教学（第五轮）----
+    # provider 未启用是**配置事实**，不是瞬时错误：明确 503 + 这个码，
+    # 绝不静默退回模拟器假装可用。
+    TEACHING_PROVIDER_DISABLED = "TEACHING_PROVIDER_DISABLED"
+
     # ---- 审计 ----
     AUDIT_SINK_UNAVAILABLE = "AUDIT_SINK_UNAVAILABLE"
 
