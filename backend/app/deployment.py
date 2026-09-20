@@ -50,6 +50,17 @@ MIN_SECRET_BYTES = 32
 DEFAULT_EXCHANGE_LIMIT = 20
 DEFAULT_EXCHANGE_WINDOW_SECONDS = 600
 
+#: 教学 provider 的合法开关值（闭集）。`scripted` 仅供测试/演练注入模拟器；
+#: 真实云 provider 接入后在此追加（见 ADR-015）。空值 = disabled。
+TEACHING_PROVIDER_CHOICES = frozenset({"disabled", "scripted", "openai"})
+
+#: 教学输出的默认上限（token）。环境变量可调小；调大不受此默认值限制，
+#: 但生产启动要求显式配置（见 configuration_problems）。
+DEFAULT_TEACHING_MAX_INPUT_TOKENS = 8000
+DEFAULT_TEACHING_MAX_OUTPUT_TOKENS = 2000
+#: 单项目教学预算的默认值（微单位；1 micro = 计费货币的 10^-6）。
+DEFAULT_TEACHING_PROJECT_BUDGET_MICRO = 5_000_000
+
 
 class DeploymentMode(StrEnum):
     DEVELOPMENT = "development"
@@ -114,6 +125,20 @@ class DeploymentSettings:
     #: worker 角色的 DSN（`study_worker`）。默认 `None` = 由 `db.settings` 决定。
     worker_dsn: str | None = None
     worker_dsn_explicitly_set: bool = False
+    # -------------------------------------------------------- 教学（第五轮）
+    #: 教学 provider 开关。`disabled` 时教学端点显式报"功能未启用"，
+    #: 绝不静默退回模拟器 —— "没有凭据还假装能用"比"明确不可用"糟糕得多。
+    teaching_provider: str = "disabled"
+    #: 批准的模型标识。只有这个值会出现在 ProviderRequest 里；
+    #: 客户端无权选择模型（模型是服务端决策，不是请求参数）。
+    teaching_model: str = ""
+    #: 单次请求的输入/输出 token 上限（服务端强制，非模型自觉）。
+    teaching_max_input_tokens: int = DEFAULT_TEACHING_MAX_INPUT_TOKENS
+    teaching_max_output_tokens: int = DEFAULT_TEACHING_MAX_OUTPUT_TOKENS
+    #: 单项目教学预算默认值（微单位）。租户/项目级预算落库后可按项目覆盖。
+    teaching_project_budget_micro: int = DEFAULT_TEACHING_PROJECT_BUDGET_MICRO
+    #: provider 凭据是否在环境中存在（**只记有无，不记值** —— 秘密不进配置对象）。
+    teaching_api_key_present: bool = False
 
     @property
     def is_production(self) -> bool:
@@ -194,6 +219,16 @@ class DeploymentSettings:
             )
         )
 
+        # 教学 provider：闭集校验放在**解析期**（拼错直接启动失败），
+        # 与 STUY_PLATFORM_ENV 同一待遇 —— 拼错的 "diabled" 静默变成
+        # "真实 provider 已启用"是最坏情况，不能留给启动自检兜底。
+        teaching_provider = env.get("STUDY_PLATFORM_TEACHING_PROVIDER", "disabled").strip().lower()
+        if teaching_provider and teaching_provider not in TEACHING_PROVIDER_CHOICES:
+            raise RuntimeError(
+                "STUDY_PLATFORM_TEACHING_PROVIDER 只能是 "
+                f"{sorted(TEACHING_PROVIDER_CHOICES)} 之一，收到 {teaching_provider!r}"
+            )
+
         return cls(
             mode=mode,
             persistence=persistence,
@@ -201,6 +236,29 @@ class DeploymentSettings:
             dsn_explicitly_set="STUDY_PLATFORM_DSN" in env,
             worker_dsn=env.get("STUDY_PLATFORM_WORKER_DSN"),
             worker_dsn_explicitly_set="STUDY_PLATFORM_WORKER_DSN" in env,
+            teaching_provider=teaching_provider or "disabled",
+            teaching_model=env.get("STUDY_PLATFORM_TEACHING_MODEL", "").strip(),
+            teaching_max_input_tokens=int(
+                env.get(
+                    "STUDY_PLATFORM_TEACHING_MAX_INPUT_TOKENS",
+                    str(DEFAULT_TEACHING_MAX_INPUT_TOKENS),
+                )
+            ),
+            teaching_max_output_tokens=int(
+                env.get(
+                    "STUDY_PLATFORM_TEACHING_MAX_OUTPUT_TOKENS",
+                    str(DEFAULT_TEACHING_MAX_OUTPUT_TOKENS),
+                )
+            ),
+            teaching_project_budget_micro=int(
+                env.get(
+                    "STUDY_PLATFORM_TEACHING_PROJECT_BUDGET_MICRO",
+                    str(DEFAULT_TEACHING_PROJECT_BUDGET_MICRO),
+                )
+            ),
+            # 只记**有没有**，值本身留在适配器从环境读取（秘密不进配置对象、
+            # 不进日志、不进数据库）。
+            teaching_api_key_present=bool(env.get("STUDY_PLATFORM_TEACHING_API_KEY")),
             session_secret=session_secret,
             cookie_secret=cookie_secret,
             cookie_previous_secrets=cookie_previous,
@@ -245,6 +303,32 @@ class DeploymentSettings:
             problems.append(
                 f"可信代理条目不能包含空白或逗号（应为 IP 或 CIDR）：{raw!r}"
             )
+
+        # 教学配置的形状校验（任何模式都查 —— 数值荒谬的配置不该等上线才暴露）。
+        if self.teaching_max_input_tokens <= 0 or self.teaching_max_output_tokens <= 0:
+            problems.append(
+                "教学输入/输出 token 上限必须为正"
+                "（STUDY_PLATFORM_TEACHING_MAX_INPUT_TOKENS / "
+                "STUDY_PLATFORM_TEACHING_MAX_OUTPUT_TOKENS）"
+            )
+        if self.teaching_project_budget_micro <= 0:
+            problems.append(
+                "教学项目预算必须为正微单位"
+                "（STUDY_PLATFORM_TEACHING_PROJECT_BUDGET_MICRO）"
+            )
+        if self.teaching_provider == "openai":
+            # 真实 provider：模型必须显式批准 + 凭据必须存在。
+            # key 的值不进这里（秘密不进配置），只查存在性。
+            if not self.teaching_model:
+                problems.append(
+                    "启用教学 provider 时必须显式配置 STUDY_PLATFORM_TEACHING_MODEL"
+                    "（模型是服务端批准的服务端决策，不允许默认值）"
+                )
+            if not self.teaching_api_key_present:
+                problems.append(
+                    "启用教学 provider 时必须提供 STUDY_PLATFORM_TEACHING_API_KEY"
+                    "（凭据只由服务端读取，不进仓库/日志/数据库）"
+                )
         if self.behind_proxy and not self.trusted_proxies:
             problems.append(
                 "开启 STUDY_PLATFORM_BEHIND_PROXY=1 必须同时配置 "
