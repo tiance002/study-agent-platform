@@ -64,6 +64,7 @@ from app.knowledge.models import (
     SourceDocument,
     StoredChunk,
     assert_chunks_belong_to_job,
+    assert_chunks_match_document,
 )
 from app.policy.taint import TaintSource
 
@@ -454,6 +455,21 @@ class PostgresIngestionRepository:
                 self._reject_if_claim_is_stale(conn, job, action="complete")
                 # 走到这里 = 任务已是 succeeded：重复投递，直接返回既有结果。
                 return
+            # 核验对象是**持久化原文**，而且在**同一个事务、写入之前**（R4-05）：
+            # 类型只保证长度对口、`content_hash` 只对片段自身取哈希 ——
+            # 等长的伪内容两者都过得去（实测 `alphabet` → `XXXXXXXX` 一路通过）。
+            # 读的是库里的那一行，不是调用方手里那份对象。
+            stored_text = conn.execute(
+                "SELECT content FROM source_documents WHERE document_id = %s",
+                (job.document_id,),
+            ).fetchone()
+            if stored_text is None:
+                raise deny(
+                    ErrorCode.INTERNAL_CONSISTENCY_ERROR,
+                    "任务对应的原文不在库里，无法核验片段来源",
+                    job_id=job.job_id,
+                )
+            assert_chunks_match_document(job.document_id, stored_text[0], chunks)
             for chunk in chunks:
                 conn.execute(
                     "INSERT INTO source_chunks ("

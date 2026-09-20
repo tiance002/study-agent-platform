@@ -24,6 +24,7 @@ import pg_support
 import psycopg
 import pytest
 from app.core.errors import ErrorCode, PlatformError
+from app.core.hashing import content_hash
 from app.identity.models import Principal
 from app.knowledge.models import (
     CHUNK_PARSER_VERSION,
@@ -584,6 +585,89 @@ def test_an_expired_claim_cannot_settle_even_before_anyone_takes_over(env):
         env.ingestion.get_job(_alice(), project_id, job.job_id).status
         is IngestionStatus.PROCESSING
     )
+    assert env.ingestion.stored_chunks(_alice(), project_id) == ()
+
+
+# ---------------------------------------------------------- 片段来源核验
+
+
+def _forged(document: SourceDocument, *, span: tuple[int, int], content: str):
+    """造一条"长度对口、哈希自洽，但内容不是原文切片"的片段。
+
+    它**能**通过 `StoredChunk` 的全部构造校验 —— 那正是 R4-05 要说明的事：
+    类型约束保证的是长度，`content_hash` 保证的是自洽，两者都不涉及原文。
+    """
+    return StoredChunk(
+        chunk_id=_unique("chk"),
+        tenant_id=document.tenant_id,
+        project_id=document.project_id,
+        source_id=document.source_id,
+        document_id=document.document_id,
+        chunk_index=0,
+        heading_path=(),
+        heading_level=0,
+        span_start=span[0],
+        span_end=span[1],
+        content=content,
+        parser_version=CHUNK_PARSER_VERSION,
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+@pytest.mark.invariant
+def test_a_same_length_forgery_never_reaches_the_database(env):
+    """同长度的伪内容必须被拒，而且**在写入之前**（R4-05）。
+
+    核验对象是**持久化原文**：把 `alphabet` 的片段换成等长的 `XXXXXXXX`，
+    构造层过得去（长度对口）、`content_hash` 也自洽（对片段自身取哈希），
+    R4-05 之前它一路落库并被检索到 —— 而引用回读时会把假的当成真的。
+    """
+    project_id = _project(env)
+    source = _register(env, project_id)
+    document, job = _enqueue(env, project_id, source.source_id, content="alphabet")
+    claimed = env.ingestion.claim_next(worker_id="worker-a", lease_seconds=300)
+    assert claimed is not None
+
+    forged = _forged(document, span=(0, 8), content="XXXXXXXX")
+    # 前提：这条伪片段在**类型层**完全合法。写出来是为了让"它为什么能通过"
+    # 一眼可见 —— 否则下一个人会以为构造校验本该拦住它。
+    assert forged.span_end - forged.span_start == len(forged.content)
+    assert forged.content_hash == content_hash("XXXXXXXX")
+
+    with pytest.raises(PlatformError) as excinfo:
+        env.ingestion.complete(claimed, (forged,))
+    assert excinfo.value.code is ErrorCode.INTERNAL_CONSISTENCY_ERROR
+
+    # 无片段落库、无成功状态（半完成状态不允许出现）。
+    assert env.ingestion.stored_chunks(_alice(), project_id) == ()
+    assert (
+        env.ingestion.get_job(_alice(), project_id, job.job_id).status
+        is IngestionStatus.PROCESSING
+    )
+
+    # 阳性对照：换成**真实切片**就能落定。没有它，上面那两条断言在
+    # "这个任务根本写不进去"时也会通过。
+    real = _chunks_for(document, [(0, 8)])
+    env.ingestion.complete(claimed, real)
+    assert env.ingestion.stored_chunks(_alice(), project_id) == real
+
+
+@pytest.mark.invariant
+def test_a_span_beyond_the_document_is_rejected(env):
+    """跨度越出原文长度必须被拒，且报的是**越界**而不是别的错。
+
+    `match="越出"` 是刻意的：只断言错误码的话，"切片不相等"那条判定
+    也会给出同一个码，于是这条用例证明不了"边界确实被单独检查过"。
+    """
+    project_id = _project(env)
+    source = _register(env, project_id)
+    document, _job = _enqueue(env, project_id, source.source_id, content="alphabet")
+    claimed = env.ingestion.claim_next(worker_id="worker-a", lease_seconds=300)
+    assert claimed is not None
+
+    beyond = _forged(document, span=(0, 999), content="x" * 999)
+    with pytest.raises(PlatformError, match="越出"):
+        env.ingestion.complete(claimed, (beyond,))
     assert env.ingestion.stored_chunks(_alice(), project_id) == ()
 
 

@@ -34,6 +34,7 @@ from app.knowledge.models import (
     SourceDocument,
     StoredChunk,
     assert_chunks_belong_to_job,
+    assert_chunks_match_document,
 )
 from app.product.ports import ProductRepository
 
@@ -263,6 +264,17 @@ class InMemoryIngestionRepository:
                 # 走到这里 = 任务已是 succeeded：重复投递，直接返回既有状态。
                 return
             self._assert_chunk_slots_free(current, chunks)
+            # 核验对象是**持久化原文**，而且必须在写入之前（R4-05）：
+            # 类型只保证长度对口，`content_hash` 只对片段自身取哈希 ——
+            # 等长的伪内容两者都过得去。
+            document = self._documents.get(current.document_id)
+            if document is None:
+                raise deny(
+                    ErrorCode.INTERNAL_CONSISTENCY_ERROR,
+                    "任务对应的原文不在库里，无法核验片段来源",
+                    job_id=current.job_id,
+                )
+            assert_chunks_match_document(current.document_id, document.content, chunks)
             for chunk in chunks:
                 self._chunks[chunk.chunk_id] = chunk
                 self._chunk_slots[(chunk.document_id, chunk.chunk_index)] = chunk.chunk_id

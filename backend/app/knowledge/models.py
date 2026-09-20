@@ -26,10 +26,15 @@
 
 ### 2. `span_end - span_start == len(content)` 是硬不变量
 
-片段内容**就是原文的一个切片**。把这条关系收进 `__post_init__`，
-「引用能回读原文」就不再依赖切块器写对，而是这类对象根本构造不出错的那种。
-切块器一旦算错偏移，第一个片段构造时就炸，而不是等到用户点击引用时才发现引用的
-是别处的文字。
+把这条关系收进 `__post_init__`，「片段的跨度与内容长度对得上」就不再依赖
+切块器写对。切块器一旦算错一个字符，第一个片段构造时就炸，
+而不是等到片段落库之后才发现。
+
+⚠️ **它只保证长度对口**，不保证"片段内容来自原文"：`content_hash` 是对片段
+自身取哈希，同样自洽而与原文无关。实测把原文 `alphabet` 的片段换成等长的
+`XXXXXXXX`，构造、落库、被检索到，一路无事（R4-05）。
+"来自原文"由 `assert_chunks_match_document` 在**写入之前**对**持久化原文**
+核验 —— 那是一道单独的判定，不能由类型约束替代。
 
 ## 时间戳一律带时区
 
@@ -404,8 +409,9 @@ class StoredChunk:
                 f"[{self.span_start}, {self.span_end})"
             )
         if self.span_end - self.span_start != len(self.content):
-            # 这条断言是「引用能回读原文」的机械保证：span 与内容长度必须严丝合缝，
-            # 否则原文切片与片段内容就是两段不同的文字，而它看起来完全正常。
+            # 这条断言只保证**长度对口**：跨度与内容长度必须严丝合缝。
+            # 「内容真的来自原文」是另一回事（`content_hash` 只对片段自身取哈希），
+            # 由 `assert_chunks_match_document` 在写入前对持久化原文核验。
             raise ValueError(
                 f"span 长度（{self.span_end - self.span_start}）必须等于内容长度"
                 f"（{len(self.content)}）—— 片段内容必须是原文的精确切片"
@@ -457,6 +463,56 @@ class StoredChunk:
             "parser_version": self.parser_version,
             "display_policy": str(self.display_policy),
         }
+
+
+def assert_chunks_match_document(
+    document_id: str, content: str, chunks: tuple[StoredChunk, ...]
+) -> None:
+    """片段内容必须是**那一版持久化原文**的精确切片。
+
+    ⚠️ 这是 R4-05 修的那个缺陷：`StoredChunk` 的类型约束只保证
+    `span_end - span_start == len(content)`（**长度对口**），而 `content_hash`
+    是对**片段自身**取哈希（**自洽**）。两者都不涉及原文 —— 实测把原文
+    `alphabet` 的片段内容替换成等长的 `XXXXXXXX`，一路通过构造、落库，
+    并且能被检索到。注释里那句"类型保证了引用能回读原文"是**过强声明**。
+
+    参数刻意是 `(document_id, content)` 而不是一个 `SourceDocument` 对象：
+    核验要读的是**库里那一行**的文本，调用方不该为了"凑出一个对象"而
+    重建文档（重建出来的东西可能与库里的不一致，而那样核验的又是副本）。
+
+    核验必须在**写入之前**：落库后再校验只能掩蔽，不能阻止半完成状态。
+
+    三条判定，各自对着一种"看起来正常"的错：
+
+    1. **文档标识一致**：片段挂的必须是它宣称的那一版原文；
+    2. **跨度在原文范围内**：越界的 span 不是"落空"，是调用方算错了；
+    3. **切片相等**：`content[start:end] == chunk.content`。
+
+    解析器版本**不**在这里比较：`document.parser_version`（原文侧）与
+    `chunk.parser_version`（切块侧）本来就是两件事，将来重新切块时也可能
+    只有片段侧变。要求两者相等会把"两个不同的问题"绑成一条规则。
+    """
+    for chunk in chunks:
+        if chunk.document_id != document_id:
+            raise deny(
+                ErrorCode.CROSS_PROJECT_DENIED,
+                "片段挂的原文标识与本次落定的原文不一致",
+                chunk_id=chunk.chunk_id,
+                document_id=chunk.document_id,
+            )
+        if chunk.span_start < 0 or chunk.span_end > len(content):
+            raise deny(
+                ErrorCode.INTERNAL_CONSISTENCY_ERROR,
+                f"片段跨度 [{chunk.span_start}, {chunk.span_end}) 越出原文长度"
+                f"（{len(content)}）",
+                chunk_id=chunk.chunk_id,
+            )
+        if content[chunk.span_start : chunk.span_end] != chunk.content:
+            raise deny(
+                ErrorCode.INTERNAL_CONSISTENCY_ERROR,
+                "片段内容与原文的对应切片不一致；该引用不可信，拒绝写入",
+                chunk_id=chunk.chunk_id,
+            )
 
 
 def assert_chunks_belong_to_job(
