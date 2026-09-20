@@ -151,7 +151,8 @@ def hold_to_in_flight_in_conn(conn, *, run_id: str) -> int:
         " WHERE reservation_id = %s",
         (reservation_id,),
     )
-    _move(conn, run_id, from_col="reserved_micro", to_col="in_flight_micro", amount=estimated_micro)
+    _move(conn, run_id, from_col="reserved_micro", amount=estimated_micro)
+    _add(conn, run_id, col="in_flight_micro", amount=estimated_micro)
     return int(estimated_micro)
 
 
@@ -184,9 +185,10 @@ def settle_in_conn(
         " updated_at = now() WHERE reservation_id = %s",
         (actual_micro, reservation_id),
     )
-    _move(conn, run_id, from_col="in_flight_micro", to_col="spent_micro", amount=estimated_micro)
-    # 结算差额（估计 ≠ 实际）已体现在 spent 上：spent 记**实际**，
-    # in_flight 释放的是**估计**，两者之差自然反映在可用额度里。
+    # in_flight 释放**估计**，spent 记**实际** —— 估计 ≠ 实际的差额
+    # 自然反映在可用额度里。把估计当实际入账会伪造账目（实测抓下）。
+    _move(conn, run_id, from_col="in_flight_micro", amount=estimated_micro)
+    _add(conn, run_id, col="spent_micro", amount=actual_micro)
 
 
 def release_in_conn(conn, *, run_id: str) -> None:
@@ -211,9 +213,9 @@ def release_in_conn(conn, *, run_id: str) -> None:
         (reservation_id,),
     )
     if state == str(ReservationState.IN_FLIGHT):
-        _move(conn, run_id, from_col="in_flight_micro", to_col=None, amount=estimated_micro)
+        _move(conn, run_id, from_col="in_flight_micro", amount=estimated_micro)
     else:
-        _move(conn, run_id, from_col="reserved_micro", to_col=None, amount=estimated_micro)
+        _move(conn, run_id, from_col="reserved_micro", amount=estimated_micro)
 
 
 def snapshot_in_conn(conn, *, tenant_id: str, project_id: str) -> dict:
@@ -254,8 +256,8 @@ def _facts(scope: str, row: tuple) -> BudgetAccountFacts:
     )
 
 
-def _move(conn, run_id: str, *, from_col: str, to_col: str | None, amount: int) -> None:
-    """在租户与项目两个账户间做同一笔划转。行必须已被 FOR UPDATE 锁住。"""
+def _move(conn, run_id: str, *, from_col: str, amount: int) -> None:
+    """在租户与项目两个账户里同时扣减某一列。行必须已被 FOR UPDATE 锁住。"""
     owner = conn.execute(
         "SELECT tenant_id, project_id FROM teaching_runs WHERE run_id = %s", (run_id,)
     ).fetchone()
@@ -272,9 +274,6 @@ def _move(conn, run_id: str, *, from_col: str, to_col: str | None, amount: int) 
         )
         set_clauses = [f"{from_col} = {from_col} - %s"]
         set_params: list = [amount]
-        if to_col is not None:
-            set_clauses.append(f"{to_col} = {to_col} + %s")
-            set_params.append(amount)
         updated = conn.execute(
             f"UPDATE {table} SET {', '.join(set_clauses)}, updated_at = now()"
             f" WHERE {where}",
@@ -284,4 +283,30 @@ def _move(conn, run_id: str, *, from_col: str, to_col: str | None, amount: int) 
             raise PlatformError(
                 ErrorCode.TENANT_CONTEXT_MISSING,
                 f"预算账户划转未命中（{table}）：RLS 上下文异常",
+            )
+
+
+def _add(conn, run_id: str, *, col: str, amount: int) -> None:
+    """在租户与项目两个账户里同时增加某一列（结算入账）。"""
+    owner = conn.execute(
+        "SELECT tenant_id, project_id FROM teaching_runs WHERE run_id = %s", (run_id,)
+    ).fetchone()
+    if owner is None:  # pragma: no cover - 调用方已确认运行存在
+        raise deny(ErrorCode.CROSS_TENANT_DENIED, "运行不存在", run_id=run_id)
+    tenant_id, project_id = owner
+    for table, where in (
+        ("teaching_tenant_budgets", "tenant_id = %s"),
+        ("teaching_budgets", "tenant_id = %s AND project_id = %s"),
+    ):
+        where_params: list = (
+            [tenant_id, project_id] if "project_id" in where else [tenant_id]
+        )
+        updated = conn.execute(
+            f"UPDATE {table} SET {col} = {col} + %s, updated_at = now() WHERE {where}",
+            tuple([amount, *where_params]),
+        ).rowcount
+        if updated != 1:  # pragma: no cover - 账户行在前面 ensure 过
+            raise PlatformError(
+                ErrorCode.TENANT_CONTEXT_MISSING,
+                f"预算账户入账未命中（{table}）：RLS 上下文异常",
             )

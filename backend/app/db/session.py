@@ -92,6 +92,7 @@ def worker_transaction(
     *,
     tenant_id: str | None = None,
     project_id: str | None = None,
+    principal_id: str | None = None,
     dsn: str | None = None,
 ) -> Iterator[psycopg.Connection]:
     """**worker 角色**的连接 + 可选租户/项目上下文。
@@ -108,6 +109,13 @@ def worker_transaction(
         with conn.transaction():
             if tenant_id is not None and project_id is not None:
                 set_tenant_context(conn, tenant_id=tenant_id, project_id=project_id)
+            if principal_id is not None:
+                # 结算路径的主体上下文：worker 是在**替某次运行的提问者**落定，
+                # teaching_runs 的标准策略因此能命中行（不是伪造身份 ——
+                # principal_id 来自运行行，运行行只能被 worker 角色合法认领到）。
+                conn.execute(
+                    "SELECT set_config('app.principal_id', %s, true)", (principal_id,)
+                )
             yield conn
 
 

@@ -7,8 +7,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:b9a2e0544233522a459979e7e0bc3ea28c20e8414b7531c29dd8820d351a0a7a, generated_at=2026-09-20T08:23:55Z -->
-> 生成时间：2026-09-20T08:23:55Z
+<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:1d03d56411deadd4c8f3f189c70ba401385bfb04898e874e2a50c9447f10832d, generated_at=2026-09-20T09:12:30Z -->
+> 生成时间：2026-09-20T09:12:30Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
@@ -36,7 +36,7 @@
 | `principals` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 4 |
 | `project_grants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 4 |
 | `projects` | 0001 → 0002 改写 | 成员感知 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
-| `provider_attempts` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 13 |
+| `provider_attempts` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 12 |
 | `source_chunks` | 0007 | 租户+项目 | SELECT, INSERT | SELECT, INSERT | 15 |
 | `source_documents` | 0007 | 租户+项目 | SELECT, INSERT | SELECT | 15 |
 | `sources` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 8 |
@@ -44,8 +44,8 @@
 | `task_submissions` | 0005 | 租户+项目+主体 | SELECT, INSERT | — | 8 |
 | `teaching_budgets` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 11 |
 | `teaching_events` | 0010 | 租户+项目 | SELECT, INSERT | SELECT, INSERT | 7 |
-| `teaching_reservations` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 13 |
-| `teaching_runs` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 23 |
+| `teaching_reservations` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 12 |
+| `teaching_runs` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 22 |
 | `teaching_tenant_budgets` | 0010 | 租户 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 8 |
 | `tenants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 3 |
 | `user_sessions` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE, DELETE | — | 6 |
@@ -200,7 +200,6 @@
 | `provider_attempts` | `project_id` | `text` |
 | `provider_attempts` | `run_id` | `text` |
 | `provider_attempts` | `status` | `text` |
-| `provider_attempts` | `('dispatched',` | `'unknown',` |
 | `provider_attempts` | `provider_request_id` | `text` |
 | `provider_attempts` | `result_payload` | `jsonb` |
 | `provider_attempts` | `input_tokens` | `integer` |
@@ -285,7 +284,6 @@
 | `teaching_reservations` | `project_id` | `text` |
 | `teaching_reservations` | `run_id` | `text` |
 | `teaching_reservations` | `state` | `text` |
-| `teaching_reservations` | `('held',` | `'in_flight',` |
 | `teaching_reservations` | `estimated_micro` | `bigint` |
 | `teaching_reservations` | `estimated_input_tokens` | `integer` |
 | `teaching_reservations` | `estimated_output_tokens` | `integer` |
@@ -303,7 +301,6 @@
 | `teaching_runs` | `answer_seq` | `bigint` |
 | `teaching_runs` | `question` | `text` |
 | `teaching_runs` | `status` | `text` |
-| `teaching_runs` | `('queued',` | `'running',` |
 | `teaching_runs` | `attempt_count` | `integer` |
 | `teaching_runs` | `claim_token` | `uuid` |
 | `teaching_runs` | `lease_owner` | `text` |

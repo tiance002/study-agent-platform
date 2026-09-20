@@ -170,8 +170,7 @@ CREATE TABLE teaching_runs (
     answer_message_id text,
     answer_seq      bigint,
     question        text NOT NULL CHECK (octet_length(question) <= 65536),
-    status          text NOT NULL CHECK (status IN
-        ('queued', 'running', 'succeeded', 'failed', 'reconciliation_required')),
+    status          text NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'reconciliation_required')),
     attempt_count   integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
     claim_token     uuid,
     lease_owner     text,
@@ -179,8 +178,7 @@ CREATE TABLE teaching_runs (
     model_id        text NOT NULL,
     prompt_version  text NOT NULL,
     ranking_version text NOT NULL,
-    grounding       text NOT NULL DEFAULT ''
-        CHECK (grounding IN ('', 'sourced', 'inference_only')),
+    grounding       text NOT NULL DEFAULT '' CHECK (grounding IN ('', 'sourced', 'inference_only')),
     error_code      text NOT NULL DEFAULT '',
     error_detail    text NOT NULL DEFAULT '',
     created_at      timestamptz NOT NULL DEFAULT now(),
@@ -210,8 +208,7 @@ CREATE TABLE provider_attempts (
     tenant_id           text NOT NULL REFERENCES tenants (tenant_id),
     project_id          text NOT NULL,
     run_id              text NOT NULL,
-    status              text NOT NULL CHECK (status IN
-        ('dispatched', 'unknown', 'completed', 'failed')),
+    status              text NOT NULL CHECK (status IN ('dispatched', 'unknown', 'completed', 'failed')),
     provider_request_id text NOT NULL DEFAULT '',
     result_payload      jsonb,
     input_tokens        integer,
@@ -288,8 +285,7 @@ CREATE TABLE teaching_reservations (
     tenant_id               text NOT NULL REFERENCES tenants (tenant_id),
     project_id              text NOT NULL,
     run_id                  text NOT NULL,
-    state                   text NOT NULL CHECK (state IN
-        ('held', 'in_flight', 'settled', 'released')),
+    state                   text NOT NULL CHECK (state IN ('held', 'in_flight', 'settled', 'released')),
     estimated_micro         bigint NOT NULL CHECK (estimated_micro > 0),
     estimated_input_tokens  integer NOT NULL CHECK (estimated_input_tokens >= 0),
     estimated_output_tokens integer NOT NULL CHECK (estimated_output_tokens >= 0),
@@ -378,9 +374,17 @@ def upgrade() -> None:
         op.execute(statement)
 
     for table in TABLES:
-        predicate = (
-            _tenant_predicate() if table in TENANT_SCOPED else _project_predicate()
-        )
+        if table in TENANT_SCOPED:
+            predicate = _tenant_predicate()
+        elif table == "teaching_runs":
+            # 运行是**提问者的私人问答**：策略比其它项目级表多一层主体维度
+            # （铁律 33：NOT NULL 的主体列必须在策略里真的被约束）。
+            # worker 策略独立存在（OR 关系），落定不受主体上下文影响。
+            predicate = _project_predicate() + (
+                "\n       AND principal_id = current_setting('app.principal_id', true)"
+            )
+        else:
+            predicate = _project_predicate()
         for statement in _rls_statements(table, predicate):
             op.execute(statement)
 

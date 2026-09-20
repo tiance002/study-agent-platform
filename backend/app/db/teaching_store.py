@@ -41,7 +41,7 @@ from psycopg import errors as pg_errors
 from app.core.clock import Clock, SystemClock
 from app.core.errors import ErrorCode, PlatformError, deny
 from app.db import budget_store
-from app.db.session import tenant_transaction, worker_transaction
+from app.db.session import full_transaction, tenant_transaction, worker_transaction
 from app.identity.models import Principal
 from app.identity.ports import MembershipRepository
 from app.teaching.models import TokenUsage
@@ -123,8 +123,11 @@ class PostgresTeachingRepository:
         reservation_id = f"res_{uuid.uuid4().hex[:12]}"
         user_message_id = f"msg_{uuid.uuid4().hex[:12]}"
         try:
-            with tenant_transaction(
-                tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
+            with full_transaction(
+                tenant_id=actor.tenant_id,
+                project_id=project_id,
+                principal_id=actor.principal_id,
+                dsn=self._dsn,
             ) as conn:
                 # 会话可见性：UPDATE 命中 0 行 = 会话不存在或不属于本项目
                 #（RLS 过滤），统一拒绝。
@@ -207,8 +210,11 @@ class PostgresTeachingRepository:
 
     def get_run(self, actor: Principal, project_id: str, run_id: str) -> TeachingRun:
         self.membership.get(actor, project_id)
-        with tenant_transaction(
-            tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
+        with full_transaction(
+            tenant_id=actor.tenant_id,
+            project_id=project_id,
+            principal_id=actor.principal_id,
+            dsn=self._dsn,
         ) as conn:
             row = conn.execute(
                 "SELECT " + _RUN_COLUMNS + " FROM teaching_runs WHERE run_id = %s",
@@ -222,8 +228,11 @@ class PostgresTeachingRepository:
         self, actor: Principal, project_id: str, run_id: str, *, after_seq: int = 0
     ) -> tuple[TeachingEvent, ...]:
         self.get_run(actor, project_id, run_id)  # 可见性同一出口
-        with tenant_transaction(
-            tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
+        with full_transaction(
+            tenant_id=actor.tenant_id,
+            project_id=project_id,
+            principal_id=actor.principal_id,
+            dsn=self._dsn,
         ) as conn:
             rows = conn.execute(
                 "SELECT run_id, seq, event_type, payload, created_at"
@@ -294,6 +303,7 @@ class PostgresTeachingRepository:
         with worker_transaction(
             tenant_id=claim.run.tenant_id,
             project_id=claim.run.project_id,
+            principal_id=claim.run.principal_id,
             dsn=self._worker_dsn,
         ) as conn:
             current = self._require_live_claim_row(conn, claim.run.run_id, claim.claim_token)
@@ -329,6 +339,7 @@ class PostgresTeachingRepository:
         with worker_transaction(
             tenant_id=claim.run.tenant_id,
             project_id=claim.run.project_id,
+            principal_id=claim.run.principal_id,
             dsn=self._worker_dsn,
         ) as conn:
             if self._require_live_claim_row(conn, claim.run.run_id, claim.claim_token) is None:
@@ -358,6 +369,7 @@ class PostgresTeachingRepository:
         with worker_transaction(
             tenant_id=claim.run.tenant_id,
             project_id=claim.run.project_id,
+            principal_id=claim.run.principal_id,
             dsn=self._worker_dsn,
         ) as conn:
             row = conn.execute(
@@ -465,6 +477,7 @@ class PostgresTeachingRepository:
         with worker_transaction(
             tenant_id=claim.run.tenant_id,
             project_id=claim.run.project_id,
+            principal_id=claim.run.principal_id,
             dsn=self._worker_dsn,
         ) as conn:
             row = conn.execute(
@@ -533,6 +546,7 @@ class PostgresTeachingRepository:
         with worker_transaction(
             tenant_id=claim.run.tenant_id,
             project_id=claim.run.project_id,
+            principal_id=claim.run.principal_id,
             dsn=self._worker_dsn,
         ) as conn:
             row = conn.execute(
@@ -581,6 +595,7 @@ class PostgresTeachingRepository:
         with worker_transaction(
             tenant_id=claim.run.tenant_id,
             project_id=claim.run.project_id,
+            principal_id=claim.run.principal_id,
             dsn=self._worker_dsn,
         ) as conn:
             if self._require_live_claim_row(conn, claim.run.run_id, claim.claim_token) is None:
