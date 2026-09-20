@@ -7,15 +7,20 @@
 - `cookie_project` 是 **cookie 主路径**的共享起点：签发邀请 → 兑换会话 → 建项目。
   摄取与检索两处都要用它。每个文件各抄一份登录舞蹈，正是某一天两份会分叉的地方
   （比如一处忘了断言兑换状态码），而分叉的结果是"有一个文件的身份根本不是真的"。
+- `pg_database` 是**PostgreSQL 测试的强制前置**：整场会话跑在一个随机临时库上，
+  结束即删除。业务库里的在途任务不是测试的耗材（见 `pgtest.py` 的模块 docstring）。
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 import uuid
+from collections.abc import Iterator
 from datetime import timedelta
 
+import pgtest
 import pytest
 from app.identity.ports import SystemContext
 from app.main import (
@@ -26,6 +31,44 @@ from app.main import (
     create_app,
 )
 from fastapi.testclient import TestClient
+
+
+@pytest.fixture(scope="session", autouse=True)
+def pg_database() -> Iterator[pgtest.TestDatabase | None]:
+    """整场会话共用一个**随机临时库**，并把 DSN 环境变量指向它。
+
+    为什么是会话级而不是逐用例：建库要跑一遍全部迁移（秒级），
+    逐用例建库会把测试时间乘以用例数；而用例之间的互相干扰由
+    「每个用例用随机 id 建自己的租户/项目」解决，不靠换库。
+
+    为什么必须换库（而不是只用随机 id 就够）：`claim_next` 是跨租户的
+    系统级操作，测试为了独占队列必须排空**全库**未终态任务 ——
+    在业务库上做这件事就是终结用户的任务，而且测试全绿看不出来。
+
+    ⚠️ **`autouse` 不是图省事，是必需的**：环境变量是本会话的全局状态。
+    如果某个模块 opt-in、另一个模块不管，就会出现"模块级夹具（播种租户）
+    连业务库、用例体连临时库"的分裂 —— 表现是"单独跑绿、一起跑红"，
+    而根因（环境变量在这一场里翻转过）从失败信息里完全看不出来。
+
+    PG 不可达时 yield `None`：模块级的 `skipif` 负责跳过 PG 用例，
+    内存用例不受牵连。
+    """
+    if not pgtest.reachable():
+        yield None
+        return
+
+    database = pgtest.create_test_database()
+    saved = {name: os.environ.get(name) for name in pgtest.DSN_ENV_VARS}
+    os.environ.update(database.env())
+    try:
+        yield database
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        pgtest.drop_test_database(database)
 
 
 @pytest.fixture

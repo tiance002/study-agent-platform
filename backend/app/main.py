@@ -64,7 +64,7 @@ from app.db.ingestion_store import PostgresIngestionRepository
 from app.db.learning_store import PostgresLearningLoopRepository
 from app.db.product_store import PostgresProductRepository
 from app.db.rate_limit_store import PostgresRateLimiter
-from app.db.settings import DEFAULT_APP_DSN
+from app.db.settings import app_dsn
 from app.deployment import DeploymentSettings
 from app.execution.confirmation import ConfirmationRepository, ConfirmationStore
 from app.execution.state_machine import ActionStateMachine
@@ -267,7 +267,11 @@ def build_platform(
     audit_outbox: AuditOutbox
 
     if loaded.use_postgres:
-        dsn = loaded.dsn or DEFAULT_APP_DSN
+        # ⚠️ 回退值必须走 `app_dsn()`（读 `STUDY_PLATFORM_DSN`），不能写死
+        # `DEFAULT_APP_DSN`：那样"环境变量说一套、装配连另一套"就成了可能，
+        # 而两边看起来都正常 —— 实测后果是测试把数据写进业务库，测试全绿。
+        # 同一个事实（应用连哪个库）只能有一个出口。
+        dsn = loaded.dsn or app_dsn()
         # 无论是生产还是开发态显式选择 postgres：连不上 / 版本不对都必须
         # 在启动时暴露，而不是等第一个请求 500。
         _verify_database_ready(dsn, expected_version=EXPECTED_SCHEMA_VERSION)

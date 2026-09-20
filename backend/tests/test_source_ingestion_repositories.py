@@ -14,12 +14,12 @@
 
 from __future__ import annotations
 
-import os
 import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+import pgtest
 import psycopg
 import pytest
 from app.core.errors import ErrorCode, PlatformError
@@ -32,10 +32,8 @@ from app.knowledge.models import (
 )
 from app.product.models import SourceRecord
 
-MIGRATION_DSN = os.environ.get(
-    "STUDY_PLATFORM_MIGRATION_DSN",
-    "postgresql://postgres@127.0.0.1:5432/study_platform",
-)
+#: 整场会话跑在随机临时库上（`conftest.pg_database`，会话级 autouse）——
+#: 本文件有跨租户的排空操作，绝不允许在业务库上执行。
 
 TENANT = "t_ing_pg"
 OTHER_TENANT = "t_ing_pg_other"
@@ -46,14 +44,6 @@ CAROL = "u_ing_pg_carol"
 CONTENT = "# 事务\n\n提交成功。\n\n## 回滚\n\n失败时回滚。"
 
 
-def _postgres_reachable() -> bool:
-    try:
-        with psycopg.connect(MIGRATION_DSN, connect_timeout=2):
-            return True
-    except Exception:
-        return False
-
-
 def _drain_queue() -> None:
     """把遗留的未终态任务推进到终态，让每个用例都从空队列开始。
 
@@ -62,10 +52,13 @@ def _drain_queue() -> None:
     包括上一次运行、上一个用例留下的。用超级用户连接直接写终态，
     是因为这一步要绕过 RLS 才能覆盖所有租户。
 
-    这也解释了为什么本文件的 PG 用例不能依赖"数据库是干净的"：
-    **跨运行持久化是设计的性质，不是测试环境的偶然**。
+    ⚠️ **只能发生在临时测试库上**：这一句会终结目标库里所有在途任务，
+    指向业务库时就是"跑一次测试，用户全部上传卡死"。所以先过
+    `require_test_database`（库名不以 `study_test_` 开头直接拒绝），
+    失败发生在**任何写入之前**。
     """
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    dsn = pgtest.require_test_database(pgtest.migration_dsn())
+    with psycopg.connect(dsn) as conn:
         with conn.transaction():
             conn.execute(
                 "UPDATE ingestion_jobs"
@@ -80,9 +73,9 @@ def _drain_queue() -> None:
 def pg_seed() -> None:
     """租户与主体用超级用户写（运维动作）。库不可达时静默返回：
     postgres 参数上的 skipif 负责跳过 PG 用例，内存用例不被牵连。"""
-    if not _postgres_reachable():
+    if not pgtest.reachable():
         return
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pgtest.migration_dsn()) as conn:
         with conn.transaction():
             for tenant in (TENANT, OTHER_TENANT):
                 conn.execute(
@@ -117,7 +110,7 @@ class Env:
             marks=[
                 pytest.mark.postgres,
                 pytest.mark.skipif(
-                    not _postgres_reachable(),
+                    not pgtest.reachable(),
                     reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）",
                 ),
             ],
@@ -519,7 +512,7 @@ def test_stored_chunks_are_scoped_to_the_project(env):
 @pytest.mark.postgres
 @pytest.mark.invariant
 @pytest.mark.skipif(
-    not _postgres_reachable(), reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）"
+    not pgtest.reachable(), reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）"
 )
 def test_app_role_really_cannot_mutate_immutable_tables():
     """「原文与片段不可变」必须由**权限系统**保证，而不是靠代码自觉。
@@ -531,7 +524,7 @@ def test_app_role_really_cannot_mutate_immutable_tables():
     （铁律 34 的同类问题：`http_idempotency` 曾只受租户级策略保护，
     而声明常量写着"租户级"，看起来完全正常 —— 没人问过"为什么这张表不加这一层"。）
     """
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pgtest.migration_dsn()) as conn:
         rows = conn.execute(
             "SELECT table_name, privilege_type FROM information_schema.table_privileges"
             " WHERE grantee = 'study_app'"

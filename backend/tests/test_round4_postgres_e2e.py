@@ -29,12 +29,12 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
+import pgtest
 import psycopg
 import pytest
 from app.core.hashing import content_hash
@@ -45,11 +45,6 @@ from app.knowledge.retrieval import RANKING_VERSION
 from app.main import PlatformState, build_platform, create_app
 from app.workers.ingestion import run_once
 from fastapi.testclient import TestClient
-
-MIGRATION_DSN = os.environ.get(
-    "STUDY_PLATFORM_MIGRATION_DSN",
-    "postgresql://postgres@127.0.0.1:5432/study_platform",
-)
 
 ORIGIN = "http://testserver"
 
@@ -76,18 +71,15 @@ DOCUMENT = (
 )
 
 
-def _reachable() -> bool:
-    try:
-        with psycopg.connect(MIGRATION_DSN, connect_timeout=2):
-            return True
-    except Exception:
-        return False
-
-
 pytestmark = [
     pytest.mark.postgres,
     pytest.mark.invariant,
-    pytest.mark.skipif(not _reachable(), reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）"),
+    # 整场会话跑在随机临时库上（`conftest.pg_database`，会话级 autouse）：
+    # 本文件要排空跨租户队列（`_drain_queue`），在业务库上做这件事会终结
+    # 用户的在途任务，而测试全绿看不出来。
+    pytest.mark.skipif(
+        not pgtest.reachable(), reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）"
+    ),
 ]
 
 
@@ -125,17 +117,18 @@ def _headers(key: str) -> dict[str, str]:
 
 
 def _drain_queue() -> None:
-    """把全库遗留的未终态任务推进到终态，让本用例从空队列开始。
+    """把遗留的未终态任务推进到终态，让本用例从空队列开始。
 
     为什么必须显式做：`claim_next` 是**跨租户**的系统级操作（worker 要先发现
     "哪个租户有活干"），拿回来的是全库最早的一条排队任务 —— 包括上一次运行、
     上一个用例留下的。用超级用户连接直接写终态，是因为这一步要绕过 RLS
     才能覆盖所有租户。
 
-    这也意味着本文件的 PG 用例**不能假设数据库是干净的**：
-    跨运行持久化是设计的性质，不是测试环境的偶然。
+    ⚠️ 这一句会终结目标库里**所有**在途任务，所以先过 `require_test_database`：
+    指向业务库时在**任何写入之前**失败，而不是先把用户的任务杀掉再报错。
     """
-    with psycopg.connect(MIGRATION_DSN) as conn, conn.transaction():
+    dsn = pgtest.require_test_database(pgtest.migration_dsn())
+    with psycopg.connect(dsn) as conn, conn.transaction():
         conn.execute(
             "UPDATE ingestion_jobs"
             " SET status = 'failed', error_code = 'TEST_DRAIN',"
@@ -152,7 +145,7 @@ def _expire_lease(job_id: str) -> None:
     则根本不可行；而租约过期的语义就是"`lease_until` 落在 `now()` 之前"，
     把那一列改掉是这句话的**逐字**实现，不是近似。
     """
-    with psycopg.connect(MIGRATION_DSN) as conn, conn.transaction():
+    with psycopg.connect(pgtest.migration_dsn()) as conn, conn.transaction():
         updated = conn.execute(
             "UPDATE ingestion_jobs SET lease_until = now() - interval '1 second'"
             " WHERE job_id = %s",
@@ -169,7 +162,7 @@ def _seed_tenant(prefix: str, name: str) -> tuple[str, str]:
     """
     suffix = uuid.uuid4().hex
     tenant_id, principal_id = f"t_{prefix}_{suffix}", f"u_{prefix}_{suffix}"
-    with psycopg.connect(MIGRATION_DSN) as conn, conn.transaction():
+    with psycopg.connect(pgtest.migration_dsn()) as conn, conn.transaction():
         conn.execute(
             "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)", (tenant_id, name)
         )
