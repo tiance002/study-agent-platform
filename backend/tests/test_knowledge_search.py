@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pgtest
+import pg_support
 import psycopg
 import pytest
 from app.core.clock import SystemClock
@@ -63,14 +63,14 @@ def pg_seed() -> None:
     """租户与主体是**运维动作**，所以用超级用户写。库不可达时静默返回：
     postgres 参数上的 skipif 负责跳过，内存用例不被牵连。
 
-    ⚠️ DSN 一律在**调用时**从 `pgtest` 取，不要在模块层存成常量：
+    ⚠️ DSN 一律在**调用时**从 `pg_support` 取，不要在模块层存成常量：
     会话夹具（`conftest.pg_database`）是在导入**之后**才把环境变量指向
     临时库的，导入期读到的会是业务库 —— 于是"夹具往业务库播种、用例体
     在临时库断言"，表现是"单独跑绿、一起跑红"。
     """
-    if not pgtest.reachable():
+    if not pg_support.reachable():
         return
-    with psycopg.connect(pgtest.migration_dsn()) as conn, conn.transaction():
+    with psycopg.connect(pg_support.migration_dsn()) as conn, conn.transaction():
         for tenant in (TENANT, OTHER_TENANT):
             conn.execute(
                 "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)"
@@ -103,7 +103,7 @@ class Env:
             marks=[
                 pytest.mark.postgres,
                 pytest.mark.skipif(
-                    not pgtest.reachable(),
+                    not pg_support.reachable(),
                     reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）",
                 ),
             ],

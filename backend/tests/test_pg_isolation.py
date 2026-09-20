@@ -19,23 +19,12 @@
 
 from __future__ import annotations
 
-import uuid
-from datetime import datetime, timedelta, timezone
-
-import pgtest
+import pg_support
 import psycopg
 import pytest
-from app.core.hashing import content_hash
 from app.deployment import DeploymentSettings
 from app.main import build_platform
 from test_source_ingestion_repositories import _drain_queue
-
-CONTENT = "# sentinel\n\n哨兵段落。\n"
-
-#: sentinel 的租约时长。足够长：本条用例不可能跑一小时，
-#: 而有效租约让真实运行的 worker 无法认领它（见模块 docstring）。
-_ONE_HOUR = timedelta(hours=1)
-
 
 # ------------------------------------------------------------ 一、库名即凭证
 
@@ -48,17 +37,17 @@ def test_require_test_database_refuses_the_business_database():
     """
     business = "postgresql://postgres@127.0.0.1:5432/study_platform"
     with pytest.raises(RuntimeError, match="study_test_"):
-        pgtest.require_test_database(business)
+        pg_support.require_test_database(business)
 
     accepted = "postgresql://postgres@127.0.0.1:5432/study_test_abc123"
-    assert pgtest.require_test_database(accepted) == accepted
+    assert pg_support.require_test_database(accepted) == accepted
 
 
 def test_database_name_ignores_query_parameters_and_slash():
-    assert pgtest.database_name("postgresql://u@h:5432/db?sslmode=disable") == "db"
-    assert pgtest.database_name("postgresql://u@h:5432/") == ""
-    assert pgtest.is_test_database("postgresql://u@h/study_test_x") is True
-    assert pgtest.is_test_database(pgtest.business_dsn()) is False
+    assert pg_support.database_name("postgresql://u@h:5432/db?sslmode=disable") == "db"
+    assert pg_support.database_name("postgresql://u@h:5432/") == ""
+    assert pg_support.is_test_database("postgresql://u@h/study_test_x") is True
+    assert pg_support.is_test_database(pg_support.business_dsn()) is False
 
 
 # -------------------------------------------------- 二、临时库确实是临时库
@@ -73,135 +62,20 @@ def test_the_active_dsns_point_at_a_temporary_database(pg_database):
     if pg_database is None:
         pytest.skip("本地 PostgreSQL 未运行（scripts\\pg_start.cmd）")
 
-    assert pg_database.name.startswith(pgtest.TEST_DATABASE_PREFIX)
+    assert pg_database.name.startswith(pg_support.TEST_DATABASE_PREFIX)
     for dsn in (
-        pgtest.migration_dsn(),
-        pgtest.app_dsn(),
-        pgtest.worker_dsn(),
+        pg_support.migration_dsn(),
+        pg_support.app_dsn(),
+        pg_support.worker_dsn(),
     ):
-        assert pgtest.is_test_database(dsn), dsn
-        assert pgtest.database_name(dsn) == pg_database.name
+        assert pg_support.is_test_database(dsn), dsn
+        assert pg_support.database_name(dsn) == pg_database.name
 
     # 业务库与临时库是两个库 —— 否则下面那条哨兵断言等于自己跟自己比。
-    assert pgtest.database_name(pgtest.business_dsn()) != pg_database.name
+    assert pg_support.database_name(pg_support.business_dsn()) != pg_database.name
 
 
 # ------------------------------------------------- 三、排空只打到临时库
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _seed_job(dsn: str, *, queued: bool) -> dict[str, str]:
-    """在 `dsn` 指向的库里造一条 sentinel 任务（含完整的父链）。
-
-    `queued=True` 造一条排队中的任务（排空的靶子）；
-    `queued=False` 造一条 `processing` 且**租约有效**的任务（同样是靶子，
-    但不会被真实 worker 认领）。
-    """
-    tag = uuid.uuid4().hex[:10]
-    ids = {
-        "tenant_id": f"t_sentinel_{tag}",
-        "principal_id": f"u_sentinel_{tag}",
-        "project_id": f"proj_sentinel_{tag}",
-        "source_id": f"src_sentinel_{tag}",
-        "document_id": f"doc_sentinel_{tag}",
-        "job_id": f"job_sentinel_{tag}",
-    }
-    with psycopg.connect(dsn) as conn, conn.transaction():
-        conn.execute(
-            "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)",
-            (ids["tenant_id"], "sentinel"),
-        )
-        conn.execute(
-            "INSERT INTO principals (principal_id, tenant_id) VALUES (%s, %s)",
-            (ids["principal_id"], ids["tenant_id"]),
-        )
-        conn.execute(
-            "INSERT INTO projects (project_id, tenant_id, name) VALUES (%s, %s, %s)",
-            (ids["project_id"], ids["tenant_id"], "sentinel"),
-        )
-        conn.execute(
-            "INSERT INTO sources (source_id, tenant_id, project_id, display_name,"
-            " media_type, identity_hash, acquisition)"
-            " VALUES (%s, %s, %s, %s, %s, %s, '{}'::jsonb)",
-            (
-                ids["source_id"],
-                ids["tenant_id"],
-                ids["project_id"],
-                "sentinel.md",
-                "text/markdown",
-                "sha256:" + tag,
-            ),
-        )
-        conn.execute(
-            "INSERT INTO source_documents (document_id, tenant_id, project_id,"
-            " source_id, version, document_title, content, content_hash, media_type,"
-            " language, parser_version, acquisition_method, observed_at)"
-            " VALUES (%s, %s, %s, %s, 1, %s, %s, %s, 'text/markdown', 'zh',"
-            " 'text/v1', 'upload', %s)",
-            (
-                ids["document_id"],
-                ids["tenant_id"],
-                ids["project_id"],
-                ids["source_id"],
-                "sentinel",
-                CONTENT,
-                content_hash(CONTENT),
-                _now(),
-            ),
-        )
-        conn.execute(
-            "INSERT INTO ingestion_jobs (job_id, tenant_id, project_id, source_id,"
-            " document_id, status, attempt_count, lease_owner, lease_until)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (
-                ids["job_id"],
-                ids["tenant_id"],
-                ids["project_id"],
-                ids["source_id"],
-                ids["document_id"],
-                "queued" if queued else "processing",
-                0 if queued else 1,
-                None if queued else "sentinel-holder",
-                None if queued else _now().replace(microsecond=0) + _ONE_HOUR,
-            ),
-        )
-    return ids
-
-
-def _job_state(dsn: str, job_id: str) -> dict:
-    """任务的可观测状态。**逐字段比较**，不只看 status。"""
-    with psycopg.connect(dsn) as conn:
-        row = conn.execute(
-            "SELECT status, attempt_count, error_code, error_detail, lease_owner,"
-            " updated_at FROM ingestion_jobs WHERE job_id = %s",
-            (job_id,),
-        ).fetchone()
-    assert row is not None, f"{job_id} 不见了 —— 那本身就是被改动过的证据"
-    return {
-        "status": row[0],
-        "attempt_count": row[1],
-        "error_code": row[2],
-        "error_detail": row[3],
-        "lease_owner": row[4],
-        "updated_at": row[5],
-    }
-
-
-def _cleanup_job(dsn: str, ids: dict[str, str]) -> None:
-    with psycopg.connect(dsn) as conn, conn.transaction():
-        conn.execute("DELETE FROM ingestion_jobs WHERE job_id = %s", (ids["job_id"],))
-        conn.execute(
-            "DELETE FROM source_documents WHERE document_id = %s", (ids["document_id"],)
-        )
-        conn.execute("DELETE FROM sources WHERE source_id = %s", (ids["source_id"],))
-        conn.execute("DELETE FROM projects WHERE project_id = %s", (ids["project_id"],))
-        conn.execute(
-            "DELETE FROM principals WHERE principal_id = %s", (ids["principal_id"],)
-        )
-        conn.execute("DELETE FROM tenants WHERE tenant_id = %s", (ids["tenant_id"],))
 
 
 @pytest.mark.postgres
@@ -211,25 +85,25 @@ def test_draining_the_queue_only_reaches_the_temporary_database(pg_database):
     if pg_database is None:
         pytest.skip("本地 PostgreSQL 未运行（scripts\\pg_start.cmd）")
 
-    business = pgtest.business_dsn()
-    business_ids = _seed_job(business, queued=False)
-    temporary_ids = _seed_job(pg_database.migration_dsn, queued=True)
+    business = pg_support.business_dsn()
+    business_ids = pg_support.seed_job(business, status="processing")
+    temporary_ids = pg_support.seed_job(pg_database.migration_dsn)
     try:
-        before = _job_state(business, business_ids["job_id"])
+        before = pg_support.job_state(business, business_ids.job_id)
 
         _drain_queue()
 
         # 阳性对照：排空**确实**跑过，并且打到了临时库里的那条。
         assert (
-            _job_state(pg_database.migration_dsn, temporary_ids["job_id"])["status"]
+            pg_support.job_state(pg_database.migration_dsn, temporary_ids.job_id)["status"]
             == "failed"
         ), "临时库里的排队任务没有被排空 —— 那说明下面的'业务库没变'什么也没证明"
 
-        assert _job_state(business, business_ids["job_id"]) == before, (
+        assert pg_support.job_state(business, business_ids.job_id) == before, (
             "业务库里的 sentinel 被测试改动了：排空打错了库"
         )
     finally:
-        _cleanup_job(business, business_ids)
+        pg_support.cleanup_job(business, business_ids)
 
 
 # ------------------------------- 四、装配层必须尊重环境里的 DSN
@@ -250,7 +124,7 @@ def test_platform_honours_the_environment_dsn(pg_database, monkeypatch, tmp_path
     if pg_database is None:
         pytest.skip("本地 PostgreSQL 未运行（scripts\\pg_start.cmd）")
 
-    absent = pgtest.with_database(pgtest.app_dsn(), "study_test_absent_a1b2c3")
+    absent = pg_support.with_database(pg_support.app_dsn(), "study_test_absent_a1b2c3")
     monkeypatch.setenv("STUDY_PLATFORM_DSN", absent)
 
     settings = DeploymentSettings.load({"STUDY_PLATFORM_PERSISTENCE": "postgres"})

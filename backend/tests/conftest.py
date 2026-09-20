@@ -8,7 +8,7 @@
   摄取与检索两处都要用它。每个文件各抄一份登录舞蹈，正是某一天两份会分叉的地方
   （比如一处忘了断言兑换状态码），而分叉的结果是"有一个文件的身份根本不是真的"。
 - `pg_database` 是**PostgreSQL 测试的强制前置**：整场会话跑在一个随机临时库上，
-  结束即删除。业务库里的在途任务不是测试的耗材（见 `pgtest.py` 的模块 docstring）。
+  结束即删除。业务库里的在途任务不是测试的耗材（见 `pg_support.py` 的模块 docstring）。
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import uuid
 from collections.abc import Iterator
 from datetime import timedelta
 
-import pgtest
+import pg_support
 import pytest
 from app.identity.ports import SystemContext
 from app.main import (
@@ -34,7 +34,7 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture(scope="session", autouse=True)
-def pg_database() -> Iterator[pgtest.TestDatabase | None]:
+def pg_database() -> Iterator[pg_support.TestDatabase | None]:
     """整场会话共用一个**随机临时库**，并把 DSN 环境变量指向它。
 
     为什么是会话级而不是逐用例：建库要跑一遍全部迁移（秒级），
@@ -53,12 +53,12 @@ def pg_database() -> Iterator[pgtest.TestDatabase | None]:
     PG 不可达时 yield `None`：模块级的 `skipif` 负责跳过 PG 用例，
     内存用例不受牵连。
     """
-    if not pgtest.reachable():
+    if not pg_support.reachable():
         yield None
         return
 
-    database = pgtest.create_test_database()
-    saved = {name: os.environ.get(name) for name in pgtest.DSN_ENV_VARS}
+    database = pg_support.create_test_database()
+    saved = {name: os.environ.get(name) for name in pg_support.DSN_ENV_VARS}
     os.environ.update(database.env())
     try:
         yield database
@@ -68,7 +68,7 @@ def pg_database() -> Iterator[pgtest.TestDatabase | None]:
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
-        pgtest.drop_test_database(database)
+        pg_support.drop_test_database(database)
 
 
 @pytest.fixture

@@ -33,15 +33,17 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import psycopg
+from app.core.hashing import content_hash
 
 #: 测试库的库名前缀。**库名即凭证**：只有这个前缀的库允许被排空/重建。
 TEST_DATABASE_PREFIX = "study_test_"
 
-#: 仓库根目录（`backend/tests/pgtest.py` 往上三层）。
+#: 仓库根目录（`backend/tests/pg_support.py` 往上三层）。
 ROOT = Path(__file__).resolve().parents[2]
 
 #: `CREATE` / `DROP DATABASE` 要连到 `postgres` 维护库，不能连目标库本身。
@@ -220,3 +222,137 @@ def temp_test_database() -> Iterator[TestDatabase]:
         yield database
     finally:
         drop_test_database(database)
+
+
+# ------------------------------------------------------------- 队列哨兵与状态
+
+#: 哨兵任务的原文。内容不重要，重要的是它经过完整的父链（租户→项目→资料→原文→任务），
+#: 与真实摄取写入的行**结构完全相同** —— 否则它证明不了真实写入路径的行为。
+SENTINEL_CONTENT = "# sentinel\n\n哨兵段落。\n"
+
+#: 哨兵租约时长。足够长：用例不可能跑一小时；而**有效租约**让真实运行的 worker
+#: 无法认领它 —— 用一条排队中的任务会把"有人刚好在跑 worker"变成偶发失败。
+SENTINEL_LEASE = timedelta(hours=1)
+
+
+@dataclass(frozen=True)
+class SeededJob:
+    tenant_id: str
+    principal_id: str
+    project_id: str
+    source_id: str
+    document_id: str
+    job_id: str
+
+
+def seed_job(dsn: str, *, status: str = "queued", tag: str | None = None) -> SeededJob:
+    """在 `dsn` 指向的库里造一条 sentinel 任务（含完整父链）。
+
+    `status="queued"` 造排队中的任务（排空的靶子）；
+    `status="processing"` 造带**有效租约**的处理中任务（同样是排空的靶子，
+    但不会被真实 worker 认领）。
+    """
+    suffix = tag or uuid.uuid4().hex[:10]
+    ids = SeededJob(
+        tenant_id=f"t_sentinel_{suffix}",
+        principal_id=f"u_sentinel_{suffix}",
+        project_id=f"proj_sentinel_{suffix}",
+        source_id=f"src_sentinel_{suffix}",
+        document_id=f"doc_sentinel_{suffix}",
+        job_id=f"job_sentinel_{suffix}",
+    )
+    processing = status == "processing"
+    with psycopg.connect(dsn) as conn, conn.transaction():
+        conn.execute(
+            "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)",
+            (ids.tenant_id, "sentinel"),
+        )
+        conn.execute(
+            "INSERT INTO principals (principal_id, tenant_id) VALUES (%s, %s)",
+            (ids.principal_id, ids.tenant_id),
+        )
+        conn.execute(
+            "INSERT INTO projects (project_id, tenant_id, name) VALUES (%s, %s, %s)",
+            (ids.project_id, ids.tenant_id, "sentinel"),
+        )
+        conn.execute(
+            "INSERT INTO sources (source_id, tenant_id, project_id, display_name,"
+            " media_type, identity_hash, acquisition)"
+            " VALUES (%s, %s, %s, %s, %s, %s, '{}'::jsonb)",
+            (
+                ids.source_id,
+                ids.tenant_id,
+                ids.project_id,
+                "sentinel.md",
+                "text/markdown",
+                "sha256:" + suffix,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO source_documents (document_id, tenant_id, project_id,"
+            " source_id, version, document_title, content, content_hash, media_type,"
+            " language, parser_version, acquisition_method, observed_at)"
+            " VALUES (%s, %s, %s, %s, 1, %s, %s, %s, 'text/markdown', 'zh',"
+            " 'text/v1', 'upload', %s)",
+            (
+                ids.document_id,
+                ids.tenant_id,
+                ids.project_id,
+                ids.source_id,
+                "sentinel",
+                SENTINEL_CONTENT,
+                content_hash(SENTINEL_CONTENT),
+                datetime.now(timezone.utc),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO ingestion_jobs (job_id, tenant_id, project_id, source_id,"
+            " document_id, status, attempt_count, lease_owner, lease_until)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                ids.job_id,
+                ids.tenant_id,
+                ids.project_id,
+                ids.source_id,
+                ids.document_id,
+                status,
+                1 if processing else 0,
+                "sentinel-holder" if processing else None,
+                datetime.now(timezone.utc) + SENTINEL_LEASE if processing else None,
+            ),
+        )
+    return ids
+
+
+def job_state(dsn: str, job_id: str) -> dict:
+    """任务的可观测状态。**逐字段比较**，不只看 status。"""
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            "SELECT status, attempt_count, error_code, error_detail, lease_owner,"
+            " updated_at FROM ingestion_jobs WHERE job_id = %s",
+            (job_id,),
+        ).fetchone()
+    assert row is not None, f"{job_id} 不见了 —— 那本身就是被改动过的证据"
+    return {
+        "status": row[0],
+        "attempt_count": row[1],
+        "error_code": row[2],
+        "error_detail": row[3],
+        "lease_owner": row[4],
+        "updated_at": row[5],
+    }
+
+
+def cleanup_job(dsn: str, ids: SeededJob) -> None:
+    """把哨兵连同它的父链删干净（只删自己造的行）。"""
+    with psycopg.connect(dsn) as conn, conn.transaction():
+        conn.execute("DELETE FROM ingestion_jobs WHERE job_id = %s", (ids.job_id,))
+        conn.execute(
+            "DELETE FROM source_documents WHERE document_id = %s", (ids.document_id,)
+        )
+        conn.execute("DELETE FROM sources WHERE source_id = %s", (ids.source_id,))
+        conn.execute("DELETE FROM projects WHERE project_id = %s", (ids.project_id,))
+        conn.execute(
+            "DELETE FROM principals WHERE principal_id = %s", (ids.principal_id,)
+        )
+        conn.execute("DELETE FROM tenants WHERE tenant_id = %s", (ids.tenant_id,))
