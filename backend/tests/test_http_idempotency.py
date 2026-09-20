@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 
+import pg_support
 import psycopg
 import pytest
 from app.api.http_idempotency import (
@@ -25,10 +26,6 @@ from app.main import DEMO_PRINCIPAL, DEMO_TENANT, create_app
 from fastapi.testclient import TestClient
 
 ORIGIN = {"Origin": "http://testserver"}
-MIGRATION_DSN = os.environ.get(
-    "STUDY_PLATFORM_MIGRATION_DSN",
-    "postgresql://postgres@127.0.0.1:5432/study_platform",
-)
 
 
 @pytest.fixture
@@ -430,7 +427,7 @@ def test_pg_claim_id_does_not_collide_across_users():
     tenant = "t_idem_collision"
     principal_a = "u_idem_collision_a"
     principal_b = "u_idem_collision_b"
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         with conn.transaction():
             conn.execute(
                 "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)"
@@ -461,7 +458,7 @@ def test_pg_expired_pending_requires_reconciliation():
     """PG 状态机同样把超时占用推进到 indeterminate，绝不接管重执行。"""
     tenant = "t_idem_expired"
     principal = "u_idem_expired"
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         with conn.transaction():
             conn.execute(
                 "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)"
@@ -484,7 +481,7 @@ def test_pg_expired_pending_requires_reconciliation():
     fingerprint = "sha256:" + uuid.uuid4().hex
     assert store.claim(**keys, fingerprint=fingerprint).kind == "claimed"
 
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         with conn.transaction():
             conn.execute(
                 "UPDATE http_idempotency SET claimed_at = now() - interval '10 minutes'"
@@ -499,7 +496,7 @@ def test_pg_expired_pending_requires_reconciliation():
             )
 
     assert store.claim(**keys, fingerprint=fingerprint).kind == "reconciliation_required"
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         state = conn.execute(
             "SELECT state FROM http_idempotency"
             " WHERE tenant_id = %s AND principal_id = %s"

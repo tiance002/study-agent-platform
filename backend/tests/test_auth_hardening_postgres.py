@@ -14,11 +14,11 @@
 
 from __future__ import annotations
 
-import os
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import pg_support
 import psycopg
 import pytest
 from app.core.errors import ErrorCode, PlatformError
@@ -26,20 +26,15 @@ from app.identity.ports import SystemContext
 from app.main import build_platform, create_app
 from fastapi.testclient import TestClient
 
-MIGRATION_DSN = os.environ.get(
-    "STUDY_PLATFORM_MIGRATION_DSN",
-    "postgresql://postgres@127.0.0.1:5432/study_platform",
-)
 # 本地库 trust 认证：密码会被服务器忽略，但**不能省略** ——
 # 省了密码这个字符串就与 db.settings.DEFAULT_APP_DSN 完全相等，
 # 会撞上生产启动自检的「禁止本机开发默认值」判定（该判定是正确行为）。
 # dev-only 标记让秘密扫描放行（项目红线：明文凭据必须带占位标记）。
-APP_DSN = "postgresql://study_app:dev-only-change-me@127.0.0.1:5432/study_platform"
 
 
 def _reachable() -> bool:
     try:
-        with psycopg.connect(MIGRATION_DSN, connect_timeout=2):
+        with psycopg.connect(pg_support.migration_dsn(), connect_timeout=2):
             return True
     except Exception:
         return False
@@ -57,7 +52,7 @@ PRINCIPAL = "u_hard_pg"
 @pytest.fixture(scope="module", autouse=True)
 def seed_and_clean():
     """超级用户播种租户/主体，并清空限流计数桶（definer 函数表应用角色碰不到）。"""
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         with conn.transaction():
             conn.execute(
                 "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)"
@@ -116,7 +111,7 @@ def test_session_ttl_check_constraint_rejects_100_year_session():
     assert excinfo.value.code is ErrorCode.INTERNAL_CONSISTENCY_ERROR
 
     # 约束在库里是具名的 0004 约束（迁移可审计）。
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         name = conn.execute(
             "SELECT conname FROM pg_constraint WHERE conname = 'user_sessions_ttl_check'"
         ).fetchone()
@@ -156,7 +151,7 @@ def test_pg_exchange_with_huge_ttl_is_translated_and_invitation_intact(tmp_path)
 
 @pytest.mark.invariant
 def test_register_auth_attempt_function_counts_and_rolls_over():
-    with psycopg.connect(APP_DSN) as conn:
+    with psycopg.connect(pg_support.app_dsn()) as conn:
         bucket = "bucket_" + uuid.uuid4().hex
         with conn.transaction():
             counts = [
@@ -175,7 +170,7 @@ def test_register_auth_attempt_function_counts_and_rolls_over():
 @pytest.mark.invariant
 def test_app_role_has_no_table_privileges_on_rate_limit_table():
     """限流表是认证前设施：应用角色零表权限，只能调 definer 函数。"""
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         privs = conn.execute(
             """
             SELECT privilege_type
@@ -186,7 +181,7 @@ def test_app_role_has_no_table_privileges_on_rate_limit_table():
     assert privs == []
 
     # 直接读/写必须被拒（RLS 无策略 + 无表权限双保险）。
-    with psycopg.connect(APP_DSN) as conn:
+    with psycopg.connect(pg_support.app_dsn()) as conn:
         for statement in (
             "SELECT * FROM auth_attempt_counters",
             "INSERT INTO auth_attempt_counters (bucket, window_start, attempts, last_at)"
@@ -205,7 +200,7 @@ def test_auth_audit_outbox_is_tenant_isolated():
     other_tenant = "t_hard_pg_other"
     event_mine = "aud_" + uuid.uuid4().hex
     event_other = "aud_" + uuid.uuid4().hex
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         with conn.transaction():
             conn.execute(
                 "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)"
@@ -220,7 +215,7 @@ def test_auth_audit_outbox_is_tenant_isolated():
                 (event_mine, TENANT, event_other, other_tenant),
             )
 
-    with psycopg.connect(APP_DSN) as conn:
+    with psycopg.connect(pg_support.app_dsn()) as conn:
         conn.execute("SELECT set_config('app.tenant_id', %s, false)", (TENANT,))
         visible = conn.execute(
             "SELECT event_id FROM auth_audit_outbox"
@@ -242,7 +237,7 @@ def test_two_audit_projectors_keep_one_valid_hash_chain(tmp_path):
     from app.audit.sink import AuditSink
 
     event_ids = ["aud_" + uuid.uuid4().hex for _ in range(12)]
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         with conn.transaction():
             conn.execute("TRUNCATE auth_audit_outbox")
             conn.cursor().executemany(
@@ -255,8 +250,8 @@ def test_two_audit_projectors_keep_one_valid_hash_chain(tmp_path):
     # 两个实例都在文件为空时构造，模拟两个 worker 各自缓存旧链头。
     sink_a = AuditSink(tmp_path / "audit")
     sink_b = AuditSink(tmp_path / "audit")
-    outbox_a = PostgresAuditOutbox(sink_a, APP_DSN)
-    outbox_b = PostgresAuditOutbox(sink_b, APP_DSN)
+    outbox_a = PostgresAuditOutbox(sink_a, pg_support.app_dsn())
+    outbox_b = PostgresAuditOutbox(sink_b, pg_support.app_dsn())
     threads = [
         threading.Thread(target=outbox_a.flush_pending, args=(TENANT,)),
         threading.Thread(target=outbox_b.flush_pending, args=(TENANT,)),
@@ -287,7 +282,7 @@ def test_startup_self_check_rejects_unreachable_and_wrong_version(tmp_path):
 
     # 版本不符：明确报错并指出实际/期望版本。
     with pytest.raises(RuntimeError) as excinfo:
-        _verify_database_ready(APP_DSN, expected_version="9999")
+        _verify_database_ready(pg_support.app_dsn(), expected_version="9999")
     assert "9999" in str(excinfo.value)
 
     # 生产配置缺失同样拒绝装配（fail-fast，不静默回退内存）。
@@ -348,7 +343,9 @@ def test_production_postgres_disables_bearer_and_enforces_csrf(tmp_path):
     settings = DeploymentSettings.load(
         {
             "STUDY_PLATFORM_ENV": "production",
-            "STUDY_PLATFORM_DSN": APP_DSN,
+            "STUDY_PLATFORM_DSN": pg_support.app_dsn(),
+            # worker 是**另一条凭据边界**：生产自检要求它有独立、非默认的连接串。
+            "STUDY_PLATFORM_WORKER_DSN": pg_support.worker_dsn(),
             "STUDY_PLATFORM_SESSION_SECRET": "prod-session-0123456789abcdef0000000",
             "STUDY_PLATFORM_COOKIE_SECRET": "prod-cookie-0123456789abcdef00000000",
             "STUDY_PLATFORM_TOKEN_SECRET": "prod-token-0123456789abcdef0000000000",

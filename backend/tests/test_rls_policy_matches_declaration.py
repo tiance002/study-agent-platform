@@ -32,15 +32,9 @@ SQL 契约里的"隔离级别"来自迁移里的**人工声明**（`PROJECT_SCOP
 
 from __future__ import annotations
 
-import os
-
+import pg_support
 import psycopg
 import pytest
-
-MIGRATION_DSN = os.environ.get(
-    "STUDY_PLATFORM_MIGRATION_DSN",
-    "postgresql://postgres@127.0.0.1:5432/study_platform",
-)
 
 #: 身份目录表：它们**就是**身份的载体，按主体过滤会让它们读不出任何行。
 IDENTITY_TABLES = frozenset({"principals", "tenants"})
@@ -77,7 +71,7 @@ KNOWN_GAP: dict[tuple[str, str], str] = {
 
 def _postgres_reachable() -> bool:
     try:
-        with psycopg.connect(MIGRATION_DSN, connect_timeout=2):
+        with psycopg.connect(pg_support.migration_dsn(), connect_timeout=2):
             return True
     except Exception:
         return False
@@ -124,7 +118,7 @@ def _policies(conn: psycopg.Connection) -> dict[str, dict[str, object]]:
 
 @pytest.fixture(scope="module")
 def db_facts() -> tuple[dict[str, dict[str, bool]], dict[str, dict[str, object]]]:
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         columns = _table_columns(conn)
         policies = _policies(conn)
 

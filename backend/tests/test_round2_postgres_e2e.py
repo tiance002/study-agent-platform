@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import uuid
 from datetime import timedelta
 
+import pg_support
 import psycopg
 import pytest
 from app.deployment import DeploymentSettings
@@ -14,16 +14,12 @@ from app.identity.ports import SystemContext
 from app.main import build_platform, create_app
 from fastapi.testclient import TestClient
 
-MIGRATION_DSN = os.environ.get(
-    "STUDY_PLATFORM_MIGRATION_DSN",
-    "postgresql://postgres@127.0.0.1:5432/study_platform",
-)
 ORIGIN = "http://testserver"
 
 
 def _reachable() -> bool:
     try:
-        with psycopg.connect(MIGRATION_DSN, connect_timeout=2):
+        with psycopg.connect(pg_support.migration_dsn(), connect_timeout=2):
             return True
     except Exception:
         return False
@@ -46,7 +42,7 @@ def test_cookie_product_flow_and_idempotency_survive_restart(tmp_path):
     principal_id = "u_r2_" + suffix
     token = "invite-r2-" + suffix
 
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         with conn.transaction():
             conn.execute(
                 "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)",

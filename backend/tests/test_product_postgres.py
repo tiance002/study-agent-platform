@@ -15,27 +15,18 @@
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta, timezone
 
+import pg_support
 import psycopg
 import pytest
-
-MIGRATION_DSN = os.environ.get(
-    "STUDY_PLATFORM_MIGRATION_DSN",
-    "postgresql://postgres@127.0.0.1:5432/study_platform",
-)
-APP_DSN = os.environ.get(
-    "STUDY_PLATFORM_DSN",
-    "postgresql://study_app@127.0.0.1:5432/study_platform",
-)
 
 NOW = datetime.now(timezone.utc)
 
 
 def _postgres_reachable() -> bool:
     try:
-        with psycopg.connect(MIGRATION_DSN, connect_timeout=2):
+        with psycopg.connect(pg_support.migration_dsn(), connect_timeout=2):
             return True
     except Exception:
         return False
@@ -66,7 +57,7 @@ TOKEN_CONCURRENT = "sha256:" + "c" * 64
 @pytest.fixture(scope="module")
 def seeded() -> None:
     """种子用**超级用户**写：种子是运维动作，不受应用角色 RLS 限制。"""
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         with conn.transaction():
             for tenant, name in ((TENANT, "T0003"), (OTHER_TENANT, "Other")):
                 conn.execute(
@@ -113,7 +104,7 @@ def seeded() -> None:
                 ),
             )
     yield
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         with conn.transaction():
             conn.execute("DELETE FROM user_sessions WHERE tenant_id = %s", (TENANT,))
             conn.execute("DELETE FROM invitations WHERE tenant_id IN (%s, %s)", (TENANT, OTHER_TENANT))
@@ -130,7 +121,7 @@ def seeded() -> None:
 
 
 def _app_connect() -> psycopg.Connection:
-    return psycopg.connect(APP_DSN)
+    return psycopg.connect(pg_support.app_dsn())
 
 
 def _exchange(conn: psycopg.Connection, token_hash: str) -> list[tuple]:
@@ -156,7 +147,7 @@ def _exchange(conn: psycopg.Connection, token_hash: str) -> list[tuple]:
 @pytest.mark.invariant
 def test_cross_tenant_project_reference_is_rejected_physically(seeded):
     """超级用户绕过 RLS 时，组合外键是**唯一**的防线 —— 它必须独立成立。"""
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         with pytest.raises(psycopg.errors.ForeignKeyViolation):
             conn.execute(
                 "INSERT INTO conversations"
@@ -201,7 +192,7 @@ def test_idempotency_project_reference_is_tenant_bound(seeded):
 @pytest.mark.invariant
 def test_cross_tenant_principal_reference_is_rejected_physically(seeded):
     """会话的 principal 必须真的属于该租户（超级用户视角，纯外键语义）。"""
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         with pytest.raises(psycopg.errors.ForeignKeyViolation):
             conn.execute(
                 "INSERT INTO user_sessions"
@@ -239,7 +230,7 @@ def test_exchange_works_without_any_context(seeded):
 @pytest.mark.invariant
 def test_invitation_is_bound_to_its_invitee(seeded):
     """客户端不能通过兑换决定自己是谁 —— 主体在签发时已绑定。"""
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         row = conn.execute(
             "SELECT invitee_principal_id FROM invitations WHERE token_hash = %s",
             (TOKEN_HASH_2,),
@@ -321,7 +312,7 @@ def test_concurrent_exchanges_produce_exactly_one_session(seeded):
     assert successes[0][0][2] == ALICE, "兑换出的会话必须属于预绑定主体"
 
     # 每个成功兑换都写了**自己**的会话行；失败者什么都没留下。
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         sessions = conn.execute(
             "SELECT count(*) FROM user_sessions"
             " WHERE principal_id = %s AND session_id LIKE %s",

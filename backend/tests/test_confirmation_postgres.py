@@ -14,22 +14,17 @@
 
 from __future__ import annotations
 
-import os
 import threading
 import uuid
 from datetime import datetime, timezone
 
+import pg_support
 import psycopg
 import pytest
 from app.budget.ledger import Dimension
 from app.core.errors import ErrorCode, PlatformError
 from app.db.confirmation_store import PostgresConfirmationStore
 from app.execution.confirmation import BudgetCeiling
-
-MIGRATION_DSN = os.environ.get(
-    "STUDY_PLATFORM_MIGRATION_DSN",
-    "postgresql://postgres@127.0.0.1:5432/study_platform",
-)
 
 NOW = datetime(2026, 9, 18, 12, 0, 0, tzinfo=timezone.utc)
 CURRENCY = str(Dimension.CURRENCY_MICROS)
@@ -39,7 +34,7 @@ PARAMS = {"a": 1}
 
 def _postgres_reachable() -> bool:
     try:
-        with psycopg.connect(MIGRATION_DSN, connect_timeout=2):
+        with psycopg.connect(pg_support.migration_dsn(), connect_timeout=2):
             return True
     except Exception:
         return False
@@ -56,7 +51,7 @@ pytestmark = [
 
 def _seed(tenant_id: str, project_id: str) -> None:
     """种子数据用**超级用户**写入 —— 种子是运维动作，不该受应用角色 RLS 限制。"""
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         with conn.transaction():
             conn.execute(
                 "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)"

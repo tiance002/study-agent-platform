@@ -14,10 +14,10 @@
 
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import datetime, timezone
 
+import pg_support
 import psycopg
 import pytest
 from app.core.errors import ErrorCode, PlatformError
@@ -40,18 +40,13 @@ from app.product.models import (
     TaskStatus,
 )
 
-MIGRATION_DSN = os.environ.get(
-    "STUDY_PLATFORM_MIGRATION_DSN",
-    "postgresql://postgres@127.0.0.1:5432/study_platform",
-)
-
 TENANT = "t_learn_pg"
 ALICE = "u_learn_pg_alice"
 
 
 def _postgres_reachable() -> bool:
     try:
-        with psycopg.connect(MIGRATION_DSN, connect_timeout=2):
+        with psycopg.connect(pg_support.migration_dsn(), connect_timeout=2):
             return True
     except Exception:
         return False
@@ -61,7 +56,7 @@ def _postgres_reachable() -> bool:
 def pg_seed() -> None:
     if not _postgres_reachable():
         return
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         with conn.transaction():
             conn.execute(
                 "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)"

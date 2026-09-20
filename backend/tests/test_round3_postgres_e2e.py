@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import uuid
 from datetime import timedelta
 
+import pg_support
 import psycopg
 import pytest
 from app.deployment import DeploymentSettings
@@ -14,16 +14,12 @@ from app.identity.ports import SystemContext
 from app.main import build_platform, create_app
 from fastapi.testclient import TestClient
 
-MIGRATION_DSN = os.environ.get(
-    "STUDY_PLATFORM_MIGRATION_DSN",
-    "postgresql://postgres@127.0.0.1:5432/study_platform",
-)
 ORIGIN = "http://testserver"
 
 
 def _reachable() -> bool:
     try:
-        with psycopg.connect(MIGRATION_DSN, connect_timeout=2):
+        with psycopg.connect(pg_support.migration_dsn(), connect_timeout=2):
             return True
     except Exception:
         return False
@@ -44,7 +40,7 @@ def test_learning_loop_survives_restart_and_state_does_not_forge_mastery(tmp_pat
     suffix = uuid.uuid4().hex
     tenant_id, principal_id = "t_r3_" + suffix, "u_r3_" + suffix
     token = "invite-r3-" + suffix
-    with psycopg.connect(MIGRATION_DSN) as conn, conn.transaction():
+    with psycopg.connect(pg_support.migration_dsn()) as conn, conn.transaction():
         conn.execute(
             "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)",
             (tenant_id, "Round 3 exit gate"),

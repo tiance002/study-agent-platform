@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import datetime, timezone
 
+import pg_support
 import psycopg
 import pytest
 from app.core.errors import ErrorCode, PlatformError
@@ -21,17 +21,13 @@ from app.product.models import (
     TaskStatus,
 )
 
-MIGRATION_DSN = os.environ.get(
-    "STUDY_PLATFORM_MIGRATION_DSN",
-    "postgresql://postgres@127.0.0.1:5432/study_platform",
-)
 TENANT = "t_loop_pg"
 ALICE = "u_loop_pg_alice"
 
 
 def _postgres_reachable() -> bool:
     try:
-        with psycopg.connect(MIGRATION_DSN, connect_timeout=2):
+        with psycopg.connect(pg_support.migration_dsn(), connect_timeout=2):
             return True
     except Exception:
         return False
@@ -49,7 +45,7 @@ def _actor() -> Principal:
 def pg_seed():
     if not _postgres_reachable():
         return
-    with psycopg.connect(MIGRATION_DSN) as conn, conn.transaction():
+    with psycopg.connect(pg_support.migration_dsn()) as conn, conn.transaction():
         conn.execute(
             "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)"
             " ON CONFLICT (tenant_id) DO NOTHING",

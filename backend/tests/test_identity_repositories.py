@@ -11,10 +11,10 @@
 
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import timedelta
 
+import pg_support
 import psycopg
 import pytest
 from app.core.errors import ErrorCode, PlatformError
@@ -25,15 +25,10 @@ from app.identity.memory_store import (
 from app.identity.models import Principal
 from app.identity.ports import SystemContext
 
-MIGRATION_DSN = os.environ.get(
-    "STUDY_PLATFORM_MIGRATION_DSN",
-    "postgresql://postgres@127.0.0.1:5432/study_platform",
-)
-
 
 def _postgres_reachable() -> bool:
     try:
-        with psycopg.connect(MIGRATION_DSN, connect_timeout=2):
+        with psycopg.connect(pg_support.migration_dsn(), connect_timeout=2):
             return True
     except Exception:
         return False
@@ -57,7 +52,7 @@ def pg_seed() -> None:
     """
     if not _postgres_reachable():
         return
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         with conn.transaction():
             for tenant in (TENANT, OTHER_TENANT):
                 conn.execute(
@@ -88,7 +83,7 @@ def _reset_pg_identity_state() -> None:
     """
     if not _postgres_reachable():
         return
-    with psycopg.connect(MIGRATION_DSN) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         with conn.transaction():
             conn.execute(
                 "DELETE FROM user_sessions WHERE tenant_id IN (%s, %s)",
