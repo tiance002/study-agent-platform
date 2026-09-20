@@ -28,6 +28,8 @@
 | 语义检索 | **不是**：检索是 `keyword/v1` 关键词基线（NFKC 归一 + 中文 2-gram + 整数权重），结果确定性可复现 | 同义改写命中不了；无 pgvector、无 reranker、无中文分词器 |
 | 模型调用（L0/L1/L2） | 只有档位声明，无 provider | 无实际模型调用；检索命中也**不会**被报成"核心结论有证据"（证据状态恒为 `insufficient`） |
 | ~~durable 摄取队列~~ | **已实现**：`ingestion_jobs` + lease + `FOR UPDATE SKIP LOCKED`；崩溃后租约到期可回收，重复完成幂等 | outbox（面向外部副作用的持久化派发）仍未实现 |
+| ~~摄取凭据边界~~ | **已实现**：跨租户队列可见性限给 `study_worker` **数据库角色**（迁移 `0008`）；应用角色自设 `app.worker_id` 无效，且已收回队列表的 `UPDATE` | 真实的凭据轮换与最小权限审计未做过（本机 trust 认证，密码不参与验证） |
+| ~~认领围栏~~ | **已实现**：每次认领产生不可复用的 `claim_token`（迁移 `0009`）；`complete` / `fail` 在**一条条件更新**里比对状态 + token + 租约期限 | 落定后 token 清空，因此"旧持有者的迟到 `complete`"与"重复投递"事后不可区分（不改变状态、不重复写片段） |
 | 前端 | 单页演示（原生 HTML） | 非设计中的 React + Vite 应用 |
 | 可观测性 | 无 | 无 OTel、无指标与告警 |
 | 学习闭环题型/评分/复测 | 有诊断、计划生成、任务流转、自报提交与证据投影 | 无题库、无自动评分、无复测分级 |
@@ -187,6 +189,7 @@ set PYTHONPATH=backend
 | 变量 | 用途 | 默认值（仅限本地开发） |
 |---|---|---|
 | `STUDY_PLATFORM_DSN` | 应用连接串 | `postgresql://study_app@127.0.0.1:5432/study_platform` |
+| `STUDY_PLATFORM_WORKER_DSN` | 摄取 worker 连接串（`study_worker` 角色，**必须与应用程序串不同**） | `postgresql://study_worker@127.0.0.1:5432/study_platform` |
 | `STUDY_PLATFORM_MIGRATION_DSN` | Alembic 迁移连接串 | `postgresql+psycopg://postgres@127.0.0.1:5432/study_platform` |
 | `STUDY_PLATFORM_SESSION_SECRET` | 会话令牌签名密钥 | `dev-only-session-secret-change-me` |
 | `STUDY_PLATFORM_TOKEN_SECRET` | capability token 签名密钥 | `dev-only-placeholder-change-me` |
@@ -270,9 +273,11 @@ L5 事实  tenancy/ports.py 定义的适配器
 | 审计性质 | 哈希链可校验、篡改可发现、无删除接口、缓冲有界且恢复后回放 |
 | 工具边界 | 同意图不可重复实现；A2 无幂等即拒绝；单 node 工具数 ≤ 8；工具按需加载 |
 | #2（摄取与检索） | 跨项目/跨租户候选不进候选集（收窄发生在 SQL/RLS 里，**在打分之前**）；跨租户读原文/任务状态/资料列表一律 404，且与"不存在"除 `request_id` 外逐字同形 |
-| 引用可核验 | 每个候选都能按 `source_id + span` 回读到**原文切片**，指纹与内容一致，且 `span_end - span_start == len(content)` 由类型强制（算错偏移会被拒绝构造） |
-| 摄取可恢复 | worker 崩溃留下租约 → 租约期内第二个 worker 抢不到 → 到期后回收**恰好一次** → 重复完成不追加第二套片段 |
+| 引用可核验 | 每个候选都带**不可变标识**（`document_id + span + content_hash`），按标识精确回读**那一版**原文（同一来源两版、跨度相同时不会串版）；检索默认只看每个来源的最新成功版本 |
+| 片段来源 | 片段内容必须等于**持久化原文**的对应切片 —— `assert_chunks_match_document` 在**写入之前**核验（"长度对口"与"自身哈希自洽"都证明不了这一点） |
+| 摄取可恢复 | worker 崩溃留下租约 → 租约期内第二个 worker 抢不到 → 到期后回收**恰好一次** → 重复完成不追加第二套片段；**回收之后旧持有者的迟到落定被拒绝**（围栏 token） |
 | 检索可复现 | 冻结夹具 25 条中文查询的 recall@5 / MRR 不低于记录下限；排序 tie-break 用 `(source_id, chunk_index)` 而非随机 id |
+| 测试不碰业务库 | 整套测试跑在随机会话级临时库（`study_test_*`）上，用完即删；破坏性写入前先过**库名闸门**，误指业务库时在写入之前失败 |
 | 错误体形状 | 所有失败出口共用 `public_error_payload` 的五个键；422 也走规范体，且**不回显请求输入** |
 
 ---

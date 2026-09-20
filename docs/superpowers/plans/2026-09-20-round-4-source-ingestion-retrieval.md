@@ -346,3 +346,36 @@ Verify the returned remote commit using `gh api /repos/tiance002/study-agent-pla
 - Round 5: provider/model routing, cited teaching answers, streaming, prompt/version evaluation, cost budgets.
 - Round 6: React ordinary-user UI, accessibility and browser workflow tests.
 - Release round: deployment, backup/restore drill, observability, rate/load gates, user onboarding and operations runbooks.
+
+## Post-delivery review fixes (2026-09-20)
+
+The independent review at
+`docs/superpowers/plans/2026-09-20-round-4-review.md` (baseline `9f358de`)
+raised 7 findings (4×P1 + 3×P2). **All 7 were reproduced and confirmed**, and all
+are now fixed. The plan above was executed as written; the findings were missed
+by it, so the fix list lives here rather than as edits to the steps:
+
+| Finding | Fix commit | Substance |
+|---|---|---|
+| R4-04 | `e89627c` | Tests run on a random `study_test_*` database; database-name gate before any destructive write |
+| R4-01 | `7c2ec11` | Cross-tenant queue access bound to the `study_worker` **role** (migration `0008`), not to the `app.worker_id` GUC |
+| R4-02 | `89b3786` | `claim_token` fencing: a stale lease holder can no longer settle a reclaimed job (migration `0009`) |
+| R4-03 | `5e6a80f` | Citations carry `document_id`; exact reads go by identifier; search defaults to the latest successful version |
+| R4-05 | `5ffac18` | Chunks are verified against the **persisted** source text before any write |
+| R4-06 | `83b365c` | `text/plain` gets its own parse path — no more whole-document loss |
+| R4-07 | `83b365c` | Fences compare length, not just character |
+
+Also fixed along the way (same root causes, found while fixing the above):
+
+- the composition root ignored `STUDY_PLATFORM_DSN` and fell back to a hard-coded
+  DSN — the exact route by which tests reached the business database;
+- the contract generator could not read `f"ALTER TABLE {TABLE} ADD COLUMN ..."`,
+  so `claim_token` was missing from the generated schema contract **silently**;
+- the substring-based mechanical guard fired on docstrings that merely mention
+  `claim_next`, which is the kind of false positive that grows an allowlist
+  (now an AST reference scan).
+
+Deviations from the step list: the fixes are committed **per risk unit** (6 commits
+instead of one), and the migration is split into `0008_worker_role_boundary` +
+`0009_ingestion_claim_fencing` instead of the single `0008_ingestion_integrity`
+that the round-5 plan assumed.
