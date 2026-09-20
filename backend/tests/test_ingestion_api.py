@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import ast
 import uuid
 from pathlib import Path
 
@@ -480,17 +481,40 @@ def test_worker_command_once_processes_exactly_one_job(learner):
 # ------------------------------------------------- 机械守卫：入口的唯一性
 
 
-def _sources_containing(token: str) -> set[str]:
-    """全量扫描 `app/` 下的源码，返回包含该 token 的**相对路径集合**。
+def _sources_referencing(token: str) -> set[str]:
+    """全量扫描 `app/` 下的源码，返回**真的引用了**该标识符的文件集合。
 
     静态扫描而非运行时反射：它不依赖模块被导入，也不受动态派发影响 ——
     而这一节要守的恰恰是"某段代码没有写在那里"。
+
+    ⚠️ 用 AST 而不是子串扫描（曾经是子串）。子串会把 docstring 与注释里
+    提到这个名字的文件也算进来，于是**文档一提到它就报红**。误报的代价很具体：
+    被误伤的人会把那个文件加进下面的期望集合，而集合一旦开始长，
+    它就慢慢从"唯一入口的证明"退化成"一份没人再读的名单"
+    （铁律 35：收窄规则永远比加豁免更对）。
+
+    覆盖四种出现在**代码**里的形式：标识符（`ast.Name`）、属性访问
+    （`ast.Attribute`，即 `x.claim_next`）、函数/类定义名、以及 `import`
+    语句里的别名（`ast.alias` —— 只导入不调用同样是引入了一个入口）。
     """
+
+    def _is_reference(node: ast.AST) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id == token
+        if isinstance(node, ast.Attribute):
+            return node.attr == token
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return node.name == token
+        if isinstance(node, ast.alias):
+            return node.name == token
+        return False
+
     found: set[str] = set()
     for path in sorted(APP_ROOT.rglob("*.py")):
         if "__pycache__" in path.parts:
             continue
-        if token in path.read_text(encoding="utf-8"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if any(_is_reference(node) for node in ast.walk(tree)):
             found.add(path.relative_to(APP_ROOT).as_posix())
     return found
 
@@ -522,7 +546,7 @@ def test_claim_next_has_no_http_path_to_it():
     用"出现位置的闭集"守，而不是靠 review：新增一个调用点会让测试失败，
     于是"再加一个入口"必须是一次有意识的决定。
     """
-    assert _sources_containing("claim_next") == {
+    assert _sources_referencing("claim_next") == {
         "knowledge/ports.py",         # 协议声明
         "knowledge/memory_store.py",  # 内存实现（开发适配器）
         "db/ingestion_store.py",      # PostgreSQL 实现
@@ -539,7 +563,7 @@ def test_api_layer_never_chunks_and_never_claims():
     等于开了一条不经过身份校验的路径）。
     """
     assert not {
-        name for name in _sources_containing("DocumentProcessor") if name.startswith("api/")
+        name for name in _sources_referencing("DocumentProcessor") if name.startswith("api/")
     }
 
 

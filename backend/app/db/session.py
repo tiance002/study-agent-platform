@@ -27,12 +27,23 @@ from contextlib import contextmanager
 
 import psycopg
 
-from app.db.settings import app_dsn
+from app.db.settings import app_dsn, worker_dsn
 
 
 def connect(dsn: str | None = None) -> psycopg.Connection:
     """打开一条应用角色连接。"""
     return psycopg.connect(dsn or app_dsn())
+
+
+def connect_worker(dsn: str | None = None) -> psycopg.Connection:
+    """打开一条 **worker 角色**连接。
+
+    ⚠️ 队列的跨租户可见性只授予 `study_worker`（0008 迁移的 `TO study_worker`）。
+    用应用角色连接去 `claim_next` 会一条任务也看不见 —— 而症状是"队列空了"，
+    完全不指向真正原因。所以"用哪个角色"这件事必须在**这里**唯一定义，
+    不要在调用点各写一次 `psycopg.connect(...)`。
+    """
+    return psycopg.connect(dsn or worker_dsn())
 
 
 def set_tenant_context(
@@ -73,6 +84,30 @@ def tenant_transaction(
     with connect(dsn) as conn:
         with conn.transaction():
             set_tenant_context(conn, tenant_id=tenant_id, project_id=project_id)
+            yield conn
+
+
+@contextmanager
+def worker_transaction(
+    *,
+    tenant_id: str | None = None,
+    project_id: str | None = None,
+    dsn: str | None = None,
+) -> Iterator[psycopg.Connection]:
+    """**worker 角色**的连接 + 可选租户/项目上下文。
+
+    为什么上下文是可选的：`claim_next` 必须**先发现"哪个租户有活干"**，
+    才可能建立任何租户上下文 —— 那正是这条路径存在的理由。而它之后的
+    三步（`load_document` / `complete` / `fail`）都带着任务自带的
+    租户 + 项目，必须收窄到该项目内。
+
+    把这两种形状收在一个助手里的好处是"worker 用哪个角色"只有一处定义：
+    认领拿不到任务、或者落定被 RLS 拒绝，都不会退化成"某个调用点少写了一行"。
+    """
+    with connect_worker(dsn) as conn:
+        with conn.transaction():
+            if tenant_id is not None and project_id is not None:
+                set_tenant_context(conn, tenant_id=tenant_id, project_id=project_id)
             yield conn
 
 

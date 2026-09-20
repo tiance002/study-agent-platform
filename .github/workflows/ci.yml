@@ -45,6 +45,8 @@ jobs:
       # 两个 DSN 都不含密码：trust 认证 + 一次性容器，秘密扫描因此保持绿色。
       STUDY_PLATFORM_MIGRATION_DSN: postgresql://postgres@127.0.0.1:5432/study_platform
       STUDY_PLATFORM_DSN: postgresql://study_app@127.0.0.1:5432/study_platform
+      # worker 凭据与 API 凭据是两条边界：队列的跨租户可见性只授予 worker 角色（0008）。
+      STUDY_PLATFORM_WORKER_DSN: postgresql://study_worker@127.0.0.1:5432/study_platform
 
     steps:
       - uses: actions/checkout@v4
@@ -67,6 +69,7 @@ jobs:
           # 角色密码本身在 trust 认证下不参与验证，值带 dev-only 标记防误报。
           psql -h 127.0.0.1 -U postgres -d study_platform \
             -v app_password='dev-only-ci-role-password' \
+            -v worker_password='dev-only-ci-worker-password' \
             -f scripts/sql/create_app_role.sql
           # 空库升级：验证迁移可以在全新库上完整执行。
           python -m alembic upgrade head

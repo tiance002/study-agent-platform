@@ -65,6 +65,7 @@ from app.db.learning_store import PostgresLearningLoopRepository
 from app.db.product_store import PostgresProductRepository
 from app.db.rate_limit_store import PostgresRateLimiter
 from app.db.settings import app_dsn
+from app.db.settings import worker_dsn as worker_role_dsn
 from app.deployment import DeploymentSettings
 from app.execution.confirmation import ConfirmationRepository, ConfirmationStore
 from app.execution.state_machine import ActionStateMachine
@@ -115,7 +116,7 @@ DEMO_PROJECT = "proj_demo"
 DEFAULT_SESSION_TTL = timedelta(hours=8)
 
 #: 代码预期的数据库迁移版本。启动自检核对它；新增迁移必须同步更新。
-EXPECTED_SCHEMA_VERSION = "0007"
+EXPECTED_SCHEMA_VERSION = "0008"
 
 
 @dataclass
@@ -291,7 +292,12 @@ def build_platform(
             products=products, evidence=evidence, dsn=dsn
         )
         ingestion = PostgresIngestionRepository(
-            membership=membership, clock=clock, dsn=dsn
+            membership=membership,
+            clock=clock,
+            dsn=dsn,
+            # 认领与落定走 **worker 角色**（队列的跨租户策略只授予它）。
+            # 回退同样走 `db.settings` 的唯一出口，而不是写死默认值。
+            worker_dsn=loaded.worker_dsn or worker_role_dsn(),
         )
         knowledge = KnowledgeRepository(ingestion=ingestion)
         rate_limiter: RateLimiter = PostgresRateLimiter(

@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
-import pgtest
+import pg_support
 import psycopg
 import pytest
 from app.core.hashing import content_hash
@@ -78,7 +78,7 @@ pytestmark = [
     # 本文件要排空跨租户队列（`_drain_queue`），在业务库上做这件事会终结
     # 用户的在途任务，而测试全绿看不出来。
     pytest.mark.skipif(
-        not pgtest.reachable(), reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）"
+        not pg_support.reachable(), reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）"
     ),
 ]
 
@@ -127,7 +127,7 @@ def _drain_queue() -> None:
     ⚠️ 这一句会终结目标库里**所有**在途任务，所以先过 `require_test_database`：
     指向业务库时在**任何写入之前**失败，而不是先把用户的任务杀掉再报错。
     """
-    dsn = pgtest.require_test_database(pgtest.migration_dsn())
+    dsn = pg_support.require_test_database(pg_support.migration_dsn())
     with psycopg.connect(dsn) as conn, conn.transaction():
         conn.execute(
             "UPDATE ingestion_jobs"
@@ -145,7 +145,7 @@ def _expire_lease(job_id: str) -> None:
     则根本不可行；而租约过期的语义就是"`lease_until` 落在 `now()` 之前"，
     把那一列改掉是这句话的**逐字**实现，不是近似。
     """
-    with psycopg.connect(pgtest.migration_dsn()) as conn, conn.transaction():
+    with psycopg.connect(pg_support.migration_dsn()) as conn, conn.transaction():
         updated = conn.execute(
             "UPDATE ingestion_jobs SET lease_until = now() - interval '1 second'"
             " WHERE job_id = %s",
@@ -162,7 +162,7 @@ def _seed_tenant(prefix: str, name: str) -> tuple[str, str]:
     """
     suffix = uuid.uuid4().hex
     tenant_id, principal_id = f"t_{prefix}_{suffix}", f"u_{prefix}_{suffix}"
-    with psycopg.connect(pgtest.migration_dsn()) as conn, conn.transaction():
+    with psycopg.connect(pg_support.migration_dsn()) as conn, conn.transaction():
         conn.execute(
             "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)", (tenant_id, name)
         )

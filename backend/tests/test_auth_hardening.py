@@ -716,6 +716,7 @@ def test_production_accepts_strong_distinct_secrets():
         {
             "STUDY_PLATFORM_ENV": "production",
             "STUDY_PLATFORM_DSN": "postgresql://study_app:dev-only-change-me@h/db",
+            "STUDY_PLATFORM_WORKER_DSN": "postgresql://study_worker:dev-only-change-me@h/db",
             "STUDY_PLATFORM_SESSION_SECRET": "session-secret-0123456789abcdef00",
             "STUDY_PLATFORM_COOKIE_SECRET": "cookie-secret-0123456789abcdef0000",
             "STUDY_PLATFORM_TOKEN_SECRET": "token-secret-0123456789abcdef00000",
@@ -725,6 +726,42 @@ def test_production_accepts_strong_distinct_secrets():
         }
     )
     assert settings.configuration_problems() == []
+
+
+@pytest.mark.invariant
+def test_production_requires_a_separate_worker_credential():
+    """worker 与 API 必须是**两条凭据边界**（0008：队列的跨租户策略只授予
+    `study_worker`）。
+
+    三种坏配置各自被点名：没配、配成本机默认值（无密码的本地值）、
+    与应用程序串**相同**（那就等于没有分开 —— 而应用角色已经拿不到
+    `UPDATE ingestion_jobs`，worker 用它会一条任务也认领不到）。
+    """
+    base = {
+        "STUDY_PLATFORM_ENV": "production",
+        "STUDY_PLATFORM_DSN": "postgresql://study_app:dev-only-change-me@h/db",
+        "STUDY_PLATFORM_SESSION_SECRET": "session-secret-0123456789abcdef00",
+        "STUDY_PLATFORM_COOKIE_SECRET": "cookie-secret-0123456789abcdef0000",
+        "STUDY_PLATFORM_TOKEN_SECRET": "token-secret-0123456789abcdef00000",
+        "STUDY_PLATFORM_COOKIE_SECURE": "1",
+        "STUDY_PLATFORM_TRUSTED_ORIGINS": "https://app.example.com",
+        "STUDY_PLATFORM_TRUSTED_PROXIES": "10.0.0.1",
+    }
+
+    missing = DeploymentSettings.load(base).configuration_problems()
+    assert any("WORKER_DSN" in p for p in missing), missing
+
+    from app.db.settings import DEFAULT_WORKER_DSN
+
+    defaulted = DeploymentSettings.load(
+        {**base, "STUDY_PLATFORM_WORKER_DSN": DEFAULT_WORKER_DSN}
+    ).configuration_problems()
+    assert any("WORKER_DSN" in p and "默认值" in p for p in defaulted), defaulted
+
+    same = DeploymentSettings.load(
+        {**base, "STUDY_PLATFORM_WORKER_DSN": base["STUDY_PLATFORM_DSN"]}
+    ).configuration_problems()
+    assert any("WORKER_DSN" in p and "相同" in p for p in same), same
 
 
 @pytest.mark.invariant

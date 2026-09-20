@@ -28,7 +28,7 @@ from datetime import timedelta
 from enum import StrEnum
 from urllib.parse import urlsplit
 
-from app.db.settings import DEFAULT_APP_DSN
+from app.db.settings import DEFAULT_APP_DSN, DEFAULT_WORKER_DSN
 from app.identity.limits import MAX_SESSION_TTL
 
 #: 仓库里公开的开发占位密钥。生产启动时只要还在用其中任何一个就拒绝启动。
@@ -111,6 +111,9 @@ class DeploymentSettings:
     exchange_window_seconds: int
     #: DSN 是否由环境**显式**提供（区别于落到本机 trust 默认值）。
     dsn_explicitly_set: bool = False
+    #: worker 角色的 DSN（`study_worker`）。默认 `None` = 由 `db.settings` 决定。
+    worker_dsn: str | None = None
+    worker_dsn_explicitly_set: bool = False
 
     @property
     def is_production(self) -> bool:
@@ -196,6 +199,8 @@ class DeploymentSettings:
             persistence=persistence,
             dsn=env.get("STUDY_PLATFORM_DSN"),
             dsn_explicitly_set="STUDY_PLATFORM_DSN" in env,
+            worker_dsn=env.get("STUDY_PLATFORM_WORKER_DSN"),
+            worker_dsn_explicitly_set="STUDY_PLATFORM_WORKER_DSN" in env,
             session_secret=session_secret,
             cookie_secret=cookie_secret,
             cookie_previous_secrets=cookie_previous,
@@ -260,6 +265,25 @@ class DeploymentSettings:
             )
         elif self.dsn == DEFAULT_APP_DSN:
             problems.append("生产模式的 STUDY_PLATFORM_DSN 不能是本机开发默认值")
+
+        # worker 是**另一条凭据边界**，不是"应用连接的别名"：队列的跨租户
+        # 可见性只授予 `study_worker`（0008 迁移的 `TO study_worker`），
+        # 应用角色拿它认领不到任务。少了这条检查，生产会静默用本机无密码默认值
+        # 去连 worker —— 那正是本模块存在的理由（配置缺失但服务照常启动）。
+        if not self.worker_dsn_explicitly_set:
+            problems.append(
+                "生产模式必须显式提供 STUDY_PLATFORM_WORKER_DSN"
+                "（worker 与 API 是两条凭据边界，不能共用一个角色）"
+            )
+        elif self.worker_dsn == DEFAULT_WORKER_DSN:
+            problems.append(
+                "生产模式的 STUDY_PLATFORM_WORKER_DSN 不能是本机开发默认值"
+            )
+        if self.worker_dsn and self.dsn and self.worker_dsn == self.dsn:
+            problems.append(
+                "STUDY_PLATFORM_WORKER_DSN 不能与 STUDY_PLATFORM_DSN 相同："
+                "两者必须是不同角色的连接串（0008 把队列的跨租户权限只授予 worker 角色）"
+            )
 
         for name, secret in (
             ("STUDY_PLATFORM_SESSION_SECRET", self.session_secret),

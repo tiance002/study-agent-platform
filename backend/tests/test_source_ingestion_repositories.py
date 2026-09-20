@@ -18,8 +18,9 @@ import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
-import pgtest
+import pg_support
 import psycopg
 import pytest
 from app.core.errors import ErrorCode, PlatformError
@@ -57,7 +58,7 @@ def _drain_queue() -> None:
     `require_test_database`（库名不以 `study_test_` 开头直接拒绝），
     失败发生在**任何写入之前**。
     """
-    dsn = pgtest.require_test_database(pgtest.migration_dsn())
+    dsn = pg_support.require_test_database(pg_support.migration_dsn())
     with psycopg.connect(dsn) as conn:
         with conn.transaction():
             conn.execute(
@@ -73,9 +74,9 @@ def _drain_queue() -> None:
 def pg_seed() -> None:
     """租户与主体用超级用户写（运维动作）。库不可达时静默返回：
     postgres 参数上的 skipif 负责跳过 PG 用例，内存用例不被牵连。"""
-    if not pgtest.reachable():
+    if not pg_support.reachable():
         return
-    with psycopg.connect(pgtest.migration_dsn()) as conn:
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         with conn.transaction():
             for tenant in (TENANT, OTHER_TENANT):
                 conn.execute(
@@ -110,7 +111,7 @@ class Env:
             marks=[
                 pytest.mark.postgres,
                 pytest.mark.skipif(
-                    not pgtest.reachable(),
+                    not pg_support.reachable(),
                     reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）",
                 ),
             ],
@@ -512,30 +513,83 @@ def test_stored_chunks_are_scoped_to_the_project(env):
 @pytest.mark.postgres
 @pytest.mark.invariant
 @pytest.mark.skipif(
-    not pgtest.reachable(), reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）"
+    not pg_support.reachable(), reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）"
 )
-def test_app_role_really_cannot_mutate_immutable_tables():
-    """「原文与片段不可变」必须由**权限系统**保证，而不是靠代码自觉。
+def test_grants_match_the_contract_and_the_database():
+    """权限的**三方一致**：迁移声明、生成契约、数据库实际授权。
 
-    为什么直接查数据库而不是读迁移里的常量：迁移里的 `APPEND_ONLY` 是
-    人工声明，真正生效的是 `information_schema.table_privileges`。
-    两者一旦漂移，契约文档就会说"已冻结"，而应用角色其实能改历史。
+    为什么直接查数据库而不是读迁移里的常量：迁移里的 `APPEND_ONLY` /
+    `APP_ROLE_GRANTS_OVERRIDES` 都是人工声明，真正生效的是
+    `information_schema.table_privileges`。0008 把 `ingestion_jobs` 的
+    `UPDATE` 从应用角色收回并给了 worker 角色 —— 若契约生成器不认识这条声明，
+    文档会继续写"应用角色能 UPDATE 队列"，而**没人会问为什么**（铁律 34）。
 
-    （铁律 34 的同类问题：`http_idempotency` 曾只受租户级策略保护，
-    而声明常量写着"租户级"，看起来完全正常 —— 没人问过"为什么这张表不加这一层"。）
+    （`http_idempotency` 曾经就是这个问题：策略只保护到租户级，
+    而声明常量写着"租户级"，看起来完全正常。）
     """
-    with psycopg.connect(pgtest.migration_dsn()) as conn:
+    tables = ("source_documents", "ingestion_jobs", "source_chunks")
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
         rows = conn.execute(
-            "SELECT table_name, privilege_type FROM information_schema.table_privileges"
-            " WHERE grantee = 'study_app'"
-            "   AND table_name IN ('source_documents', 'ingestion_jobs', 'source_chunks')"
+            "SELECT grantee, table_name, privilege_type FROM information_schema"
+            ".table_privileges"
+            " WHERE grantee IN ('study_app', 'study_worker') AND table_name = ANY(%s)",
+            (list(tables),),
         ).fetchall()
 
-    granted: dict[str, set[str]] = {}
-    for table, privilege in rows:
-        granted.setdefault(table, set()).add(privilege)
+    actual: dict[str, set[str]] = {}
+    for grantee, table, privilege in rows:
+        actual.setdefault(f"{grantee}:{table}", set()).add(privilege)
 
-    assert granted["source_documents"] == {"SELECT", "INSERT"}, granted
-    assert granted["source_chunks"] == {"SELECT", "INSERT"}, granted
-    # 任务表要能推进状态，但**不该能删除历史**。
-    assert granted["ingestion_jobs"] == {"SELECT", "INSERT", "UPDATE"}, granted
+    # 数据库层的实际授权（R4-01 的全部要求都落在这一张表上）
+    assert actual["study_app:source_documents"] == {"SELECT", "INSERT"}, actual
+    assert actual["study_app:source_chunks"] == {"SELECT", "INSERT"}, actual
+    # 应用角色不再能推进状态：`complete` / `fail` 是 worker 路径。
+    assert actual["study_app:ingestion_jobs"] == {"SELECT", "INSERT"}, actual
+    # worker 角色按最小集：认领要 SELECT + UPDATE（FOR UPDATE 需要行锁）。
+    assert actual["study_worker:ingestion_jobs"] == {"SELECT", "UPDATE"}, actual
+    assert actual["study_worker:source_documents"] == {"SELECT"}, actual
+    assert actual["study_worker:source_chunks"] == {"SELECT", "INSERT"}, actual
+
+    # 生成契约必须与数据库说同一件事。
+    contract = _contract_role_grants()
+    for table in tables:
+        assert contract[table]["study_app"] == _as_contract_text(
+            actual[f"study_app:{table}"]
+        ), f"{table} 的应用角色权限：契约与数据库不一致"
+        assert contract[table]["study_worker"] == _as_contract_text(
+            actual[f"study_worker:{table}"]
+        ), f"{table} 的 worker 角色权限：契约与数据库不一致"
+
+
+#: 契约与迁移里的权限写法顺序。**不用字母序**：`SELECT, INSERT` 与
+#: `INSERT, SELECT` 是同一个授权，但契约是给人读的，写法要稳定 ——
+#: 两边各按自己的习惯排，比对就会变成"随机红"。
+_PRIVILEGE_ORDER = ("SELECT", "INSERT", "UPDATE", "DELETE")
+
+
+def _as_contract_text(privileges: set[str]) -> str:
+    """把数据库读回来的权限集排成契约里的写法。"""
+    unknown = privileges - set(_PRIVILEGE_ORDER)
+    assert not unknown, f"出现契约写法没覆盖的权限：{sorted(unknown)}"
+    return ", ".join(name for name in _PRIVILEGE_ORDER if name in privileges)
+
+
+def _contract_role_grants() -> dict[str, dict[str, str]]:
+    """从生成的 `sql-schema.md` 表总览里读两类角色的权限列。"""
+    path = (
+        Path(__file__).resolve().parents[2] / "docs" / "skills" / "contracts" / "sql-schema.md"
+    )
+    text = path.read_text(encoding="utf-8")
+    found: dict[str, dict[str, str]] = {}
+    for line in text.splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if len(cells) != 6:
+            continue
+        name = cells[0].strip("`")
+        if name not in {"source_documents", "ingestion_jobs", "source_chunks"}:
+            continue
+        found[name] = {"study_app": cells[3], "study_worker": cells[4]}
+    assert set(found) == {"source_documents", "ingestion_jobs", "source_chunks"}, found
+    return found

@@ -277,6 +277,14 @@ def render_sql_schema() -> str:
     | `NO_DELETE` | 只给 `SELECT, INSERT, UPDATE` |
     | `SYSTEM_TABLES` | 认证前系统设施：无租户、无表权限，仅 definer 函数可触达 |
     | `POLICY_OVERRIDES` | 改写既有表的隔离级别，如 `{"projects": "成员感知"}` |
+    | `APP_ROLE_GRANTS_OVERRIDES` | **收回**应用角色权限的表及其新权限集 |
+    | `WORKER_ROLE_GRANTS` | worker 角色在这张表上的权限（另一条凭据边界） |
+
+    ⚠️ 后两个常量存在的原因很具体：0008 把 `ingestion_jobs` 的 `UPDATE`
+    从应用角色收回并给了 worker 角色。如果本函数只认 `APPEND_ONLY` / `NO_DELETE`
+    （它们写在**建表迁移**里），契约就会继续声称"应用角色能 UPDATE 队列"——
+    而真正生效的是 `information_schema.table_privileges`。**契约撒谎比没有契约更糟**：
+    它会让"为什么这张表还留着这一层"这个问题永远不被问出口。
     """
     tables: dict[str, dict[str, object]] = {}
     for filename, tree in _migration_modules():
@@ -287,6 +295,8 @@ def render_sql_schema() -> str:
         no_delete = set(_module_literal(tree, "NO_DELETE") or ())
         system_tables = set(_module_literal(tree, "SYSTEM_TABLES") or ())
         overrides = _module_literal(tree, "POLICY_OVERRIDES") or {}
+        app_overrides = _module_literal(tree, "APP_ROLE_GRANTS_OVERRIDES") or {}
+        worker_grants = _module_literal(tree, "WORKER_ROLE_GRANTS") or {}
 
         for block in _create_table_blocks(tree):
             name = _table_name(block)
@@ -312,6 +322,7 @@ def render_sql_schema() -> str:
                 "revision": revision,
                 "scope": scope,
                 "grants": grants,
+                "worker_grants": worker_grants.get(name, "—"),
                 "columns": _columns_of(block),
             }
 
@@ -330,6 +341,16 @@ def render_sql_schema() -> str:
                 tables[name]["scope"] = label
                 tables[name]["revision"] = f"{tables[name]['revision']} → {revision} 改写"
 
+        # 后续迁移收回应用角色的权限、或授予 worker 角色权限。
+        # 按迁移顺序覆盖：链尾的声明为准（与数据库的最终状态一致）。
+        for name, privileges in dict(app_overrides).items():
+            if name in tables:
+                tables[name]["grants"] = privileges
+                tables[name]["revision"] = f"{tables[name]['revision']} → {revision} 改写"
+        for name, privileges in dict(worker_grants).items():
+            if name in tables:
+                tables[name]["worker_grants"] = privileges
+
     lines = [
         "> 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。",
         "> 迁移是数据库的权威定义，本区是它的生成视图。",
@@ -338,14 +359,14 @@ def render_sql_schema() -> str:
         "",
         "### 表总览",
         "",
-        "| 表 | 来源迁移 | 隔离级别 | 应用角色权限 | 列数 |",
-        "|---|---|---|---|---:|",
+        "| 表 | 来源迁移 | 隔离级别 | 应用角色权限 | worker 角色权限 | 列数 |",
+        "|---|---|---|---|---|---:|",
     ]
     for name in sorted(tables):
         info = tables[name]
         lines.append(
             f"| `{name}` | {info['revision']} | {info['scope']} | {info['grants']} | "
-            f"{len(info['columns'])} |"
+            f"{info['worker_grants']} | {len(info['columns'])} |"
         )
 
     lines += ["", "### 列明细", "", "| 表 | 列 | 类型 |", "|---|---|---|"]
@@ -359,7 +380,8 @@ def render_sql_schema() -> str:
         "",
         "策略谓词、`GRANT` 语句、索引与 `CHECK` 约束的**文本**不在本表里 ——",
         "它们由迁移文件承载，改迁移即可，不需要维护两份。",
-        "本区回答三个问题：有哪些表、每张表怎么隔离、应用角色能做什么。",
+        "本区回答四个问题：有哪些表、每张表怎么隔离、**应用角色**能做什么、",
+        "**worker 角色**能做什么（两者是两条凭据边界，见 0008 迁移）。",
     ]
     return "\n".join(lines)
 

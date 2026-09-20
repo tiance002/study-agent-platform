@@ -3,22 +3,28 @@
 四条纪律与 `db/product_store.py` 一致：参数绑定、事务边界即方法边界、
 数据库错误翻译成平台错误、**每个方法的第一条语句之前先设 RLS 上下文**。
 
-## 三个事务形状，各自服务一件事
+## 四个事务形状，各自服务一件事
 
-| 方法 | 上下文 | 为什么 |
-|---|---|---|
-| `enqueue` / `get_job` / `complete` / `fail` / `stored_chunks` | 租户 + 项目 | 与其它项目级表一致的用户路径 |
-| `claim_next` | **worker**（`app.worker_id`） | 见下 |
-| `load_document` | 任务自带的租户 + 项目 | worker 只能读到认领范围内的原文 |
+| 方法 | 连接角色 | 上下文 | 为什么 |
+|---|---|---|---|
+| `enqueue` / `get_job` / `stored_chunks` | 应用（`study_app`） | 租户 + 项目 | 与其它项目级表一致的用户路径 |
+| `claim_next` | **worker**（`study_worker`） | 无 | 见下 |
+| `load_document` / `complete` / `fail` | **worker** | 任务自带的租户 + 项目 | 只能读取/落定认领范围内的原文 |
 
-## `claim_next` 为什么必须用 worker 上下文
+## 为什么 worker 路径是**另一个数据库角色**
 
 worker 要先知道"哪个租户有活干"，才可能建立任何租户上下文。要求它带租户身份，
 等于要求它在知道自己要处理谁之前就声称自己是谁 —— 那只能靠伪造身份来满足签名。
 
-所以 0007 给 `ingestion_jobs` 加了一条**独立的、有名有姓的**策略
-（`ingestion_jobs_worker`），而不是往标准谓词里塞 `OR ...`：
-标准谓词读起来必须与其它项目级表逐字一致，多出来的权限才有机会被单独看见。
+0007 给 `ingestion_jobs` 加了一条**独立的、有名有姓的**策略
+（`ingestion_jobs_worker`，而不是往标准谓词里塞 `OR ...`：标准谓词读起来必须
+与其它项目级表逐字一致，多出来的权限才有机会被单独看见）—— 但它**没有限定角色**。
+于是 `app.worker_id` 这个自定义 GUC 成了事实上的凭据：任何持应用连接串的人
+自己 `set_config` 一下就能读到全部队列（只读实测：0 行 → 177 行）。
+
+0008 把策略限成 `TO study_worker`，并把 `UPDATE` 从应用角色收回；本模块对应地
+把 worker 的四个方法改成走 `worker_dsn`。**两处必须同时成立**：只改迁移则 worker
+认领不到任务（症状是"队列空了"），只改代码则越权依旧。
 
 认领之后的一切写入仍走租户 + 项目上下文 —— worker 从任务行读出
 `tenant_id` / `project_id` 再建立上下文，因此它拿不到认领范围之外的数据。
@@ -47,7 +53,7 @@ from psycopg import errors as pg_errors
 from app.core.artifacts import DisplayPolicy
 from app.core.clock import Clock, SystemClock
 from app.core.errors import ErrorCode, deny
-from app.db.session import connect, tenant_transaction
+from app.db.session import tenant_transaction, worker_transaction
 from app.identity.models import Principal
 from app.identity.ports import MembershipRepository
 from app.knowledge.models import (
@@ -183,10 +189,15 @@ class PostgresIngestionRepository:
         membership: MembershipRepository,
         clock: Clock | None = None,
         dsn: str | None = None,
+        worker_dsn: str | None = None,
     ) -> None:
         self.membership = membership
         self._clock = clock or SystemClock()
+        #: 应用角色连接串（用户路径）。
         self._dsn = dsn
+        #: worker 角色连接串（认领与落定）。见模块 docstring：
+        #: 队列的跨租户可见性只授予该角色，两者不能互相顶替。
+        self._worker_dsn = worker_dsn
 
     # ------------------------------------------------------------------ 写入
 
@@ -314,8 +325,8 @@ class PostgresIngestionRepository:
         return _job_from_row(row)
 
     def load_document(self, job: IngestionJob) -> SourceDocument:
-        with tenant_transaction(
-            tenant_id=job.tenant_id, project_id=job.project_id, dsn=self._dsn
+        with worker_transaction(
+            tenant_id=job.tenant_id, project_id=job.project_id, dsn=self._worker_dsn
         ) as conn:
             row = conn.execute(
                 "SELECT " + _DOCUMENT_COLUMNS
@@ -348,33 +359,36 @@ class PostgresIngestionRepository:
     # ------------------------------------------------------------------ 队列
 
     def claim_next(self, *, worker_id: str, lease_seconds: int) -> IngestionJob | None:
-        """认领下一个可做的任务（系统级操作，见模块 docstring）。"""
-        with connect(self._dsn) as conn:
-            with conn.transaction():
-                conn.execute(
-                    "SELECT set_config('app.worker_id', %s, true)", (worker_id,)
-                )
-                selected = conn.execute(_CLAIM_SELECT).fetchone()
-                if selected is None:
-                    return None
-                row = conn.execute(
-                    "UPDATE ingestion_jobs"
-                    " SET status = 'processing',"
-                    "     attempt_count = attempt_count + 1,"
-                    "     lease_owner = %s,"
-                    "     lease_until = now() + make_interval(secs => %s),"
-                    "     updated_at = now()"
-                    " WHERE job_id = %s"
-                    " RETURNING " + _JOB_COLUMNS,
-                    (worker_id, float(lease_seconds), selected[0]),
-                ).fetchone()
+        """认领下一个可做的任务（系统级操作，见模块 docstring）。
+
+        连接用的是 **worker 角色**：队列的跨租户可见性在 0008 起限给
+        `study_worker`，用应用角色连接会一条也看不到。
+        """
+        with worker_transaction(dsn=self._worker_dsn) as conn:
+            conn.execute(
+                "SELECT set_config('app.worker_id', %s, true)", (worker_id,)
+            )
+            selected = conn.execute(_CLAIM_SELECT).fetchone()
+            if selected is None:
+                return None
+            row = conn.execute(
+                "UPDATE ingestion_jobs"
+                " SET status = 'processing',"
+                "     attempt_count = attempt_count + 1,"
+                "     lease_owner = %s,"
+                "     lease_until = now() + make_interval(secs => %s),"
+                "     updated_at = now()"
+                " WHERE job_id = %s"
+                " RETURNING " + _JOB_COLUMNS,
+                (worker_id, float(lease_seconds), selected[0]),
+            ).fetchone()
         assert row is not None, "刚被本事务锁住并选中的行不可能在 UPDATE 时消失"
         return _job_from_row(row)
 
     def complete(self, job: IngestionJob, chunks: tuple[StoredChunk, ...]) -> None:
         assert_chunks_belong_to_job(job, chunks)
-        with tenant_transaction(
-            tenant_id=job.tenant_id, project_id=job.project_id, dsn=self._dsn
+        with worker_transaction(
+            tenant_id=job.tenant_id, project_id=job.project_id, dsn=self._worker_dsn
         ) as conn:
             # 行锁把并发的重复投递串行化：第二个事务在这里等，等到的已是 succeeded。
             current = conn.execute(
@@ -427,8 +441,8 @@ class PostgresIngestionRepository:
             )
 
     def fail(self, job: IngestionJob, *, error_code: str, safe_detail: str) -> None:
-        with tenant_transaction(
-            tenant_id=job.tenant_id, project_id=job.project_id, dsn=self._dsn
+        with worker_transaction(
+            tenant_id=job.tenant_id, project_id=job.project_id, dsn=self._worker_dsn
         ) as conn:
             current = conn.execute(
                 "SELECT status FROM ingestion_jobs WHERE job_id = %s FOR UPDATE",

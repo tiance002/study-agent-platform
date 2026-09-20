@@ -7,42 +7,42 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:a053271a2f01cf6d107936d127c9de6d28ef7d137ffd63156e1b665556aceaee, generated_at=2026-09-20T02:43:11Z -->
-> 生成时间：2026-09-20T02:43:11Z
+<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:c68715aba182d7d07d7a94ed5f1eb7686353e7a96cfa0780e6b46c0e5787bef8, generated_at=2026-09-20T04:38:41Z -->
+> 生成时间：2026-09-20T04:38:41Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
 
-当前 head：`0007`
+当前 head：`0008`
 
 ### 表总览
 
-| 表 | 来源迁移 | 隔离级别 | 应用角色权限 | 列数 |
-|---|---|---|---|---:|
-| `action_intents` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 11 |
-| `auth_attempt_counters` | 0004 | 系统级（无租户，认证前设施） | 无表权限（仅 SECURITY DEFINER 函数 EXECUTE） | 4 |
-| `auth_audit_outbox` | 0006 → 0006 改写 | 系统级（认证前审计事实中转；应用 INSERT/SELECT/UPDATE，无 DELETE） | SELECT, INSERT, UPDATE | 9 |
-| `confirmations` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 12 |
-| `conversations` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 6 |
-| `diagnoses` | 0005 | 租户+项目+主体 | SELECT, INSERT | 7 |
-| `evidence_events` | 0001 | 租户+项目 | SELECT, INSERT | 12 |
-| `http_idempotency` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE | 13 |
-| `ingestion_jobs` | 0007 | 租户+项目 | SELECT, INSERT, UPDATE | 13 |
-| `invitations` | 0002 | 租户 | SELECT, INSERT, UPDATE, DELETE | 9 |
-| `learning_plans` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 7 |
-| `learning_tasks` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 7 |
-| `messages` | 0002 | 租户+项目 | SELECT, INSERT | 8 |
-| `milestones` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 7 |
-| `principals` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | 4 |
-| `project_grants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | 4 |
-| `projects` | 0001 → 0002 改写 | 成员感知 | SELECT, INSERT, UPDATE, DELETE | 7 |
-| `source_chunks` | 0007 | 租户+项目 | SELECT, INSERT | 15 |
-| `source_documents` | 0007 | 租户+项目 | SELECT, INSERT | 15 |
-| `sources` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 8 |
-| `task_assessments` | 0005 | 租户+项目 | SELECT, INSERT | 8 |
-| `task_submissions` | 0005 | 租户+项目+主体 | SELECT, INSERT | 8 |
-| `tenants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | 3 |
-| `user_sessions` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE, DELETE | 6 |
+| 表 | 来源迁移 | 隔离级别 | 应用角色权限 | worker 角色权限 | 列数 |
+|---|---|---|---|---|---:|
+| `action_intents` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 11 |
+| `auth_attempt_counters` | 0004 | 系统级（无租户，认证前设施） | 无表权限（仅 SECURITY DEFINER 函数 EXECUTE） | — | 4 |
+| `auth_audit_outbox` | 0006 → 0006 改写 | 系统级（认证前审计事实中转；应用 INSERT/SELECT/UPDATE，无 DELETE） | SELECT, INSERT, UPDATE | — | 9 |
+| `confirmations` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 12 |
+| `conversations` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 6 |
+| `diagnoses` | 0005 | 租户+项目+主体 | SELECT, INSERT | — | 7 |
+| `evidence_events` | 0001 | 租户+项目 | SELECT, INSERT | — | 12 |
+| `http_idempotency` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE | — | 13 |
+| `ingestion_jobs` | 0007 → 0008 改写 | 租户+项目 | SELECT, INSERT | SELECT, UPDATE | 13 |
+| `invitations` | 0002 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 9 |
+| `learning_plans` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
+| `learning_tasks` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
+| `messages` | 0002 | 租户+项目 | SELECT, INSERT | — | 8 |
+| `milestones` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
+| `principals` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 4 |
+| `project_grants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 4 |
+| `projects` | 0001 → 0002 改写 | 成员感知 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
+| `source_chunks` | 0007 | 租户+项目 | SELECT, INSERT | SELECT, INSERT | 15 |
+| `source_documents` | 0007 | 租户+项目 | SELECT, INSERT | SELECT | 15 |
+| `sources` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 8 |
+| `task_assessments` | 0005 | 租户+项目 | SELECT, INSERT | — | 8 |
+| `task_submissions` | 0005 | 租户+项目+主体 | SELECT, INSERT | — | 8 |
+| `tenants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 3 |
+| `user_sessions` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE, DELETE | — | 6 |
 
 ### 列明细
 
@@ -256,7 +256,8 @@
 
 策略谓词、`GRANT` 语句、索引与 `CHECK` 约束的**文本**不在本表里 ——
 它们由迁移文件承载，改迁移即可，不需要维护两份。
-本区回答三个问题：有哪些表、每张表怎么隔离、应用角色能做什么。
+本区回答四个问题：有哪些表、每张表怎么隔离、**应用角色**能做什么、
+**worker 角色**能做什么（两者是两条凭据边界，见 0008 迁移）。
 <!-- END GENERATED -->
 
 ## 2. 手写区 · 不可协商的数据库约束
