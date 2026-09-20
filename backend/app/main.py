@@ -30,6 +30,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.api.auth_routes import router as auth_router
@@ -39,7 +40,7 @@ from app.api.http_idempotency import (
 )
 from app.api.product_routes import router as product_router
 from app.api.projects_routes import router as projects_router
-from app.api.routes import error_response, router
+from app.api.routes import error_response, request_validation_response, router
 from app.audit.outbox import (
     AuditOutbox,
     InMemoryAuditOutbox,
@@ -59,6 +60,7 @@ from app.db.identity_store import (
     PostgresMembershipRepository,
     PostgresSessionRepository,
 )
+from app.db.ingestion_store import PostgresIngestionRepository
 from app.db.learning_store import PostgresLearningLoopRepository
 from app.db.product_store import PostgresProductRepository
 from app.db.rate_limit_store import PostgresRateLimiter
@@ -81,6 +83,8 @@ from app.identity.ports import (
 )
 from app.identity.rate_limit import InMemoryRateLimiter, RateLimiter
 from app.identity.session import SessionIssuer
+from app.knowledge.memory_store import InMemoryIngestionRepository
+from app.knowledge.ports import IngestionRepository
 from app.knowledge.retrieval import ChunkIndex
 from app.learning.evidence import EvidenceLog
 from app.learning.loop_store import InMemoryLearningLoopRepository
@@ -110,7 +114,7 @@ DEMO_PROJECT = "proj_demo"
 DEFAULT_SESSION_TTL = timedelta(hours=8)
 
 #: 代码预期的数据库迁移版本。启动自检核对它；新增迁移必须同步更新。
-EXPECTED_SCHEMA_VERSION = "0006"
+EXPECTED_SCHEMA_VERSION = "0007"
 
 
 @dataclass
@@ -148,6 +152,9 @@ class PlatformState:
     evidence: EvidenceRepository
     # 跨产品表与证据表的原子学习闭环命令。
     learning_loop: LearningLoopRepository
+    # 资料摄取：原文、摄取任务与可引用片段。必填同理 —— 上传端点不能等
+    # 第一个请求才暴露装配缺失。
+    ingestion: IngestionRepository
     #: 会话 cookie 的有效期（也是兑换出的数据库会话的过期时间）。
     session_ttl: timedelta = DEFAULT_SESSION_TTL
     #: 生产环境置 True（HTTPS-only cookie）。测试与本机开发保持 False：
@@ -249,6 +256,7 @@ def build_platform(
     http_idempotency: HttpIdempotencyStore | None
     evidence: EvidenceRepository
     learning_loop: LearningLoopRepository
+    ingestion: IngestionRepository
     audit_outbox: AuditOutbox
 
     if loaded.use_postgres:
@@ -270,6 +278,9 @@ def build_platform(
         evidence = PostgresEvidenceRepository(clock, dsn)
         learning_loop = PostgresLearningLoopRepository(
             products=products, evidence=evidence, dsn=dsn
+        )
+        ingestion = PostgresIngestionRepository(
+            membership=membership, clock=clock, dsn=dsn
         )
         rate_limiter: RateLimiter = PostgresRateLimiter(
             limit=loaded.exchange_limit,
@@ -313,6 +324,7 @@ def build_platform(
             http_idempotency=http_idempotency,
             evidence=evidence,
             learning_loop=learning_loop,
+            ingestion=ingestion,
             session_ttl=loaded.session_ttl,
             cookie_secure=loaded.cookie_secure,
             rate_limiter=rate_limiter,
@@ -343,6 +355,9 @@ def build_platform(
     http_idempotency = InMemoryHttpIdempotencyStore()
     evidence = InMemoryEvidenceRepository(clock=clock)
     learning_loop = InMemoryLearningLoopRepository(products, evidence)
+    ingestion = InMemoryIngestionRepository(
+        membership=membership, products=products, clock=clock
+    )
     rate_limiter = InMemoryRateLimiter(
         limit=loaded.exchange_limit,
         window_seconds=loaded.exchange_window_seconds,
@@ -383,6 +398,7 @@ def build_platform(
         http_idempotency=http_idempotency,
         evidence=evidence,
         learning_loop=learning_loop,
+        ingestion=ingestion,
         session_ttl=loaded.session_ttl,
         cookie_secure=loaded.cookie_secure,
         rate_limiter=rate_limiter,
@@ -473,6 +489,19 @@ def create_app(*, platform: PlatformState | None = None) -> FastAPI:
     @app.exception_handler(PlatformError)
     async def _platform_error(_: Request, exc: PlatformError) -> JSONResponse:
         return error_response(exc)
+
+    @app.exception_handler(RequestValidationError)
+    async def _request_validation_error(
+        _: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        """请求形状错误。
+
+        必须显式注册：FastAPI 的默认实现返回 `{"detail": [...]}`，
+        它既与本项目其它错误响应**形状不同**，又会把请求输入原样回显 ——
+        遇到不能编码成 UTF-8 的输入（孤立代理项）时，编码响应本身抛异常，
+        422 变成 500。理由详见 `api/routes.py:request_validation_response`。
+        """
+        return request_validation_response(exc)
 
     @app.get("/", include_in_schema=False)
     async def index() -> FileResponse:

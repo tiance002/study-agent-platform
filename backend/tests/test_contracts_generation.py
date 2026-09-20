@@ -236,3 +236,47 @@ def test_every_target_declares_sources_and_renderer():
         assert target.sources, f"{name} 没有声明源"
         assert target.renderer in gc.RENDERERS, f"{name} 的 renderer 未实现"
         assert target.contract_path.exists(), f"{name} 的契约文件不存在"
+
+
+# --------------------------------------------------------- 表结构解析的健壮性
+
+
+@pytest.mark.invariant
+def test_create_table_parser_ignores_comments_and_multiline_foreign_keys():
+    """迁移里的注释与跨行外键不能被读成列。
+
+    实测缺陷：0007 的 `-- 见模块 docstring：…` 让契约里凭空多出一个名为 `--`
+    的列，跨行的 `FOREIGN KEY (...) \\n REFERENCES ...` 又多出三个 `REFERENCES`
+    列 —— `ingestion_jobs` 的列数被报成 20（真实 13）。
+
+    列数错不是排版问题：**这份契约是机械门禁的判据**，它读错一行，
+    就等于每次校验都在骗人。
+    """
+    block = """
+CREATE TABLE sample (
+    row_id     text PRIMARY KEY,
+    -- 这一行是给人读的注释，不是列
+    tenant_id  text NOT NULL,
+    project_id text NOT NULL,
+    UNIQUE (row_id),
+    FOREIGN KEY (tenant_id, project_id)
+        REFERENCES projects (tenant_id, project_id),
+    CHECK (row_id <> '')
+)
+"""
+    assert gc._columns_of(block) == [
+        ("row_id", "text"),
+        ("tenant_id", "text"),
+        ("project_id", "text"),
+    ]
+
+
+@pytest.mark.invariant
+def test_real_migrations_have_no_comment_or_constraint_pseudo_columns():
+    """真实迁移导出的列名必须都是合法标识符（不许出现 `--` / `REFERENCES`）。"""
+    for _filename, tree in gc._migration_modules():
+        for block in gc._create_table_blocks(tree):
+            for name, _ctype in gc._columns_of(block):
+                assert gc._IDENTIFIER_RE.match(name), (
+                    f"{_filename} 的 {gc._table_name(block)} 里读出了非法列名 {name!r}"
+                )

@@ -7,13 +7,13 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:93407af711baa61af423ad0757f38d87c01462a8b1b8c17917fa24abef52cebb, generated_at=2026-09-19T18:20:37Z -->
-> 生成时间：2026-09-19T18:20:37Z
+<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:a053271a2f01cf6d107936d127c9de6d28ef7d137ffd63156e1b665556aceaee, generated_at=2026-09-20T02:43:11Z -->
+> 生成时间：2026-09-20T02:43:11Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
 
-当前 head：`0006`
+当前 head：`0007`
 
 ### 表总览
 
@@ -24,9 +24,10 @@
 | `auth_audit_outbox` | 0006 → 0006 改写 | 系统级（认证前审计事实中转；应用 INSERT/SELECT/UPDATE，无 DELETE） | SELECT, INSERT, UPDATE | 9 |
 | `confirmations` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 12 |
 | `conversations` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 6 |
-| `diagnoses` | 0005 | 租户+项目+主体 | SELECT, INSERT | 9 |
+| `diagnoses` | 0005 | 租户+项目+主体 | SELECT, INSERT | 7 |
 | `evidence_events` | 0001 | 租户+项目 | SELECT, INSERT | 12 |
 | `http_idempotency` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE | 13 |
+| `ingestion_jobs` | 0007 | 租户+项目 | SELECT, INSERT, UPDATE | 13 |
 | `invitations` | 0002 | 租户 | SELECT, INSERT, UPDATE, DELETE | 9 |
 | `learning_plans` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 7 |
 | `learning_tasks` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 7 |
@@ -35,9 +36,11 @@
 | `principals` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | 4 |
 | `project_grants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | 4 |
 | `projects` | 0001 → 0002 改写 | 成员感知 | SELECT, INSERT, UPDATE, DELETE | 7 |
+| `source_chunks` | 0007 | 租户+项目 | SELECT, INSERT | 15 |
+| `source_documents` | 0007 | 租户+项目 | SELECT, INSERT | 15 |
 | `sources` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | 8 |
-| `task_assessments` | 0005 | 租户+项目 | SELECT, INSERT | 10 |
-| `task_submissions` | 0005 | 租户+项目+主体 | SELECT, INSERT | 11 |
+| `task_assessments` | 0005 | 租户+项目 | SELECT, INSERT | 8 |
+| `task_submissions` | 0005 | 租户+项目+主体 | SELECT, INSERT | 8 |
 | `tenants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | 3 |
 | `user_sessions` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE, DELETE | 6 |
 
@@ -94,8 +97,6 @@
 | `diagnoses` | `answers` | `jsonb` |
 | `diagnoses` | `summary` | `text` |
 | `diagnoses` | `created_at` | `timestamptz` |
-| `diagnoses` | `REFERENCES` | `projects` |
-| `diagnoses` | `REFERENCES` | `principals` |
 | `evidence_events` | `seq` | `bigint` |
 | `evidence_events` | `event_id` | `text` |
 | `evidence_events` | `tenant_id` | `text` |
@@ -121,6 +122,19 @@
 | `http_idempotency` | `claimed_at` | `timestamptz` |
 | `http_idempotency` | `completed_at` | `timestamptz` |
 | `http_idempotency` | `owner_token` | `text` |
+| `ingestion_jobs` | `job_id` | `text` |
+| `ingestion_jobs` | `tenant_id` | `text` |
+| `ingestion_jobs` | `project_id` | `text` |
+| `ingestion_jobs` | `source_id` | `text` |
+| `ingestion_jobs` | `document_id` | `text` |
+| `ingestion_jobs` | `status` | `text` |
+| `ingestion_jobs` | `attempt_count` | `integer` |
+| `ingestion_jobs` | `lease_owner` | `text` |
+| `ingestion_jobs` | `lease_until` | `timestamptz` |
+| `ingestion_jobs` | `error_code` | `text` |
+| `ingestion_jobs` | `error_detail` | `text` |
+| `ingestion_jobs` | `created_at` | `timestamptz` |
+| `ingestion_jobs` | `updated_at` | `timestamptz` |
 | `invitations` | `invitation_id` | `text` |
 | `invitations` | `tenant_id` | `text` |
 | `invitations` | `token_hash` | `text` |
@@ -174,6 +188,36 @@
 | `projects` | `goal` | `text` |
 | `projects` | `version` | `integer` |
 | `projects` | `updated_at` | `timestamptz` |
+| `source_chunks` | `chunk_id` | `text` |
+| `source_chunks` | `tenant_id` | `text` |
+| `source_chunks` | `project_id` | `text` |
+| `source_chunks` | `source_id` | `text` |
+| `source_chunks` | `document_id` | `text` |
+| `source_chunks` | `chunk_index` | `integer` |
+| `source_chunks` | `heading_path` | `jsonb` |
+| `source_chunks` | `heading_level` | `integer` |
+| `source_chunks` | `span_start` | `integer` |
+| `source_chunks` | `span_end` | `integer` |
+| `source_chunks` | `content` | `text` |
+| `source_chunks` | `content_hash` | `text` |
+| `source_chunks` | `parser_version` | `text` |
+| `source_chunks` | `display_policy` | `text` |
+| `source_chunks` | `created_at` | `timestamptz` |
+| `source_documents` | `document_id` | `text` |
+| `source_documents` | `tenant_id` | `text` |
+| `source_documents` | `project_id` | `text` |
+| `source_documents` | `source_id` | `text` |
+| `source_documents` | `version` | `integer` |
+| `source_documents` | `document_title` | `text` |
+| `source_documents` | `content` | `text` |
+| `source_documents` | `content_hash` | `text` |
+| `source_documents` | `media_type` | `text` |
+| `source_documents` | `language` | `text` |
+| `source_documents` | `parser_version` | `text` |
+| `source_documents` | `acquisition_method` | `text` |
+| `source_documents` | `taint_sources` | `jsonb` |
+| `source_documents` | `derived_from` | `jsonb` |
+| `source_documents` | `observed_at` | `timestamptz` |
 | `sources` | `source_id` | `text` |
 | `sources` | `tenant_id` | `text` |
 | `sources` | `project_id` | `text` |
@@ -190,8 +234,6 @@
 | `task_assessments` | `contract_id` | `text` |
 | `task_assessments` | `mapping_version` | `text` |
 | `task_assessments` | `created_at` | `timestamptz` |
-| `task_assessments` | `REFERENCES` | `projects` |
-| `task_assessments` | `REFERENCES` | `learning_tasks` |
 | `task_submissions` | `submission_id` | `text` |
 | `task_submissions` | `tenant_id` | `text` |
 | `task_submissions` | `project_id` | `text` |
@@ -200,9 +242,6 @@
 | `task_submissions` | `mode` | `text` |
 | `task_submissions` | `content` | `text` |
 | `task_submissions` | `created_at` | `timestamptz` |
-| `task_submissions` | `REFERENCES` | `projects` |
-| `task_submissions` | `REFERENCES` | `learning_tasks` |
-| `task_submissions` | `REFERENCES` | `principals` |
 | `tenants` | `tenant_id` | `text` |
 | `tenants` | `name` | `text` |
 | `tenants` | `created_at` | `timestamptz` |

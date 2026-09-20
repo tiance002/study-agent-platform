@@ -167,9 +167,23 @@ def _create_table_blocks(tree: ast.Module) -> list[str]:
 _TABLE_NAME_RE = re.compile(r"CREATE TABLE\s+(\w+)\s*\(")
 _TABLE_BODY_RE = re.compile(r"CREATE TABLE\s+\w+\s*\((.*?)\n\)\s*$", re.DOTALL)
 #: 表级约束不是列。按行首关键字跳过 —— 比靠缩进稳（缩进在 SQL 里没有语义）。
+#:
+#: `REFERENCES` 也在列：跨行的 `FOREIGN KEY (...)` 声明里，续行以它开头
+#: （见 0007）。不跳过的话，一条外键会被读成三个名为 `REFERENCES` 的列。
 _TABLE_CONSTRAINT_KEYWORDS = frozenset(
-    {"UNIQUE", "CHECK", "PRIMARY", "FOREIGN", "CONSTRAINT", "EXCLUDE"}
+    {"UNIQUE", "CHECK", "PRIMARY", "FOREIGN", "CONSTRAINT", "EXCLUDE", "REFERENCES"}
 )
+
+
+def _strip_sql_comment(line: str) -> str:
+    """去掉行内 `--` 注释。
+
+    迁移里的注释是给人读的，但逐行解析器会把整行当成列定义 ——
+    实测：`-- 见模块 docstring：…` 会以一个名为 `--` 的"列"出现在契约里，
+    并把列数报多。**契约是机械门禁的判据，读错一行就等于骗一次。**
+    """
+    marker = line.find("--")
+    return line if marker == -1 else line[:marker]
 
 
 def _text_blocks(tree: ast.Module) -> list[str]:
@@ -189,6 +203,11 @@ _ADD_COLUMN_RE = re.compile(
     r"ALTER TABLE\s+(\w+)\s+ADD COLUMN\s+(\w+)\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
 
+#: 合法列名。用于自检：注释或跨行约束被读成"列"时，读出来的名字会带 `--`
+#: 或 `REFERENCES` 这类非法字符，一眼就能被这条正则拦下。
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 
 def _table_name(block: str) -> str | None:
     found = _TABLE_NAME_RE.search(block)
@@ -206,7 +225,7 @@ def _columns_of(block: str) -> list[tuple[str, str]]:
         return []
     columns: list[tuple[str, str]] = []
     for raw_line in body.group(1).splitlines():
-        line = raw_line.strip().rstrip(",").strip()
+        line = _strip_sql_comment(raw_line).strip().rstrip(",").strip()
         if not line:
             continue
         parts = line.split()
