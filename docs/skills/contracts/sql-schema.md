@@ -7,13 +7,13 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:be573ec6cf87c3ccd6ccdb59bf6c183ce1ced269cb066a64d8d90dc1e1216099, generated_at=2026-09-20T04:50:11Z -->
-> 生成时间：2026-09-20T04:50:11Z
+<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:b9a2e0544233522a459979e7e0bc3ea28c20e8414b7531c29dd8820d351a0a7a, generated_at=2026-09-20T08:23:55Z -->
+> 生成时间：2026-09-20T08:23:55Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
 
-当前 head：`0009`
+当前 head：`0010`
 
 ### 表总览
 
@@ -31,16 +31,22 @@
 | `invitations` | 0002 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 9 |
 | `learning_plans` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
 | `learning_tasks` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
-| `messages` | 0002 | 租户+项目 | SELECT, INSERT | — | 8 |
+| `messages` | 0002 | 租户+项目 | SELECT, INSERT | INSERT | 8 |
 | `milestones` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
 | `principals` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 4 |
 | `project_grants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 4 |
 | `projects` | 0001 → 0002 改写 | 成员感知 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
+| `provider_attempts` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 13 |
 | `source_chunks` | 0007 | 租户+项目 | SELECT, INSERT | SELECT, INSERT | 15 |
 | `source_documents` | 0007 | 租户+项目 | SELECT, INSERT | SELECT | 15 |
 | `sources` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 8 |
 | `task_assessments` | 0005 | 租户+项目 | SELECT, INSERT | — | 8 |
 | `task_submissions` | 0005 | 租户+项目+主体 | SELECT, INSERT | — | 8 |
+| `teaching_budgets` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 11 |
+| `teaching_events` | 0010 | 租户+项目 | SELECT, INSERT | SELECT, INSERT | 7 |
+| `teaching_reservations` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 13 |
+| `teaching_runs` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 23 |
+| `teaching_tenant_budgets` | 0010 | 租户 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 8 |
 | `tenants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 3 |
 | `user_sessions` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE, DELETE | — | 6 |
 
@@ -189,6 +195,19 @@
 | `projects` | `goal` | `text` |
 | `projects` | `version` | `integer` |
 | `projects` | `updated_at` | `timestamptz` |
+| `provider_attempts` | `attempt_id` | `text` |
+| `provider_attempts` | `tenant_id` | `text` |
+| `provider_attempts` | `project_id` | `text` |
+| `provider_attempts` | `run_id` | `text` |
+| `provider_attempts` | `status` | `text` |
+| `provider_attempts` | `('dispatched',` | `'unknown',` |
+| `provider_attempts` | `provider_request_id` | `text` |
+| `provider_attempts` | `result_payload` | `jsonb` |
+| `provider_attempts` | `input_tokens` | `integer` |
+| `provider_attempts` | `output_tokens` | `integer` |
+| `provider_attempts` | `cost_micro` | `bigint` |
+| `provider_attempts` | `created_at` | `timestamptz` |
+| `provider_attempts` | `updated_at` | `timestamptz` |
 | `source_chunks` | `chunk_id` | `text` |
 | `source_chunks` | `tenant_id` | `text` |
 | `source_chunks` | `project_id` | `text` |
@@ -243,6 +262,68 @@
 | `task_submissions` | `mode` | `text` |
 | `task_submissions` | `content` | `text` |
 | `task_submissions` | `created_at` | `timestamptz` |
+| `teaching_budgets` | `tenant_id` | `text` |
+| `teaching_budgets` | `project_id` | `text` |
+| `teaching_budgets` | `total_micro` | `bigint` |
+| `teaching_budgets` | `max_input_tokens` | `integer` |
+| `teaching_budgets` | `max_output_tokens` | `integer` |
+| `teaching_budgets` | `reserved_micro` | `bigint` |
+| `teaching_budgets` | `in_flight_micro` | `bigint` |
+| `teaching_budgets` | `spent_micro` | `bigint` |
+| `teaching_budgets` | `price_version` | `text` |
+| `teaching_budgets` | `created_at` | `timestamptz` |
+| `teaching_budgets` | `updated_at` | `timestamptz` |
+| `teaching_events` | `run_id` | `text` |
+| `teaching_events` | `seq` | `integer` |
+| `teaching_events` | `tenant_id` | `text` |
+| `teaching_events` | `project_id` | `text` |
+| `teaching_events` | `event_type` | `text` |
+| `teaching_events` | `payload` | `jsonb` |
+| `teaching_events` | `created_at` | `timestamptz` |
+| `teaching_reservations` | `reservation_id` | `text` |
+| `teaching_reservations` | `tenant_id` | `text` |
+| `teaching_reservations` | `project_id` | `text` |
+| `teaching_reservations` | `run_id` | `text` |
+| `teaching_reservations` | `state` | `text` |
+| `teaching_reservations` | `('held',` | `'in_flight',` |
+| `teaching_reservations` | `estimated_micro` | `bigint` |
+| `teaching_reservations` | `estimated_input_tokens` | `integer` |
+| `teaching_reservations` | `estimated_output_tokens` | `integer` |
+| `teaching_reservations` | `actual_micro` | `bigint` |
+| `teaching_reservations` | `price_version` | `text` |
+| `teaching_reservations` | `created_at` | `timestamptz` |
+| `teaching_reservations` | `updated_at` | `timestamptz` |
+| `teaching_runs` | `run_id` | `text` |
+| `teaching_runs` | `tenant_id` | `text` |
+| `teaching_runs` | `project_id` | `text` |
+| `teaching_runs` | `conversation_id` | `text` |
+| `teaching_runs` | `user_message_id` | `text` |
+| `teaching_runs` | `principal_id` | `text` |
+| `teaching_runs` | `answer_message_id` | `text` |
+| `teaching_runs` | `answer_seq` | `bigint` |
+| `teaching_runs` | `question` | `text` |
+| `teaching_runs` | `status` | `text` |
+| `teaching_runs` | `('queued',` | `'running',` |
+| `teaching_runs` | `attempt_count` | `integer` |
+| `teaching_runs` | `claim_token` | `uuid` |
+| `teaching_runs` | `lease_owner` | `text` |
+| `teaching_runs` | `lease_until` | `timestamptz` |
+| `teaching_runs` | `model_id` | `text` |
+| `teaching_runs` | `prompt_version` | `text` |
+| `teaching_runs` | `ranking_version` | `text` |
+| `teaching_runs` | `grounding` | `text` |
+| `teaching_runs` | `error_code` | `text` |
+| `teaching_runs` | `error_detail` | `text` |
+| `teaching_runs` | `created_at` | `timestamptz` |
+| `teaching_runs` | `updated_at` | `timestamptz` |
+| `teaching_tenant_budgets` | `tenant_id` | `text` |
+| `teaching_tenant_budgets` | `total_micro` | `bigint` |
+| `teaching_tenant_budgets` | `reserved_micro` | `bigint` |
+| `teaching_tenant_budgets` | `in_flight_micro` | `bigint` |
+| `teaching_tenant_budgets` | `spent_micro` | `bigint` |
+| `teaching_tenant_budgets` | `price_version` | `text` |
+| `teaching_tenant_budgets` | `created_at` | `timestamptz` |
+| `teaching_tenant_budgets` | `updated_at` | `timestamptz` |
 | `tenants` | `tenant_id` | `text` |
 | `tenants` | `name` | `text` |
 | `tenants` | `created_at` | `timestamptz` |

@@ -66,6 +66,7 @@ from app.db.product_store import PostgresProductRepository
 from app.db.rate_limit_store import PostgresRateLimiter
 from app.db.settings import app_dsn
 from app.db.settings import worker_dsn as worker_role_dsn
+from app.db.teaching_store import PostgresTeachingRepository
 from app.deployment import DeploymentSettings
 from app.execution.confirmation import ConfirmationRepository, ConfirmationStore
 from app.execution.state_machine import ActionStateMachine
@@ -98,6 +99,9 @@ from app.policy.token import TokenIssuer
 from app.product.memory_store import InMemoryProductRepository
 from app.product.ports import ProductRepository
 from app.registry.registry import Registry
+from app.teaching.memory_store import InMemoryTeachingRepository
+from app.teaching.ports import TeachingProvider, TeachingRunRepository
+from app.teaching.providers_factory import build_teaching_provider
 from app.workflow.catalog import build_registry
 from app.workflow.runtime import InteractionRuntime
 
@@ -116,7 +120,7 @@ DEMO_PROJECT = "proj_demo"
 DEFAULT_SESSION_TTL = timedelta(hours=8)
 
 #: 代码预期的数据库迁移版本。启动自检核对它；新增迁移必须同步更新。
-EXPECTED_SCHEMA_VERSION = "0009"
+EXPECTED_SCHEMA_VERSION = "0010"
 
 
 @dataclass
@@ -162,6 +166,11 @@ class PlatformState:
     # 两个分支里构造出来的其实是同一个类 —— 这一点写在装配处，免得
     # 后来的人以为"少装配了一个 PG 版"。
     knowledge: KnowledgeRepository
+    # 教学运行仓储（第五轮）。必填同理：教学端点不能等第一个请求才暴露装配缺失。
+    teaching: TeachingRunRepository
+    # 教学 provider。None = 功能显式关闭（无凭据/未配置）——
+    # 教学端点据此明确报"功能未启用"，绝不静默退回模拟器。
+    teaching_provider: TeachingProvider | None
     #: 会话 cookie 的有效期（也是兑换出的数据库会话的过期时间）。
     session_ttl: timedelta = DEFAULT_SESSION_TTL
     #: 生产环境置 True（HTTPS-only cookie）。测试与本机开发保持 False：
@@ -265,6 +274,7 @@ def build_platform(
     learning_loop: LearningLoopRepository
     ingestion: IngestionRepository
     knowledge: KnowledgeRepository
+    teaching: TeachingRunRepository
     audit_outbox: AuditOutbox
 
     if loaded.use_postgres:
@@ -300,6 +310,13 @@ def build_platform(
             worker_dsn=loaded.worker_dsn or worker_role_dsn(),
         )
         knowledge = KnowledgeRepository(ingestion=ingestion)
+        teaching = PostgresTeachingRepository(
+            membership=membership,
+            dsn=dsn,
+            worker_dsn=loaded.worker_dsn or worker_role_dsn(),
+            clock=clock,
+        )
+        teaching_provider = build_teaching_provider(loaded)
         rate_limiter: RateLimiter = PostgresRateLimiter(
             limit=loaded.exchange_limit,
             window_seconds=loaded.exchange_window_seconds,
@@ -344,6 +361,8 @@ def build_platform(
             learning_loop=learning_loop,
             ingestion=ingestion,
             knowledge=knowledge,
+            teaching=teaching,
+            teaching_provider=teaching_provider,
             session_ttl=loaded.session_ttl,
             cookie_secure=loaded.cookie_secure,
             rate_limiter=rate_limiter,
@@ -370,14 +389,19 @@ def build_platform(
         clock=clock, sessions=memory_sessions, outbox=audit_outbox
     )
     confirmations = ConfirmationStore()
-    products = InMemoryProductRepository(membership=membership)
+    memory_products = InMemoryProductRepository(membership=membership)
+    products = memory_products
     http_idempotency = InMemoryHttpIdempotencyStore()
     evidence = InMemoryEvidenceRepository(clock=clock)
-    learning_loop = InMemoryLearningLoopRepository(products, evidence)
+    learning_loop = InMemoryLearningLoopRepository(memory_products, evidence)
     ingestion = InMemoryIngestionRepository(
         membership=membership, products=products, clock=clock
     )
     knowledge = KnowledgeRepository(ingestion=ingestion)
+    teaching = InMemoryTeachingRepository(
+        membership=membership, products=memory_products, clock=clock
+    )
+    teaching_provider = build_teaching_provider(loaded)
     rate_limiter = InMemoryRateLimiter(
         limit=loaded.exchange_limit,
         window_seconds=loaded.exchange_window_seconds,
@@ -420,6 +444,8 @@ def build_platform(
         learning_loop=learning_loop,
         ingestion=ingestion,
         knowledge=knowledge,
+        teaching=teaching,
+        teaching_provider=teaching_provider,
         session_ttl=loaded.session_ttl,
         cookie_secure=loaded.cookie_secure,
         rate_limiter=rate_limiter,

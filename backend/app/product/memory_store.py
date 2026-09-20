@@ -112,6 +112,91 @@ class InMemoryProductRepository:
 
     # ------------------------------------------------------------------ 消息
 
+    def reserve_message_seq(
+        self, actor: Principal, project_id: str, conversation_id: str
+    ) -> int:
+        """**预留**一个消息序号而不写消息（教学运行给最终答案留槽位）。
+
+        与 `append_message` 同一把锁、同一个计数器 —— 预留出去的号
+        不会被后续追加复用。运行失败时这个号作废（空洞）：
+        `seq` 是排序不是账目，空洞无害。
+        """
+        self.membership.get(actor, project_id)
+        with self._lock:
+            conversation = self._conversations.get(conversation_id)
+            if (
+                conversation is None
+                or conversation.project_id != project_id
+                or conversation.tenant_id != actor.tenant_id
+            ):
+                raise deny(
+                    ErrorCode.CROSS_TENANT_DENIED,
+                    "无权访问该项目",
+                    conversation_id=conversation_id,
+                )
+            seq = conversation.last_message_seq + 1
+            self._conversations[conversation_id] = replace(
+                conversation, last_message_seq=seq
+            )
+            return seq
+
+    def append_reserved_message(
+        self,
+        actor: Principal,
+        project_id: str,
+        conversation_id: str,
+        *,
+        message_id: str,
+        seq: int,
+        role: MessageRole,
+        content: str,
+    ) -> Message:
+        """用**已预留**的序号落一条消息（教学运行的最终答案落定路径）。
+
+        只有内存教学仓储调用它：PG 侧的同一条路径是 worker 事务里的
+        `INSERT INTO messages`（seq 在 start_run 事务里预分配）。
+        调用方必须保证 `seq` 来自 `reserve_message_seq` ——
+        撞上已占用的序号在这里显式报错，而不是悄悄重复。
+        """
+        self.membership.get(actor, project_id)
+        with self._lock:
+            conversation = self._conversations.get(conversation_id)
+            if (
+                conversation is None
+                or conversation.project_id != project_id
+                or conversation.tenant_id != actor.tenant_id
+            ):
+                raise deny(
+                    ErrorCode.CROSS_TENANT_DENIED,
+                    "无权访问该项目",
+                    conversation_id=conversation_id,
+                )
+            existing = self._messages.get(conversation_id, ())
+            if any(m.seq == seq for m in existing):
+                raise deny(
+                    ErrorCode.ILLEGAL_STATE_TRANSITION,
+                    f"序号 {seq} 已被占用：答案槽位冲突",
+                    conversation_id=conversation_id,
+                )
+            if seq > conversation.last_message_seq:
+                raise deny(
+                    ErrorCode.ILLEGAL_STATE_TRANSITION,
+                    f"序号 {seq} 超出已预留范围（{conversation.last_message_seq}）",
+                    conversation_id=conversation_id,
+                )
+            message = Message(
+                message_id=message_id,
+                tenant_id=conversation.tenant_id,
+                project_id=project_id,
+                conversation_id=conversation_id,
+                seq=seq,
+                role=role,
+                content=content,
+                created_at=self.clock.now(),
+            )
+            self._messages.setdefault(conversation_id, []).append(message)
+            return message
+
     def append_message(
         self,
         actor: Principal,
