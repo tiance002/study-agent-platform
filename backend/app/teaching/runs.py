@@ -15,6 +15,7 @@ from enum import StrEnum
 from app.core.contracts import (
     require_aware,
     require_non_negative,
+    require_positive,
     require_text,
 )
 
@@ -78,6 +79,13 @@ class TeachingRun:
     error_detail: str
     created_at: datetime
     updated_at: datetime
+    #: 创建运行时冻结的 token 上限。worker 不能用部署热更新后的值替换它。
+    max_input_tokens: int = 8000
+    max_output_tokens: int = 2000
+    #: 最终回答中通过机械核验的引用；它们是用户可回读的证据坐标。
+    citations: tuple[dict, ...] = ()
+    #: 被拒绝的 provider 引用及稳定原因，不把原始 provider payload 暴露给用户。
+    citation_rejections: tuple[dict, ...] = ()
 
     def __post_init__(self) -> None:
         require_text(self.run_id, "run_id")
@@ -97,6 +105,16 @@ class TeachingRun:
             raise ValueError(f"grounding 必须是 Grounding 或 None，收到 {self.grounding!r}")
         require_text(self.error_code, "error_code", allow_empty=True)
         require_text(self.error_detail, "error_detail", allow_empty=True)
+        require_positive(self.max_input_tokens, "max_input_tokens")
+        require_positive(self.max_output_tokens, "max_output_tokens")
+        if not isinstance(self.citations, tuple) or not all(
+            isinstance(item, dict) for item in self.citations
+        ):
+            raise ValueError("citations 必须是 dict 元组")
+        if not isinstance(self.citation_rejections, tuple) or not all(
+            isinstance(item, dict) for item in self.citation_rejections
+        ):
+            raise ValueError("citation_rejections 必须是 dict 元组")
         require_aware(self.created_at, "created_at")
         require_aware(self.updated_at, "updated_at")
         # 状态 ↔ 附属事实的一致性（与 0010 的 CHECK 同一条规则）。
@@ -124,6 +142,8 @@ class TeachingRun:
             "grounding": str(self.grounding) if self.grounding else "",
             "error_code": self.error_code,
             "error_detail": self.error_detail,
+            "citations": [dict(item) for item in self.citations],
+            "citation_rejections": [dict(item) for item in self.citation_rejections],
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }

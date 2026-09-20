@@ -90,6 +90,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="用 GitHub Git Data API 推送当前 HEAD")
     parser.add_argument("--repo", required=True, help="形如 owner/name")
     parser.add_argument("--branch", default="main")
+    parser.add_argument(
+        "--safe-branch",
+        action="store_true",
+        help="只创建新分支，并以远端 main 为父提交；拒绝覆盖已有分支",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -103,9 +108,18 @@ def main(argv: list[str] | None = None) -> int:
         print("       ...")
         return 0
 
+    base_sha = None
+    if args.safe_branch:
+        if branch_exists(args.repo, args.branch):
+            raise RuntimeError(f"安全模式拒绝覆盖已有分支：{args.branch}")
+        base_sha = gh_api(
+            "GET", f"/repos/{args.repo}/git/ref/heads/main"
+        )["object"]["sha"]
+        print(f"[info] 安全模式：以远端 main {base_sha} 为父提交")
+
     # 0) 空仓库无法直接使用 Git Data API：blob 接口会返回 409 "Git Repository is empty"。
     #    先用 Contents API 落一个初始提交把分支建起来，随后的完整树会覆盖它。
-    if not branch_exists(args.repo, args.branch):
+    if not args.safe_branch and not branch_exists(args.repo, args.branch):
         print(f"[info] 仓库为空，先建立分支 {args.branch}")
         gh_api(
             "PUT",
@@ -140,20 +154,33 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[info] tree={tree['sha']}")
 
     # 3) 建提交
+    commit_payload = {
+        "message": message,
+        "tree": tree["sha"],
+        "author": {"name": author_name, "email": author_email},
+        "committer": {"name": author_name, "email": author_email},
+    }
+    if base_sha is not None:
+        commit_payload["parents"] = [base_sha]
     commit = gh_api(
         "POST",
         f"/repos/{args.repo}/git/commits",
-        {
-            "message": message,
-            "tree": tree["sha"],
-            "author": {"name": author_name, "email": author_email},
-            "committer": {"name": author_name, "email": author_email},
-        },
+        commit_payload,
     )
     print(f"[info] commit={commit['sha']}")
 
     # 4) 更新分支引用。优先 PATCH（分支已存在），失败再尝试创建。
     #    用 force=True：本脚本产出的提交没有 parent（是快照式推送），不是快进。
+    if args.safe_branch:
+        gh_api(
+            "POST",
+            f"/repos/{args.repo}/git/refs",
+            {"ref": f"refs/heads/{args.branch}", "sha": commit["sha"]},
+        )
+        print(f"[info] 已创建安全分支 {args.branch}")
+        print(f"[ok]   推送完成：https://github.com/{args.repo}/commit/{commit['sha']}")
+        return 0
+
     patched = subprocess.run(
         [
             "gh", "api", "--method", "PATCH",

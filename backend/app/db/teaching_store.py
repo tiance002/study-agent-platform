@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import replace
 
 from psycopg import errors as pg_errors
 
@@ -217,12 +218,17 @@ class PostgresTeachingRepository:
             dsn=self._dsn,
         ) as conn:
             row = conn.execute(
-                "SELECT " + _RUN_COLUMNS + " FROM teaching_runs WHERE run_id = %s",
+                "SELECT " + _RUN_COLUMNS + ","
+                " COALESCE((SELECT result_payload->'validated_citations'"
+                " FROM provider_attempts pa WHERE pa.run_id = teaching_runs.run_id), '[]'::jsonb),"
+                " COALESCE((SELECT result_payload->'citation_rejections'"
+                " FROM provider_attempts pa WHERE pa.run_id = teaching_runs.run_id), '[]'::jsonb)"
+                " FROM teaching_runs WHERE run_id = %s",
                 (run_id,),
             ).fetchone()
         if row is None:
             raise deny(ErrorCode.CROSS_TENANT_DENIED, "资源不存在", run_id=run_id)
-        return _run_from_row(row)
+        return replace_run_metadata(_run_from_row(row[:19]), row[19], row[20])
 
     def list_events(
         self, actor: Principal, project_id: str, run_id: str, *, after_seq: int = 0
@@ -258,6 +264,36 @@ class PostgresTeachingRepository:
             return budget_store.snapshot_in_conn(
                 conn, tenant_id=actor.tenant_id, project_id=project_id
             )
+
+    def get_run_limits(self, claim: RunClaim) -> tuple[int, int]:
+        with worker_transaction(
+            tenant_id=claim.run.tenant_id,
+            project_id=claim.run.project_id,
+            principal_id=claim.run.principal_id,
+            dsn=self._worker_dsn,
+        ) as conn:
+            row = conn.execute(
+                "SELECT max_input_tokens, max_output_tokens FROM teaching_budgets"
+                " WHERE tenant_id = %s AND project_id = %s",
+                (claim.run.tenant_id, claim.run.project_id),
+            ).fetchone()
+        if row is None:
+            raise PlatformError(ErrorCode.BUDGET_TREE_INVALID, "运行没有预算上限快照")
+        return int(row[0]), int(row[1])
+
+    def attempt_state(self, claim: RunClaim) -> str:
+        with worker_transaction(
+            tenant_id=claim.run.tenant_id,
+            project_id=claim.run.project_id,
+            principal_id=claim.run.principal_id,
+            dsn=self._worker_dsn,
+        ) as conn:
+            if self._require_live_claim_row(conn, claim.run.run_id, claim.claim_token) is None:
+                raise self._stale_claim_error(conn, claim)
+            row = conn.execute(
+                "SELECT status FROM provider_attempts WHERE run_id = %s", (claim.run.run_id,)
+            ).fetchone()
+        return str(row[0]) if row else "none"
 
     # ---------------------------------------------------------- worker 路径
 
@@ -299,6 +335,7 @@ class PostgresTeachingRepository:
         attempt_id: str,
         estimated_input_tokens: int,
         estimated_output_tokens: int,
+        request_payload: dict | None = None,
     ) -> None:
         with worker_transaction(
             tenant_id=claim.run.tenant_id,
@@ -315,15 +352,31 @@ class PostgresTeachingRepository:
             # 幂等：attempt 已存在说明上次派发事务其实已提交。
             if self._attempt_exists(conn, attempt_id, claim.run.run_id):
                 return
+            limits = conn.execute(
+                "SELECT max_input_tokens, max_output_tokens FROM teaching_budgets"
+                " WHERE tenant_id = %s AND project_id = %s",
+                (claim.run.tenant_id, claim.run.project_id),
+            ).fetchone()
+            if limits is None:
+                raise PlatformError(ErrorCode.BUDGET_TREE_INVALID, "运行没有预算上限快照")
+            budget_store.resize_held_in_conn(
+                conn,
+                run_id=claim.run.run_id,
+                estimated_input_tokens=estimated_input_tokens,
+                estimated_output_tokens=estimated_output_tokens,
+                max_input_tokens=int(limits[0]),
+                max_output_tokens=int(limits[1]),
+            )
             budget_store.hold_to_in_flight_in_conn(conn, run_id=claim.run.run_id)
             conn.execute(
                 "INSERT INTO provider_attempts (attempt_id, tenant_id, project_id,"
-                " run_id, status) VALUES (%s, %s, %s, %s, 'dispatched')",
+                " run_id, status, request_payload) VALUES (%s, %s, %s, %s, 'dispatched', %s::jsonb)",
                 (
                     attempt_id,
                     claim.run.tenant_id,
                     claim.run.project_id,
                     claim.run.run_id,
+                    json.dumps(request_payload or {}, ensure_ascii=False),
                 ),
             )
             self._insert_event(conn, claim.run.run_id, "run.dispatched", {"attempt_id": attempt_id})
@@ -365,6 +418,8 @@ class PostgresTeachingRepository:
         answer_text: str,
         grounding: Grounding,
         usage: TokenUsage | None,
+        citations: tuple[dict, ...] = (),
+        citation_rejections: tuple[dict, ...] = (),
     ) -> TeachingRun:
         with worker_transaction(
             tenant_id=claim.run.tenant_id,
@@ -433,6 +488,17 @@ class PostgresTeachingRepository:
                     usage.input_tokens if usage else None,
                     usage.output_tokens if usage else None,
                     None if usage is None else budget_store_usage_micro(usage),
+                    attempt_id,
+                ),
+            )
+            conn.execute(
+                "UPDATE provider_attempts SET result_payload ="
+                " jsonb_set(jsonb_set(result_payload, '{validated_citations}', %s::jsonb),"
+                " '{citation_rejections}', %s::jsonb), updated_at = now()"
+                " WHERE attempt_id = %s",
+                (
+                    json.dumps(list(citations), ensure_ascii=False),
+                    json.dumps(list(citation_rejections), ensure_ascii=False),
                     attempt_id,
                 ),
             )
@@ -509,12 +575,21 @@ class PostgresTeachingRepository:
                 conn.execute(
                     "UPDATE provider_attempts SET status = 'failed',"
                     " input_tokens = %s, output_tokens = %s, cost_micro = %s,"
+                    " result_payload = %s::jsonb,"
                     " updated_at = now()"
                     " WHERE attempt_id = %s",
                     (
                         usage.input_tokens,
                         usage.output_tokens,
                         budget_store_usage_micro(usage),
+                        json.dumps(
+                            {
+                                "kind": "failure",
+                                "error_code": error_code,
+                                "detail": safe_detail,
+                            },
+                            ensure_ascii=False,
+                        ),
                         self._attempt_id_for_run(conn, claim.run.run_id),
                     ),
                 )
@@ -704,3 +779,16 @@ def budget_store_usage_micro(usage: TokenUsage) -> int:
     from app.budget.ports import usage_to_micro
 
     return usage_to_micro(usage.input_tokens, usage.output_tokens)
+
+
+def replace_run_metadata(run: TeachingRun, citations: object, rejections: object) -> TeachingRun:
+    """把 attempt 中的已校验证据投影到用户可见运行，原始 payload 不外泄。"""
+    raw_citations = citations if isinstance(citations, list) else []
+    raw_rejections = rejections if isinstance(rejections, list) else []
+    return replace(
+        run,
+        citations=tuple(dict(item) for item in raw_citations if isinstance(item, dict)),
+        citation_rejections=tuple(
+            dict(item) for item in raw_rejections if isinstance(item, dict)
+        ),
+    )

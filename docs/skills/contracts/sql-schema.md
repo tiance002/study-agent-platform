@@ -7,13 +7,13 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:1d03d56411deadd4c8f3f189c70ba401385bfb04898e874e2a50c9447f10832d, generated_at=2026-09-20T09:12:30Z -->
-> 生成时间：2026-09-20T09:12:30Z
+<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:341837db5a13ea0ed8df530b4f8db7e0533e1ff76ce6188c5b2910a614c6d9ed, generated_at=2026-09-20T10:47:38Z -->
+> 生成时间：2026-09-20T10:47:38Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
 
-当前 head：`0010`
+当前 head：`0011`
 
 ### 表总览
 
@@ -36,7 +36,7 @@
 | `principals` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 4 |
 | `project_grants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 4 |
 | `projects` | 0001 → 0002 改写 | 成员感知 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
-| `provider_attempts` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 12 |
+| `provider_attempts` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 13 |
 | `source_chunks` | 0007 | 租户+项目 | SELECT, INSERT | SELECT, INSERT | 15 |
 | `source_documents` | 0007 | 租户+项目 | SELECT, INSERT | SELECT | 15 |
 | `sources` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 8 |
@@ -207,6 +207,7 @@
 | `provider_attempts` | `cost_micro` | `bigint` |
 | `provider_attempts` | `created_at` | `timestamptz` |
 | `provider_attempts` | `updated_at` | `timestamptz` |
+| `provider_attempts` | `request_payload` | `jsonb` |
 | `source_chunks` | `chunk_id` | `text` |
 | `source_chunks` | `tenant_id` | `text` |
 | `source_chunks` | `project_id` | `text` |

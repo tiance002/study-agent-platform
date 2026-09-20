@@ -71,10 +71,17 @@ def run_once(
         clock=platform.clock,
     )
     try:
-        # 重放优先：存证里有结果就落库，绝不重新调用 provider。
-        stored = platform.teaching.find_stored_result(claim)
-        if stored is not None:
+        # attempt 是 durable 派发事实：没有结果不等于没有派发。
+        attempt_state = platform.teaching.attempt_state(claim)
+        if attempt_state == "completed":
             return service.replay(claim)
+        if attempt_state in {"dispatched", "unknown"}:
+            platform.teaching.require_reconciliation(
+                claim,
+                error_code="WORKER_RECOVERED_UNKNOWN_ATTEMPT",
+                safe_detail="上一个 worker 已派发但结果未存证；需要人工对账",
+            )
+            return "reconciliation_required"
         return service.execute(claim)
     except PlatformError as exc:
         if exc.code in _STALE_CODES:
@@ -87,7 +94,7 @@ def _approved_model(platform: "PlatformState") -> str:
     """批准的模型 id：来自部署配置（服务端决策），不是请求参数。"""
     settings = platform.settings
     if settings is not None and settings.teaching_model:
-        return settings.teaching_model
+        return getattr(settings, "teaching_model", "") or "unconfigured-model"
     return "unconfigured-model"  # 内存测试环境无部署配置时的占位
 
 
@@ -100,7 +107,7 @@ def _approved_prompt_version(platform: "PlatformState") -> str:
 def _max_input_tokens(platform: "PlatformState") -> int:
     settings = platform.settings
     if settings is not None:
-        return settings.teaching_max_input_tokens
+        return getattr(settings, "teaching_max_input_tokens", 8000)
     from app.deployment import DEFAULT_TEACHING_MAX_INPUT_TOKENS
 
     return DEFAULT_TEACHING_MAX_INPUT_TOKENS
@@ -109,7 +116,7 @@ def _max_input_tokens(platform: "PlatformState") -> int:
 def _max_output_tokens(platform: "PlatformState") -> int:
     settings = platform.settings
     if settings is not None:
-        return settings.teaching_max_output_tokens
+        return getattr(settings, "teaching_max_output_tokens", 2000)
     from app.deployment import DEFAULT_TEACHING_MAX_OUTPUT_TOKENS
 
     return DEFAULT_TEACHING_MAX_OUTPUT_TOKENS

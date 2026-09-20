@@ -66,6 +66,7 @@ class _Attempt:
     input_tokens: int | None = None
     output_tokens: int | None = None
     cost_micro: int | None = None
+    request_payload: dict | None = None
 
 
 @dataclass
@@ -206,6 +207,8 @@ class InMemoryTeachingRepository:
                     error_detail="",
                     created_at=now,
                     updated_at=now,
+                    max_input_tokens=budget_max_input_tokens,
+                    max_output_tokens=budget_max_output_tokens,
                 )
                 self._runs[run_id] = run
                 self._answer_seq[run_id] = answer_seq
@@ -251,6 +254,17 @@ class InMemoryTeachingRepository:
             "project": project.facts().to_dict() if project else None,
         }
 
+    def get_run_limits(self, claim: RunClaim) -> tuple[int, int]:
+        with self._lock:
+            run = self._run_for_claim(claim)
+            return run.max_input_tokens, run.max_output_tokens
+
+    def attempt_state(self, claim: RunClaim) -> str:
+        with self._lock:
+            self._run_for_claim(claim)
+            attempt = self._attempt_for_run(claim.run.run_id)
+            return attempt.status if attempt else "none"
+
     # ---------------------------------------------------------- worker 路径
 
     def claim_run(self, *, worker_id: str, lease_seconds: int) -> RunClaim | None:
@@ -292,9 +306,10 @@ class InMemoryTeachingRepository:
         attempt_id: str,
         estimated_input_tokens: int,
         estimated_output_tokens: int,
+        request_payload: dict | None = None,
     ) -> None:
         with self._lock:
-            self._require_live_claim(claim)
+            current = self._require_live_claim(claim)
             reservation = self._reservation_for_run(claim.run.run_id)
             if reservation.state is not ReservationState.HELD:
                 raise PlatformError(
@@ -302,6 +317,12 @@ class InMemoryTeachingRepository:
                     f"派发前的预留必须停在 held，当前 {reservation.state}"
                     "（记账与派发已经脱节）",
                 )
+            self._resize_held_reservation(
+                current,
+                reservation,
+                estimated_input_tokens=estimated_input_tokens,
+                estimated_output_tokens=estimated_output_tokens,
+            )
             transition(reservation.state, ReservationState.IN_FLIGHT)
             reservation.state = ReservationState.IN_FLIGHT
             tenant_budget, project_budget = self._budgets_for_run(claim.run.run_id)
@@ -310,7 +331,10 @@ class InMemoryTeachingRepository:
             project_budget.reserved_micro -= reservation.estimated_micro
             project_budget.in_flight_micro += reservation.estimated_micro
             self._attempts[attempt_id] = _Attempt(
-                attempt_id=attempt_id, run_id=claim.run.run_id, status="dispatched"
+                attempt_id=attempt_id,
+                run_id=claim.run.run_id,
+                status="dispatched",
+                request_payload=dict(request_payload or {}),
             )
             self._touch(claim)
             self._append_event(
@@ -351,6 +375,8 @@ class InMemoryTeachingRepository:
         answer_text: str,
         grounding: Grounding,
         usage: TokenUsage | None,
+        citations: tuple[dict, ...] = (),
+        citation_rejections: tuple[dict, ...] = (),
     ) -> TeachingRun:
         with self._lock:
             current = self._run_for_claim(claim)
@@ -393,6 +419,8 @@ class InMemoryTeachingRepository:
                 status=RunStatus.SUCCEEDED,
                 answer_message_id=answer_message_id,
                 grounding=grounding,
+                citations=tuple(dict(item) for item in citations),
+                citation_rejections=tuple(dict(item) for item in citation_rejections),
                 updated_at=self.clock.now(),
             )
             self._runs[run.run_id] = run
@@ -443,6 +471,11 @@ class InMemoryTeachingRepository:
                 attempt = self._attempt_for_run(current.run_id)
                 if attempt is not None:
                     attempt.status = "failed"
+                    attempt.payload = {
+                        "kind": "failure",
+                        "error_code": error_code,
+                        "detail": safe_detail,
+                    }
                     attempt.cost_micro = actual
                     attempt.input_tokens = usage.input_tokens
                     attempt.output_tokens = usage.output_tokens
@@ -593,6 +626,41 @@ class InMemoryTeachingRepository:
             if attempt.run_id == run_id:
                 return attempt
         return None
+
+    def _resize_held_reservation(
+        self,
+        run: TeachingRun,
+        reservation: _Reservation,
+        *,
+        estimated_input_tokens: int,
+        estimated_output_tokens: int,
+    ) -> None:
+        new_micro = estimate_micro(estimated_input_tokens, estimated_output_tokens)
+        old_micro = reservation.estimated_micro
+        tenant, project = self._budgets_for_run(run.run_id)
+        tenant_without_old = tenant.facts()
+        project_without_old = project.facts()
+        tenant_without_old = replace(
+            tenant_without_old, reserved_micro=tenant_without_old.reserved_micro - old_micro
+        )
+        project_without_old = replace(
+            project_without_old, reserved_micro=project_without_old.reserved_micro - old_micro
+        )
+        assert_capacity(
+            tenant_without_old,
+            project_without_old,
+            estimated_micro=new_micro,
+            estimated_input_tokens=estimated_input_tokens,
+            estimated_output_tokens=estimated_output_tokens,
+            max_input_tokens=run.max_input_tokens,
+            max_output_tokens=run.max_output_tokens,
+        )
+        delta = new_micro - old_micro
+        tenant.reserved_micro += delta
+        project.reserved_micro += delta
+        reservation.estimated_micro = new_micro
+        reservation.estimated_input_tokens = estimated_input_tokens
+        reservation.estimated_output_tokens = estimated_output_tokens
 
     def _budgets_for_run(self, run_id: str) -> tuple[_Budget, _Budget]:
         run = self._runs[run_id]

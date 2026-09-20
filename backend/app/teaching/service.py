@@ -101,12 +101,13 @@ class TeachingService:
             return "failed"
 
         actor = Principal(principal_id=run.principal_id, tenant_id=run.tenant_id)
+        max_input_tokens, max_output_tokens = self.teaching.get_run_limits(claim)
         history = self._history(actor, run)
         context = build_context(
             run, actor, run.project_id, knowledge=self.knowledge, history=history
         )
         est_input = self._estimate_input_tokens(context)
-        if est_input > self.max_input_tokens:
+        if est_input > max_input_tokens:
             self.teaching.fail_run(
                 claim,
                 error_code="INPUT_BUDGET_EXCEEDED",
@@ -117,22 +118,35 @@ class TeachingService:
             return "failed"
 
         attempt_id = f"att_{uuid.uuid4().hex[:12]}"
-        self.teaching.mark_dispatched(
-            claim,
-            attempt_id=attempt_id,
-            estimated_input_tokens=est_input,
-            estimated_output_tokens=self.max_output_tokens,
-        )
         deadline = self.clock.now() + timedelta(seconds=self.provider_timeout_seconds)
         request = ProviderRequest(
             attempt_id=attempt_id,
-            model=self.model_id,
-            prompt_version=self.prompt_version,
+            model=run.model_id,
+            prompt_version=run.prompt_version,
             messages=context.messages,
             artifacts=context.snapshot.items,
-            max_output_tokens=self.max_output_tokens,
+            max_output_tokens=max_output_tokens,
             deadline=deadline,
         )
+        try:
+            self.teaching.mark_dispatched(
+                claim,
+                attempt_id=attempt_id,
+                estimated_input_tokens=est_input,
+                estimated_output_tokens=max_output_tokens,
+                request_payload=self._serialize_request(request),
+            )
+        except PlatformError as exc:
+            if exc.code is not ErrorCode.BUDGET_EXCEEDED:
+                raise
+            self.teaching.fail_run(
+                claim,
+                error_code="INPUT_BUDGET_EXCEEDED",
+                safe_detail="冻结后的完整上下文超过预算；请精简资料或历史后重试",
+                dispatch_happened=False,
+                usage=None,
+            )
+            return "failed"
         try:
             result = self.provider.generate(request)
         except Exception:
@@ -164,13 +178,6 @@ class TeachingService:
             return "reconciliation_required"
 
         if result.status is ProviderStatus.COMPLETED:
-            payload = self._serialize_result(result, context, payload_attempt_id=attempt_id)
-            self.teaching.record_result(
-                claim,
-                attempt_id=attempt_id,
-                provider_request_id=result.provider_request_id,
-                payload=payload,
-            )
             validation = validate_citations(
                 actor,
                 run.project_id,
@@ -178,24 +185,46 @@ class TeachingService:
                 snapshot=context.snapshot,
                 knowledge=self.knowledge,
             )
+            payload = self._serialize_result(
+                result,
+                context,
+                payload_attempt_id=attempt_id,
+                validation=validation,
+            )
+            self.teaching.record_result(
+                claim,
+                attempt_id=attempt_id,
+                provider_request_id=result.provider_request_id,
+                payload=payload,
+            )
             self.teaching.finish_run(
                 claim,
                 attempt_id=attempt_id,
                 answer_message_id=f"msg_{uuid.uuid4().hex[:12]}",
                 answer_text=result.answer_text,
                 grounding=validation.grounding,
-                usage=self._settled_usage(result.usage),
+                usage=self._settled_usage(result.usage, max_input_tokens, max_output_tokens),
+                citations=validation.accepted,
+                citation_rejections=self._rejection_dicts(validation),
             )
             return "succeeded"
 
         # REFUSED / MALFORMED / TRUNCATED：调用已发生，按失败落定。
         # 用量缺失时 fail_run 自身会拒绝并要求对账（费用敞口不能抹掉）。
+        settled_usage = self._settled_usage(result.usage, max_input_tokens, max_output_tokens)
+        if settled_usage is None:
+            self.teaching.require_reconciliation(
+                claim,
+                error_code=f"PROVIDER_{result.status.value.upper()}_USAGE_UNKNOWN",
+                safe_detail="provider 失败但没有可采纳的权威用量；待对账",
+            )
+            return "reconciliation_required"
         self.teaching.fail_run(
             claim,
             error_code=f"PROVIDER_{result.status.value.upper()}",
-            safe_detail=result.detail or "provider 返回了不可用的结果",
+            safe_detail=self._safe_detail(result.detail or "provider 返回了不可用的结果"),
             dispatch_happened=True,
-            usage=self._settled_usage(result.usage),
+            usage=settled_usage,
         )
         return "failed"
 
@@ -213,7 +242,9 @@ class TeachingService:
             )
         run = claim.run
         actor = Principal(principal_id=run.principal_id, tenant_id=run.tenant_id)
-        snapshot = self._deserialize_snapshot(payload["snapshot"])
+        snapshot = self._deserialize_snapshot(
+            payload["snapshot"], ranking_version=payload.get("ranking_version", run.ranking_version)
+        )
         citations = tuple(
             RawCitation(
                 source_id=item["source_id"],
@@ -227,7 +258,10 @@ class TeachingService:
         validation = validate_citations(
             actor, run.project_id, citations, snapshot=snapshot, knowledge=self.knowledge
         )
-        usage = self._settled_usage(self._deserialize_usage(payload.get("usage")))
+        max_input_tokens, max_output_tokens = self.teaching.get_run_limits(claim)
+        usage = self._settled_usage(
+            self._deserialize_usage(payload.get("usage")), max_input_tokens, max_output_tokens
+        )
         self.teaching.finish_run(
             claim,
             attempt_id=payload["attempt_id"],
@@ -235,6 +269,8 @@ class TeachingService:
             answer_text=payload["answer_markdown"],
             grounding=validation.grounding,
             usage=usage,
+            citations=validation.accepted,
+            citation_rejections=self._rejection_dicts(validation),
         )
         return "succeeded"
 
@@ -245,7 +281,10 @@ class TeachingService:
         messages = self.products.list_messages(
             actor, run.project_id, run.conversation_id
         )
-        return tuple(m for m in messages if m.message_id != run.user_message_id)
+        user_message = next((m for m in messages if m.message_id == run.user_message_id), None)
+        if user_message is None:
+            return ()
+        return tuple(m for m in messages if m.seq < user_message.seq)
 
     def _estimate_input_tokens(self, context: TeachingContext) -> int:
         """输入 token 估计上界：逐字符计数。
@@ -254,15 +293,18 @@ class TeachingService:
         保守上界（中文常见分词约 0.6–1 token/字符）—— 估计上界宁可
         高估：低估会派发超出预算的请求，高估只是拒绝得早一点。
         """
-        return sum(len(message.content) for message in context.messages)
+        # UTF-8 字节长度是 tokenizer 不可用时的保守上界，再为角色/协议留固定裕量。
+        return sum(len(message.content.encode("utf-8")) + 8 for message in context.messages) + 16
 
-    def _settled_usage(self, usage: TokenUsage | None) -> TokenUsage | None:
+    def _settled_usage(
+        self, usage: TokenUsage | None, max_input_tokens: int, max_output_tokens: int
+    ) -> TokenUsage | None:
         """用量是否可采纳。缺失或越界一律返回 None（敞口保留，进对账）。"""
         if usage is None:
             return None
         if (
-            usage.input_tokens > self.max_input_tokens
-            or usage.output_tokens > self.max_output_tokens
+            usage.input_tokens > max_input_tokens
+            or usage.output_tokens > max_output_tokens
         ):
             # 越界的"权威用量"本身不可信。不静默截断消费值 ——
             # 截断会伪造一条不存在的账目；敞口是诚实的未知。
@@ -270,13 +312,21 @@ class TeachingService:
         return usage
 
     def _serialize_result(
-        self, result: ProviderResult, context: TeachingContext, *, payload_attempt_id: str
+        self,
+        result: ProviderResult,
+        context: TeachingContext,
+        *,
+        payload_attempt_id: str,
+        validation=None,
     ) -> dict:
         """结果存证。**快照一起存**：重放路径校验引用要有同一份基准，
         否则"重启后重新检索"会让校验对着另一批片段（移动的球门）。"""
+        accepted = validation.accepted if validation is not None else ()
+        rejections = self._rejection_dicts(validation) if validation is not None else ()
         return {
             "provider_status": str(result.status),
             "attempt_id": payload_attempt_id,
+            "ranking_version": context.snapshot.ranking_version,
             "answer_markdown": result.answer_text,
             "citations": [
                 {
@@ -288,6 +338,8 @@ class TeachingService:
                 }
                 for c in result.citations
             ],
+            "validated_citations": [dict(item) for item in accepted],
+            "citation_rejections": list(rejections),
             "usage": (
                 None
                 if result.usage is None
@@ -312,11 +364,25 @@ class TeachingService:
             ],
         }
 
-    def _deserialize_snapshot(self, items: list) -> RetrievalSnapshot:
+    def _serialize_request(self, request: ProviderRequest) -> dict:
+        return {
+            "attempt_id": request.attempt_id,
+            "model": request.model,
+            "prompt_version": request.prompt_version,
+            "max_output_tokens": request.max_output_tokens,
+            "deadline": request.deadline.isoformat(),
+            "messages": [
+                {"role": str(message.role), "content": message.content}
+                for message in request.messages
+            ],
+            "artifacts": [item.as_citation_dict() | {"content": item.content} for item in request.artifacts],
+        }
+
+    def _deserialize_snapshot(self, items: list, *, ranking_version: str) -> RetrievalSnapshot:
         from app.teaching.context import RetrievalSnapshot
 
         return RetrievalSnapshot(
-            ranking_version="keyword/v1",
+            ranking_version=ranking_version,
             items=tuple(
                 MaterialSnippet(
                     source_id=item["source_id"],
@@ -341,3 +407,18 @@ class TeachingService:
             output_tokens=int(usage["output_tokens"]),
         )
 
+    def _rejection_dicts(self, validation) -> tuple[dict, ...]:
+        return tuple(
+            {
+                "source_id": citation.source_id,
+                "document_id": citation.document_id,
+                "span_start": citation.span_start,
+                "span_end": citation.span_end,
+                "content_hash": citation.content_hash,
+                "reason": reason,
+            }
+            for citation, reason in validation.rejected
+        )
+
+    def _safe_detail(self, detail: str) -> str:
+        return " ".join(detail.replace("\r", " ").replace("\n", " ").split())[:256]

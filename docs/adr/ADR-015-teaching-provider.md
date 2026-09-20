@@ -1,6 +1,6 @@
 # ADR-015：教学 provider 边界与供应商选型
 
-日期：2026-09-20　状态：已接受（第五轮）
+日期：2026-09-20　状态：已接受（第六轮更新）
 
 ## 背景
 
@@ -10,13 +10,14 @@
 
 ## 决策
 
-1. **协议先行，适配器随后**：`teaching.ports.TeachingProvider` 是唯一边界。
-   首版只有 `ScriptedProvider`（模拟器）实现它；真实供应商适配器在凭据
-   可用后按同一协议接入，不改任何调用方。
+1. **协议先行，适配器隔离**：`teaching.ports.TeachingProvider` 是唯一边界。
+   `ScriptedProvider` 用于确定性反例，`OpenAIResponsesProvider` 使用一次
+   Responses HTTP 请求、关闭隐藏重试，并把未知传输结果交给对账状态。
 2. **目标 provider：OpenAI 兼容接口**（`STUDY_PLATFORM_TEACHING_PROVIDER=openai`）。
    选型理由：结构化输出（JSON mode）与 usage 回报有明确文档；计费可按
    token 对账；SDK 成熟。**凭据到位前不宣称"真实模型已验收"** ——
-   本轮验收口径为"模拟器 + 持久化已验收，真实 provider 未验收"。
+   适配器有本地 HTTP 契约测试；真实云冒烟仍需部署凭据和单独费用确认，
+   没有凭据时不能标记真实联调通过。
 3. **禁止 SDK 隐藏自动重试**：适配器关闭一切自动重试；重试是编排层的
    显式决策，且只能复用同一个 durable `attempt_id`。一次调用 ↔ 一次计费。
 4. **超时 ≠ 未送达**：`TIMEOUT`（结果未知，费用敞口保留）与

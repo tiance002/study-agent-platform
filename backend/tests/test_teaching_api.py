@@ -213,6 +213,15 @@ def test_full_flow_status_messages_and_events(teaching_env):
     body = status.json()
     assert body["status"] == "succeeded"
     assert body["grounding"] == "sourced"
+    assert body["citations"] == [
+        {
+            "source_id": chunk.source_id,
+            "document_id": chunk.document_id,
+            "span_start": chunk.span_start,
+            "span_end": chunk.span_end,
+            "content_hash": content_hash(chunk.content),
+        }
+    ]
     assert body["next_action"] == "read_answer"
     assert body["answer_message_id"]
 
