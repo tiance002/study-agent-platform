@@ -1,0 +1,114 @@
+name: ci
+
+# 机械门清单（对应实施计划任务 1 与 06 号规格 §4.2）：
+#   1. 不变量测试（含 import 方向门、工具重叠门、预算与审计门、PostgreSQL 适配器组）
+#   2. 静态检查（ruff）—— 只启用能发现真实缺陷的规则集
+#   3. 类型检查（mypy）
+#   4. 设计知识索引校验（结构 / 依赖方向 / 体积预算 / 到期复审）
+#   5. 契约生成区一致性（重新渲染比对内容，不只比哈希）
+#   6. 数据库迁移校验（--require-active：Alembic 已引入，跳过即失败）
+#   7. 依赖许可证扫描（copyleft 阻塞 / 弱 copyleft 提示 / 无法判定阻塞）
+#   8. 秘密扫描（文件名 + 内容，内容扫描才是主门）
+#   9. PostgreSQL 真实验证：空库升级 + 应用角色权限 + RLS + 确认的跨连接原子性
+#
+# 门禁必须机械判定，不依赖"记得检查"。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+
+    services:
+      # 真实 PostgreSQL 服务：让迁移与 RLS 在 CI 里被真实验证，
+      # 而不是只在"看起来正确"的层面通过。
+      # trust 认证：CI 容器是一次性沙箱，用免密而不是往仓库里放密码。
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: study_platform
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # 迁移与应用使用**不同的角色** —— 角色分离本身是被验证的安全边界之一。
+      # 两个 DSN 都不含密码：trust 认证 + 一次性容器，秘密扫描因此保持绿色。
+      STUDY_PLATFORM_MIGRATION_DSN: postgresql://postgres@127.0.0.1:5432/study_platform
+      STUDY_PLATFORM_DSN: postgresql://study_app@127.0.0.1:5432/study_platform
+      # worker 凭据与 API 凭据是两条边界：队列的跨租户可见性只授予 worker 角色（0008）。
+      STUDY_PLATFORM_WORKER_DSN: postgresql://study_worker@127.0.0.1:5432/study_platform
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        # 从 pyproject 的 extras 装，而不是在这里硬编码版本清单 ——
+        # 否则本地与 CI 的依赖会各自漂移，本地跑通的门禁在 CI 上失败。
+        # postgres extra：持久化适配器与 Alembic 迁移是 CI 的被测对象之一。
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,postgres]"
+
+      - name: 准备数据库（应用角色 + 迁移）
+        run: |
+          # 应用角色由运维脚本创建，密码经变量传入，不落仓库（项目红线）。
+          # 角色密码本身在 trust 认证下不参与验证，值带 dev-only 标记防误报。
+          psql -h 127.0.0.1 -U postgres -d study_platform \
+            -v app_password='dev-only-ci-role-password' \
+            -v worker_password='dev-only-ci-worker-password' \
+            -f scripts/sql/create_app_role.sql
+          # 空库升级：验证迁移可以在全新库上完整执行。
+          python -m alembic upgrade head
+
+      - name: 不变量测试（含 PostgreSQL 适配器组）
+        # 数据库服务在跑，postgres 标记的测试会被执行而不是跳过。
+        run: python -m pytest -q -p no:warnings
+
+      - name: 静态检查（ruff）
+        run: python -m ruff check backend tools
+
+      - name: 类型检查（mypy）
+        run: python -m mypy backend/app --ignore-missing-imports
+
+      - name: 设计知识索引校验
+        run: python tools/skills/check_manifest.py docs/skills/manifest.yaml
+
+      - name: 契约生成区一致性
+        run: |
+          python tools/skills/gen_contracts.py --target sql-schema --check
+          python tools/skills/gen_contracts.py --target protocol --check
+          python tools/skills/gen_contracts.py --target tool-catalog --check
+
+      - name: 数据库迁移校验
+        # --require-active：Alembic 已引入，「跳过」从此视为失败 ——
+        # 这道门必须真正生效，不能永远停在提示状态。
+        run: python tools/migrations/check_migrations.py --require-active
+
+      - name: 依赖许可证扫描
+        # 策略：强 copyleft（GPL/AGPL/LGPL）阻塞；弱 copyleft（MPL/EPL）提示但不阻塞；
+        # **无法判定一律阻塞** —— 无法判定不等于安全，那必须被处理一次。
+        run: python tools/security/scan_licenses.py
+
+      - name: 秘密扫描（文件名 + 内容）
+        run: |
+          tracked=$(git ls-files)
+          if echo "$tracked" | grep -E '(^|/)\.env$|\.(pem|key)$'; then
+            echo "::error::检测到密钥类文件被纳入版本控制（项目红线：密钥不进仓库）"
+            exit 1
+          fi
+          # 文件名检查拦不住写在源码/配置/文档里的 token —— 内容扫描才是主门
+          python tools/security/scan_secrets.py

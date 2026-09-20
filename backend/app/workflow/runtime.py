@@ -1,0 +1,1032 @@
+"""交互运行时：一次交互的固定顺序。
+
+设计依据：总设计 §6.2、06 号规格 §3。
+
+固定顺序（**不得调换**）：
+
+1. 身份、租户、学习项目鉴权（上下文装配）
+2. 输入预检查（大小与硬禁令）
+3. 解析成已注册 typed node —— **失败不留预算**
+4. admission 检查并建账户树
+5. 选择模型档位（L0/L1/L2）
+6. Policy Gateway 决策 + 签发 capability token
+7. node handler 生成结果（工具调用只能经受控 `ToolInvoker`）
+8. 契约、证据充分性与预算验证
+9. 外部动作走 intent → dispatch → outcome
+10. 记录证据
+11. 返回带来源、假设与限制的结果
+
+失败方向：任何一步失败都**不得静默降级**；拒绝路径必须在产生副作用之前结束。
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from dataclasses import dataclass, field, replace
+
+from app.audit.sink import AuditSink, RiskLevel
+from app.budget.ledger import BudgetLedger, Dimension
+from app.core.clock import Clock
+from app.core.errors import ErrorCode, PlatformError, deny, public_error_payload
+from app.core.hashing import content_hash
+from app.execution.confirmation import ConfirmationRepository
+from app.execution.outbox import ToolDispatcher
+from app.execution.state_machine import ActionStateMachine
+from app.knowledge.evidence_state import (
+    FetchFailure,
+    RetrievalSignals,
+    assess_retrieval,
+    assess_retrieval_health,
+)
+from app.knowledge.retrieval import ChunkIndex
+from app.learning.evidence import EvidenceLog
+from app.learning.projector import MasteryProjection, Projector
+from app.policy.gateway import (
+    ExecutorCapabilities,
+    Obligation,
+    PolicyGateway,
+    PolicyInput,
+)
+from app.policy.token import CapabilityToken, TokenIssuer
+from app.registry.models import Authority, NodeSpec
+from app.registry.registry import Registry
+from app.tenancy.context import TenantContext, current, tenant_scope
+from app.workflow import tools_impl
+from app.workflow.context import NodeContext
+
+MAX_INPUT_CHARS = 8_000
+
+
+@dataclass
+class _IdempotencyEntry:
+    """一次幂等请求的**占用**记录。
+
+    三态，比"有没有结果"多一个中间态：
+
+    - `pending`：已被某个请求占用、正在执行。后到的同键请求等待它。
+    - `completed`：结果已落定，后到者直接拿重放结果。
+    - `released`：占用者失败或抛错后放弃。等待者会被唤醒并**接手执行**，
+      而不是干等到超时 —— 否则一次失败会把同键请求一起拖住。
+
+    ⚠️ 没有"缓存失败结果"这一态：失败不缓存，否则参数修好后的重试
+    会永远拿到旧的拒绝。
+    """
+
+    fingerprint: str
+    state: str = "pending"
+    result: InteractionResult | None = None
+
+    def mark_completed(self, result: InteractionResult) -> None:
+        """结果与状态**一并**设置。
+
+        分成两行写、其中一行被漏掉时，等待者会看到 `state="completed"`
+        却读到 `result=None` —— 那正是这个类存在的意义（表达占用进度）被破坏。
+        用方法而不是两处赋值，是为了让"两件事必须一起发生"落在代码结构上，
+        而不是落在调用方的记忆里。
+        """
+        self.result = result
+        self.state = "completed"
+
+    def mark_released(self) -> None:
+        """放弃占用，且**不留结果**。"""
+        self.result = None
+        self.state = "released"
+
+# 本版执行器声明支持的义务。未声明的一律拒绝执行，而不是"尽力而为"。
+SUPPORTED_OBLIGATIONS = frozenset(
+    {
+        str(Obligation.REQUIRE_CONFIRMATION),
+        str(Obligation.REQUIRE_TAINT_ENDORSEMENT),
+        str(Obligation.REQUIRE_SIGNED_AUDIT_BATCH),
+    }
+)
+
+
+@dataclass(frozen=True)
+class InteractionRequest:
+    # 追踪 id。由服务端生成（HTTP 中间件绑定），贯穿响应头、响应体、错误体与审计。
+    # ⚠️ 它**不能**充当幂等键：每个请求都会换新值，客户端重试必然拿不到同一个。
+    request_id: str
+    tenant_id: str
+    principal_id: str
+    learning_project_id: str
+    node_id: str
+    user_input: str
+    params: dict = field(default_factory=dict)
+    # 服务端确认记录的 id（由 `POST /projects/{id}/confirmations` 创建）。
+    # 客户端只能**引用**一条已存在的确认，不能声明「我确认过了」。
+    confirmation_id: str | None = None
+    # 幂等键：由**客户端**提供，用于表达"这是我上一次那个请求的重试"。
+    # 与 request_id 分工明确：追踪 vs 幂等。缺省表示不做幂等去重。
+    idempotency_key: str | None = None
+
+
+@dataclass(frozen=True)
+class InteractionResult:
+    request_id: str
+    status: str          # ok | denied | failed | reconciliation_required
+    node_id: str
+    model_tier: str
+    decision_id: str | None
+    token_id: str | None
+    output: dict
+    citations: tuple[dict, ...]
+    audit_event_ids: tuple[str, ...]
+    error: dict | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "request_id": self.request_id,
+            "status": self.status,
+            "node_id": self.node_id,
+            "model_tier": self.model_tier,
+            "decision_id": self.decision_id,
+            "token_id": self.token_id,
+            "output": self.output,
+            "citations": list(self.citations),
+            "error": self.error,
+        }
+
+
+class ToolInvoker:
+    """node handler 唯一的工具入口。
+
+    handler 拿不到 gateway / ledger / dispatcher 本身，因此**结构上不可能**
+    绕过策略检查、预算预留或审计写入。
+    """
+
+    def __init__(
+        self,
+        *,
+        runtime: "InteractionRuntime",
+        token: CapabilityToken,
+        node_spec: NodeSpec,
+        run_account_id: str,
+        tool_context: NodeContext,
+        audit_event_ids: list[str],
+        principal_id: str,
+        confirmation_id: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        self._runtime = runtime
+        self._token = token
+        self._node_spec = node_spec
+        self._run_account_id = run_account_id
+        self._ctx = tool_context
+        self._audit_event_ids = audit_event_ids
+        self._principal_id = principal_id
+        self._confirmation_id = confirmation_id
+        # 追踪 id 一路带到 dispatch：审计事件必须能按它与错误响应关联。
+        self._request_id = request_id
+        self.calls: list[str] = []
+
+    @property
+    def calls_made(self) -> int:
+        return len(self.calls)
+
+    def call(self, tool_id: str, params: dict) -> dict:
+        """调用一个工具。六道校验全部在产生副作用之前完成。"""
+        # 退出条件 1：工具次数上限。到顶即拒绝，不允许"再试一次"。
+        if len(self.calls) >= self._node_spec.max_tool_calls:
+            raise deny(
+                ErrorCode.BUDGET_EXCEEDED,
+                f"node {self._node_spec.node_id} 的工具调用已达上限 "
+                f"{self._node_spec.max_tool_calls}",
+            )
+        # 工具必须在该 node 的允许清单内。
+        if tool_id not in self._node_spec.allowed_tools:
+            raise deny(
+                ErrorCode.TOOL_NOT_ALLOWED_FOR_NODE,
+                f"node {self._node_spec.node_id} 未声明工具 {tool_id}",
+                tool_id=tool_id,
+            )
+
+        spec = self._runtime.registry.tool(tool_id)
+        runtime = self._runtime
+        now = runtime.clock.now()
+
+        # 高影响动作必须由**服务端确认记录**驱动。
+        # 请求体里没有任何字段能声明确认，所以这条路径无法被客户端伪造。
+        #
+        # 这里只**校验**（peek），不消费 —— 顺序很讲究：
+        #   「是否已确认」是策略输入的一部分，所以必须在策略判定之前就能回答；
+        #   但确认不能在策略、预算、意图就绪之前就被消费掉，否则策略一拒绝，
+        #   用户的确认已经作废 —— 他什么都没执行，却得重新确认一次。
+        # 真正的原子占用放在下面所有前置步骤都通过之后。
+        confirmation_id: str | None = None
+        if spec.min_authority >= Authority.A2:
+            if self._confirmation_id is None:
+                raise deny(
+                    ErrorCode.POLICY_DENIED,
+                    f"工具 {tool_id} 属于 {spec.min_authority.label} 高影响动作，"
+                    f"必须携带服务端确认记录；请求体无法声明确认",
+                    tool_id=tool_id,
+                )
+            runtime.confirmations.peek(
+                self._confirmation_id,
+                tenant_id=self._token.tenant_id,
+                project_id=self._token.project_id,
+                principal_id=self._principal_id,
+                tool_id=tool_id,
+                params=params,
+                now=now,
+            )
+            confirmation_id = self._confirmation_id
+        confirmation_recorded = confirmation_id is not None
+
+        # 策略决策：每个工具调用一次，输入为不可变快照。
+        decision = runtime.gateway.decide(
+            PolicyInput(
+                request_id=self._token.run_id,
+                principal_id=self._principal_id,
+                tenant_id=self._token.tenant_id,
+                project_id=self._token.project_id,
+                node_id=self._node_spec.node_id,
+                tool_id=tool_id,
+                authority_required=spec.min_authority,
+                authority_ceiling=self._node_spec.authority_ceiling,
+                params_hash=content_hash(params),
+                data_labels=frozenset({"external_content"}) if spec.returns_external_content else frozenset(),
+                budget_available=True,
+                audit_available=runtime.audit.available,
+                confirmation_recorded=confirmation_recorded,
+                is_high_impact=spec.min_authority >= Authority.A2,
+                needs_egress=bool(spec.network_domains),
+            )
+        )
+        decision.require_allowed()
+
+        # 预算：两个维度必须**一次原子预留**，不能写成两次独立的 reserve。
+        # 若写成两次，第二次失败时第一次的预留会残留 —— 账户关不掉、敞口持续累积，
+        # 与「预留失败不得留下部分状态」的设计目标冲突。
+        # - TOOL_CALLS 是调用计数：成功或失败都算一次，因为调用确实发生了；
+        # - CURRENCY_MICROS 是成本：按工具声明的上界预留，结算时用实际值。
+        counter, cost = runtime.ledger.batch_reserve(
+            self._run_account_id,
+            {
+                str(Dimension.TOOL_CALLS): 1,
+                str(Dimension.CURRENCY_MICROS): max(1, spec.max_cost_units),
+            },
+        )
+
+        action = runtime.machine.plan(
+            tenant_id=self._token.tenant_id,
+            project_id=self._token.project_id,
+            run_id=self._token.run_id,
+            node_instance_id=self._token.node_instance_id,
+            # 逻辑动作 id 由内容决定：相同工具 + 相同参数 = 同一个逻辑动作，
+            # 重复请求会命中同一动作而不是新建一个。
+            logical_action_id=f"{tool_id}:{content_hash(params).split(':')[-1][:16]}",
+            tool_id=tool_id,
+        )
+
+        impl = self._runtime.tool_impls.get(tool_id)
+        if impl is None:
+            self._release_quietly(runtime, counter, cost)
+            raise deny(
+                ErrorCode.TOOL_NOT_REGISTERED,
+                f"工具 {tool_id} 没有可用实现",
+                tool_id=tool_id,
+            )
+
+        # 前置步骤全部通过，到这里才**原子占用**确认。
+        #
+        # 为什么必须是原子的一步：如果「判断是否已消费」和「标记已消费」分成两步，
+        # 两个并发请求会同时通过判断，同一张确认被执行两次 —— 这是被复现过的缺陷。
+        # 内存实现用锁把两步合进同一临界区；PostgreSQL 实现应改为
+        # `UPDATE ... WHERE consumed_at IS NULL RETURNING`。
+        # ⚠️ 进程内锁在多 worker 部署下等于不存在，所以数据库那条路径不能省。
+        #
+        # 失败时释放刚预留的额度并拒绝：宁可让用户重新确认一次，
+        # 也不能在没有有效确认的情况下执行高影响动作。
+        if confirmation_id is not None:
+            try:
+                runtime.confirmations.consume(
+                    confirmation_id,
+                    tenant_id=self._token.tenant_id,
+                    project_id=self._token.project_id,
+                    principal_id=self._principal_id,
+                    tool_id=tool_id,
+                    params=params,
+                    now=now,
+                    # 实际预留必须落在用户确认时看到的上界之内。
+                    reserved_budget={str(Dimension.CURRENCY_MICROS): cost.amount},
+                )
+            except PlatformError:
+                self._release_quietly(runtime, counter, cost)
+                raise
+
+        try:
+            outcome = runtime.dispatcher.dispatch(
+                token=self._token,
+                decision=decision,
+                action=action,
+                # 交给 dispatcher 结算的是**成本**预留；计数在本方法内单独处理。
+                reservation_id=cost.reservation_id,
+                tool=lambda p: impl(self._ctx, p),
+                params=params,
+                is_high_impact=spec.min_authority >= Authority.A2,
+                request_id=self._request_id,
+            )
+        except BaseException:
+            # 前置校验失败：调用没有真正发生，两个预留都释放。
+            self._release_quietly(runtime, counter, cost)
+            raise
+
+        # 调用确实发生了，计数预留结算为 1（成功与失败都算）。
+        runtime.ledger.mark_in_flight(counter.reservation_id)
+        runtime.ledger.settle(counter.reservation_id, 1)
+
+        self.calls.append(tool_id)
+        self._audit_event_ids.extend(
+            [decision.decision_id, outcome.idempotency_key]
+        )
+        self._ctx.scratch.setdefault("last_decision_id", decision.decision_id)
+
+        if outcome.status.value != "succeeded":
+            if outcome.status.value == "unknown":
+                # ⚠️ 结果未知**不能**标成可自动重试。
+                # 标 retryable=True 会让客户端直接重放整个请求，在没对账的情况下
+                # 产生第二次副作用 —— 那不是恢复，是放大。
+                # 正确动作由 PlatformError.next_action 给出（reconcile），
+                # 且 PlatformError 会拒绝 retryable=True 的构造。
+                raise PlatformError(
+                    code=ErrorCode.RECONCILIATION_REQUIRED,
+                    message=f"工具 {tool_id} 结果未知，需先对账再决定是否重试：{outcome.error}",
+                )
+            raise PlatformError(
+                code=ErrorCode.ILLEGAL_STATE_TRANSITION,
+                message=f"工具 {tool_id} 执行未成功：{outcome.error}",
+            )
+        return outcome.payload
+
+    @staticmethod
+    def _release_quietly(runtime: "InteractionRuntime", *reservations) -> None:
+        """释放多个预留，忽略「已不可释放」的错误。
+
+        已派发的调用必须走对账而不是释放，所以这里的静默仅用于前置校验失败的情形。
+        """
+        for reservation in reservations:
+            try:
+                runtime.ledger.release(reservation.reservation_id)
+            except PlatformError:
+                pass
+
+
+class InteractionRuntime:
+    """编排层入口。把各域串成一次可验证的交互。"""
+
+    def __init__(
+        self,
+        *,
+        registry: Registry,
+        gateway: PolicyGateway,
+        ledger: BudgetLedger,
+        audit: AuditSink,
+        machine: ActionStateMachine,
+        tokens: TokenIssuer,
+        projector: Projector,
+        clock: Clock,
+        chunk_index: ChunkIndex,
+        evidence_log: EvidenceLog,
+        confirmations: ConfirmationRepository,
+        capabilities: ExecutorCapabilities | None = None,
+    ) -> None:
+        self.registry = registry
+        self.gateway = gateway
+        self.ledger = ledger
+        self.audit = audit
+        self.machine = machine
+        self.tokens = tokens
+        self.projector = projector
+        self.clock = clock
+        self.chunk_index = chunk_index
+        self.evidence_log = evidence_log
+        self.confirmations = confirmations
+        self.capabilities = capabilities or ExecutorCapabilities(SUPPORTED_OBLIGATIONS)
+        self.dispatcher = ToolDispatcher(
+            registry=registry,
+            ledger=ledger,
+            audit=audit,
+            machine=machine,
+            tokens=tokens,
+            capabilities=self.capabilities,
+            clock=clock,
+        )
+        self.tool_impls: dict = {
+            "query_competency_graph": tools_impl.query_competency_graph,
+            "retrieve_project_chunks": tools_impl.retrieve_project_chunks,
+            "read_source_span": tools_impl.read_source_span,
+            "fetch_external_url": tools_impl.fetch_external_url,
+            "run_validator": tools_impl.run_validator,
+            "run_in_sandbox": tools_impl.run_in_sandbox,
+            "append_project_evidence": tools_impl.append_project_evidence,
+        }
+        # 幂等占用表：`(tenant_id, idempotency_key)` → 占用记录。
+        #
+        # 两点都是审查发现的，且都**不会报错**，只会静默地做错事：
+        #
+        # 1) 键必须**按租户划分**。只用客户端字符串做键时，租户 A 用 `common-key`
+        #    成功之后，租户 B 用同名键会收到 `IDEMPOTENCY_VIOLATION` ——
+        #    一个租户能"占住"另一个租户的键，属于跨租户可用性干扰。
+        #    `principal_id` / 项目 / 内容继续进指纹，负责发现同一作用域内的误用。
+        #
+        # 2) 必须是**原子占用**，不能"先查缓存、执行完再写"。
+        #    中间隔着整个执行流程，两个并发同键请求会同时看到"未缓存"、
+        #    各自执行一遍。实测（压小 GIL 切换间隔 + handler 做 I/O）可复现。
+        #
+        # ⚠️ 这是**开发适配器**：进程内、重启即失、多 worker 不共享。
+        # 生产实现应由 PostgreSQL 唯一约束保证：先 INSERT
+        # `(tenant_id, idempotency_key)` 抢占用，冲突时读该行并等待状态推进。
+        self._idempotency: dict[tuple[str, str], _IdempotencyEntry] = {}
+        self._idempotency_cond = threading.Condition()
+
+    # ------------------------------------------------------------------ 入口
+
+    def run(self, request: InteractionRequest) -> InteractionResult:
+        context = TenantContext(
+            tenant_id=request.tenant_id,
+            principal_id=request.principal_id,
+            project_id=request.learning_project_id,
+        )
+        with tenant_scope(context):
+            return self._run(request, context)
+
+    def _run(self, request: InteractionRequest, context: TenantContext) -> InteractionResult:
+        """幂等包装层。**占用的判定与结果写入必须原子**，否则并发会重复执行。
+
+        先到者占住 `(tenant_id, key)`，后到者等待它完成；完成才写结果。
+        具体语义见 `_claim_idempotency`。
+        """
+        if request.idempotency_key is None:
+            return self._execute(request, context)
+
+        key = (request.tenant_id, request.idempotency_key)
+        settled = self._claim_idempotency(request, key)
+        if settled is not None:
+            return settled  # 重放结果，或"处理中 / 键被误用"的拒绝
+
+        try:
+            result = self._execute(request, context)
+        except BaseException:
+            # 执行过程抛错：释放占用，让客户端可以重试。
+            self._release_idempotency(key)
+            raise
+
+        if result.status == "ok":
+            self._complete_idempotency(key, result)
+        else:
+            # 失败/拒绝**不缓存**：释放占用，客户端重试时会真正再执行一次。
+            # 缓存一个"被拒绝"的结果会让后续修好参数的重试永远拿到旧拒绝。
+            self._release_idempotency(key)
+        return result
+
+    def _execute(self, request: InteractionRequest, context: TenantContext) -> InteractionResult:
+        # 1) 输入预检查
+        if len(request.user_input) > MAX_INPUT_CHARS:
+            return self._deny(
+                request, None, "intake_goal", "L0", "input_too_large",
+                "输入超过上限；超大输入需要先分段摄取而不是直接送入模型",
+            )
+
+        # 2) 解析 typed node —— 失败不留预算
+        try:
+            node_spec = self.registry.node(request.node_id)
+        except PlatformError as exc:
+            return self._fail(request, exc)
+
+        # 3) 账户树（admission）
+        run_id = f"run_{content_hash([request.request_id, request.node_id]).split(':')[-1][:16]}"
+        run_account_id = self._ensure_budget_tree(request, node_spec, run_id)
+
+        # 4) 签发 capability token
+        now = self.clock.now()
+        token = self.tokens.issue(
+            tenant_id=request.tenant_id,
+            project_id=request.learning_project_id,
+            run_id=run_id,
+            node_instance_id=f"{node_spec.node_id}:1",
+            audience=request.principal_id,
+            allowed_tools=set(node_spec.allowed_tools),
+            policy_version=self.gateway.policy_version,
+            registry_version=self.registry.version,
+            revocation_epoch=self.dispatcher.revocation_epoch,
+            budget_account_id=run_account_id,
+            issued_at=now,
+            expires_at=now.replace(year=now.year + 1),
+        )
+
+        audit_event_ids: list[str] = []
+        tool_context = NodeContext(
+            chunk_index=self.chunk_index,
+            evidence_log=self.evidence_log,
+            audit=self.audit,
+            clock=self.clock,
+            tenant_id=context.tenant_id,
+            project_id=context.require_project(),
+            principal_id=context.principal_id,
+        )
+        invoker = ToolInvoker(
+            runtime=self,
+            token=token,
+            node_spec=node_spec,
+            run_account_id=run_account_id,
+            tool_context=tool_context,
+            audit_event_ids=audit_event_ids,
+            principal_id=request.principal_id,
+            confirmation_id=request.confirmation_id,
+            request_id=request.request_id,
+        )
+
+        # 5) 执行。所有工具调用都经受控入口。
+        try:
+            output = _HANDLERS[node_spec.node_id](invoker, request, tool_context)
+        except PlatformError as exc:
+            self.audit.append(
+                "interaction_rejected",
+                {"request_id": request.request_id, "code": str(exc.code), "message": exc.message},
+                risk=RiskLevel.HIGH if exc.code.value.startswith("POLICY") else RiskLevel.LOW,
+                tenant_id=request.tenant_id,
+                project_id=request.learning_project_id,
+            )
+            self._close_run_quietly(run_account_id, request_id=request.request_id)
+            return self._fail(request, exc, node_spec=node_spec, token=token)
+
+        # 6) 证据判定**只有** node handler 返回的结构化 assessment 一个权威来源。
+        #
+        # ⚠️ 这里曾按「是否存在 citation」另算一个 `evidence_sufficiency` 并合并进输出，
+        # 于是同一响应可以同时出现 `evidence_state=insufficient` 与
+        # `evidence_sufficiency=supported`（外部抓取失败但本地有命中时必然如此）。
+        # 读旧字段的客户端会据此接受缺少关键证据的答案 —— 矛盾的证据判定比没有判定更危险。
+        # 该字段已删除，不再提供兼容投影：它不是历史契约，而是一个错误判定的遗迹。
+
+        # 回收本次 run 的额度，避免授予额度泄漏到父账户。
+        self._close_run_quietly(run_account_id, request_id=request.request_id)
+
+        result = InteractionResult(
+            request_id=request.request_id,
+            status="ok",
+            node_id=node_spec.node_id,
+            model_tier=str(node_spec.min_tier),
+            decision_id=tool_context.scratch.get("last_decision_id"),
+            token_id=token.token_id,
+            output=output,
+            citations=tuple(output.get("citations", ())),
+            audit_event_ids=tuple(audit_event_ids),
+        )
+        return result
+
+    # ------------------------------------------------------------------ 幂等
+
+    #: 等待同键请求完成的上限。超时返回 `IDEMPOTENCY_IN_PROGRESS`（可重试），
+    #: 而不是无限等待 —— 一个卡住的执行不该把所有同键请求一起拖住。
+    IDEMPOTENCY_WAIT_SECONDS = 30.0
+
+    def _claim_idempotency(
+        self, request: InteractionRequest, key: tuple[str, str]
+    ) -> InteractionResult | None:
+        """原子占用幂等键。返回 `None` 表示"这次请求由你执行"。
+
+        为什么必须是原子占用：读缓存与写结果之间隔着**整个执行流程**
+        （策略、预算、工具调用）。分成"先查后写"两步时，两个并发同键请求会
+        同时看到"未缓存"并各自执行一遍 —— 实测（压小 GIL 切换间隔、
+        让 handler 做 I/O）能稳定复现，两次都返回 `idempotent_replay=false`。
+
+        三种非占用结果：
+        - 已完成 → 返回重放结果；
+        - 指纹不同 → `IDEMPOTENCY_VIOLATION`（同一把钥匙开两扇门）；
+        - 仍在处理且超时 → `IDEMPOTENCY_IN_PROGRESS`（**可重试**，
+          与"键被误用"严格区分）。
+        """
+        fingerprint = self._idempotency_fingerprint(request)
+        deadline = time.monotonic() + self.IDEMPOTENCY_WAIT_SECONDS
+
+        with self._idempotency_cond:
+            while True:
+                entry = self._idempotency.get(key)
+
+                # 指纹检查必须对**三种状态一致生效**，所以放在状态分派之前。
+                #
+                # 改前它排在 "released" 分支之后，而那个分支会直接替换记录 ——
+                # 于是同一个错误在不同状态下有不同结果（实测）：
+                #   占用者失败后复用同键换参数 → 静默接受，正常执行；
+                #   占用者成功后复用同键换参数 → IDEMPOTENCY_VIOLATION。
+                # 客户端据此会得出"key 复用没问题"的结论，而事实只有一半。
+                if entry is not None and entry.fingerprint != fingerprint:
+                    return self._fail(
+                        request,
+                        deny(
+                            ErrorCode.IDEMPOTENCY_VIOLATION,
+                            "同一 idempotency_key 被用于内容不同的请求；"
+                            "幂等键必须唯一标识一次请求，不得复用于不同参数",
+                        ),
+                    )
+
+                if entry is None or entry.state == "released":
+                    # 无人占用，或占用者已放弃（失败/拒绝）—— 由本次请求接手。
+                    self._idempotency[key] = _IdempotencyEntry(fingerprint=fingerprint)
+                    return None
+
+                if entry.state == "completed":
+                    # 用显式检查而不是 `assert`：`-O` 会把断言整个剥掉，
+                    # 而那正是这条不变量最需要被守住的时候（生产）。内部
+                    # 不变量被破坏是代码缺陷，不该伪装成一次正常的业务拒绝，
+                    # 所以这里抛出而不是返回一个结果。
+                    if entry.result is None:
+                        raise deny(
+                            ErrorCode.ILLEGAL_STATE_TRANSITION,
+                            "幂等记录为 completed 却没有结果：占用表被非法改动",
+                        )
+                    return self._as_replay(entry.result, request)
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return self._fail(
+                        request,
+                        PlatformError(
+                            code=ErrorCode.IDEMPOTENCY_IN_PROGRESS,
+                            message="同一 idempotency_key 的请求仍在处理中，请稍后重试",
+                            retryable=True,
+                        ),
+                    )
+                # 释放条件变量再等待，让占用者能推进。
+                self._idempotency_cond.wait(timeout=remaining)
+
+    def _complete_idempotency(self, key: tuple[str, str], result: InteractionResult) -> None:
+        """写入结果并唤醒等待者。
+
+        结果与状态标记由 `mark_completed` 一并设置 —— 否则等待者可能被唤醒后
+        看到 `completed` 却读到 `None`。
+        """
+        with self._idempotency_cond:
+            entry = self._idempotency.get(key)
+            if entry is None:
+                # 不该发生：占用者一定持有记录。这里显式忽略而不是静默新建，
+                # 因为静默新建会把"占用表被谁改过"这件事盖住。
+                return
+            entry.mark_completed(result)
+            self._idempotency_cond.notify_all()
+
+    def _release_idempotency(self, key: tuple[str, str]) -> None:
+        """放弃占用。等在这把键上的请求会被唤醒并接手执行。"""
+        with self._idempotency_cond:
+            entry = self._idempotency.get(key)
+            if entry is not None:
+                entry.mark_released()
+            self._idempotency_cond.notify_all()
+
+    @staticmethod
+    def _as_replay(stored: InteractionResult, request: InteractionRequest) -> InteractionResult:
+        """把缓存的结果改造成**本次请求**的响应。
+
+        不能原样返回：缓存结果里带的是**第一次**请求的追踪 id，
+        直接返回会让响应头（本次请求）与响应体（上一次请求）指向两个不同的 id，
+        排障时又是一次"对不上"。
+
+        同时显式标注 `idempotent_replay`：客户端有权知道这次没有重新执行。
+        幂等重放必须是可观测的 —— 否则"重试没生效"和"重试命中了缓存"
+        在客户端看来完全一样。
+        """
+        payload = stored.error
+        if payload is not None:
+            payload = {**payload, "request_id": request.request_id}
+        return replace(
+            stored,
+            request_id=request.request_id,
+            output={**stored.output, "idempotent_replay": True},
+            error=payload,
+        )
+
+    @staticmethod
+    def _idempotency_fingerprint(request: InteractionRequest) -> str:
+        """把幂等键绑定到**主体、项目与请求内容**。
+
+        两处绑定都不可省：
+
+        - **绑主体/项目**：否则另一个人猜到（或复用）了同一个 key 就能读到别人的结果
+          —— 那等于把幂等缓存变成跨租户读取通道。
+        - **绑内容**：否则同一个 key 换个参数复用会静默返回上一次的结果，
+          客户端以为自己发了新请求。
+
+        ⚠️ `confirmation_id` 也要绑：它是请求语义的一部分（哪一条授权、覆盖哪些参数）。
+        漏掉它的话，「同键 + 换一条确认记录」会被当成重放 ——
+        第二条确认**永远不会被消费**，而客户端以为自己的第二次授权生效了。
+        这是一次自查发现的缺口：五个字段都绑了，唯独漏了这个。
+        """
+        return content_hash(
+            {
+                "tenant_id": request.tenant_id,
+                "project_id": request.learning_project_id,
+                "principal_id": request.principal_id,
+                "node_id": request.node_id,
+                "user_input": request.user_input,
+                "params": request.params,
+                "confirmation_id": request.confirmation_id,
+            }
+        )
+
+    # ------------------------------------------------------------------ 内部
+
+    def _ensure_budget_tree(
+        self, request: InteractionRequest, node_spec: NodeSpec, run_id: str
+    ) -> str:
+        """建立 Tenant → Project → Run 三级账户。额度按 node 上限下发。
+
+        ⚠️ 整段必须在一个临界区里。这里的每一步都是「不存在就创建」——
+        典型的 check-then-act。只给账本的单个方法加锁是**不够的**：
+        两个线程会同时通过 `not in self.ledger._accounts` 检查，
+        第二个在创建时抛「账户已存在」。
+
+        实测就是这么暴露的：加了账本级锁之后并发仍然稳定抛
+        `BUDGET_TREE_INVALID`。**单个方法原子 ≠ 一组方法原子。**
+        """
+        tenant_account = f"acct_tenant_{request.tenant_id}"
+        project_account = f"acct_project_{request.learning_project_id}"
+        run_account = f"acct_run_{run_id}"
+
+        with self.ledger.atomic():
+            if not self.ledger.has_account(tenant_account):
+                self.ledger.open_account(
+                    tenant_account,
+                    tenant_id=request.tenant_id,
+                    limits={
+                        str(Dimension.CURRENCY_MICROS): 1_000_000_000,
+                        str(Dimension.TOKENS): 100_000_000,
+                        str(Dimension.STEPS): 100_000,
+                        str(Dimension.TOOL_CALLS): 100_000,
+                        str(Dimension.SANDBOX_SECONDS): 100_000,
+                    },
+                    completion_reserve={str(Dimension.CURRENCY_MICROS): 10_000_000},
+                )
+            if not self.ledger.has_account(project_account):
+                self.ledger.grant_to_child(
+                    tenant_account,
+                    project_account,
+                    {
+                        str(Dimension.CURRENCY_MICROS): 100_000_000,
+                        str(Dimension.TOKENS): 10_000_000,
+                        str(Dimension.STEPS): 10_000,
+                        str(Dimension.TOOL_CALLS): 10_000,
+                        str(Dimension.SANDBOX_SECONDS): 10_000,
+                    },
+                    tenant_id=request.tenant_id,
+                    project_id=request.learning_project_id,
+                )
+            if not self.ledger.has_account(run_account):
+                # run 账户不传租户/项目，从 project 账户继承 —— 靠继承而非重复声明，
+                # 避免"某处漏传导致账目脱离隔离范围"。
+                self.ledger.grant_to_child(
+                    project_account,
+                    run_account,
+                    {
+                        str(Dimension.CURRENCY_MICROS): node_spec.max_cost_micros,
+                        str(Dimension.TOKENS): node_spec.max_tokens,
+                        str(Dimension.STEPS): node_spec.max_steps,
+                        str(Dimension.TOOL_CALLS): node_spec.max_tool_calls,
+                        str(Dimension.SANDBOX_SECONDS): node_spec.max_sandbox_seconds,
+                    },
+                )
+        return run_account
+
+    def _close_run_quietly(self, run_account_id: str, *, request_id: str | None = None) -> None:
+        """交互结束后回收 run 账户的额度，避免授予额度泄漏到父账户。
+
+        若仍有未结预留（例如存在 `unknown` 动作），这里只记录、不强行释放 ——
+        那属于对账流程，不该被「顺手清理」掩盖过去。
+        """
+        try:
+            self.ledger.close_account(run_account_id)
+        except PlatformError as exc:
+            account = self.ledger._accounts.get(run_account_id)  # noqa: SLF001 — 运维观测
+            self.audit.append(
+                "run_account_not_closed",
+                {
+                    "run_account_id": run_account_id,
+                    "code": str(exc.code),
+                    "message": exc.message,
+                },
+                risk=RiskLevel.LOW,
+                tenant_id=account.tenant_id if account else None,
+                project_id=account.project_id if account else None,
+                request_id=request_id,
+            )
+
+    def _deny(
+        self,
+        request: InteractionRequest,
+        node_spec: NodeSpec | None,
+        node_id: str,
+        tier: str,
+        code: str,
+        message: str,
+    ) -> InteractionResult:
+        return InteractionResult(
+            request_id=request.request_id,
+            status="denied",
+            node_id=node_spec.node_id if node_spec else node_id,
+            model_tier=str(node_spec.min_tier) if node_spec else tier,
+            decision_id=None,
+            token_id=None,
+            output={},
+            citations=(),
+            audit_event_ids=(),
+            error=public_error_payload(code, message, request_id=request.request_id),
+        )
+
+    def _fail(
+        self,
+        request: InteractionRequest,
+        exc: PlatformError,
+        *,
+        node_spec: NodeSpec | None = None,
+        token: CapabilityToken | None = None,
+    ) -> InteractionResult:
+        # 状态不能只由 retryable 二分。「结果未知」既不是拒绝、也不是可重试的失败 ——
+        # 它有独立的下一步（对账），所以必须是独立状态。否则客户端只会看到
+        # retryable=False 就把未知当成终态放弃，永远不去对账。
+        if exc.code is ErrorCode.RECONCILIATION_REQUIRED:
+            status = "reconciliation_required"
+        elif exc.retryable:
+            status = "failed"
+        else:
+            status = "denied"
+        # 错误体里的追踪 id 必须与响应体、响应头、审计事件**同一个值**。
+        # 此前它是 null：`exc.request_id` 没有任何 raise 点设置过，
+        # 而这里也没兜底 —— 于是"随时可查的追踪 id"在唯一的失败出口上是空的。
+        payload = exc.to_payload()
+        payload["request_id"] = request.request_id
+        return InteractionResult(
+            request_id=request.request_id,
+            status=status,
+            node_id=node_spec.node_id if node_spec else request.node_id,
+            model_tier=str(node_spec.min_tier) if node_spec else "L0",
+            decision_id=None,
+            token_id=token.token_id if token else None,
+            output={},
+            citations=(),
+            audit_event_ids=(),
+            error=payload,
+        )
+
+    def projection(self, *, graph_version: str = "graph/v1") -> MasteryProjection:
+        """产出**当前租户与项目**的掌握投影。
+
+        必须先按作用域过滤再投影。否则要么触发跨项目拒绝（报错），
+        要么在检查被放宽时产出混合投影 —— 而掌握度是最不能出错的数据。
+        """
+        context = current()
+        project_id = context.require_project()
+        events = self.evidence_log.events_scoped(
+            tenant_id=context.tenant_id, project_id=project_id
+        )
+        corrections = self.evidence_log.corrections_scoped(
+            event_ids={event.event_id for event in events}
+        )
+        return self.projector.project_from(
+            events=events, corrections=corrections, graph_version=graph_version
+        )
+
+
+# --------------------------------------------------------------------- handler
+
+
+def _handle_intake_goal(invoker: ToolInvoker, request: InteractionRequest, ctx: NodeContext) -> dict:
+    """接收学习目标。本版不调用任何工具（node 声明了空工具集）。"""
+    return {
+        "goal": request.user_input.strip(),
+        "assumptions": ["目标由用户口述，未做可行性判断"],
+        "limitations": ["本版未接入云端模型，目标解析为结构化占位输出"],
+        "citations": [],
+    }
+
+
+def _handle_diagnose(invoker: ToolInvoker, request: InteractionRequest, ctx: NodeContext) -> dict:
+    """诊断先修缺口。只读图谱，不做任何写入。"""
+    targets = request.params.get("targets") or []
+    graph = invoker.call("query_competency_graph", {"targets": targets})
+    closure = graph.get("closure", [])
+    # 用户自评：只能减少题量，不能提升掌握状态（01 号规格 §9）。
+    self_reported = set(request.params.get("self_reported", []))
+    gaps = [c for c in closure if c not in self_reported]
+    return {
+        "targets": targets,
+        "prerequisite_closure": closure,
+        "assumed_from_self_report": sorted(self_reported & set(closure)),
+        "gaps": gaps,
+        "citations": [],
+    }
+
+
+# 关键词检索的相关度下限。
+# 当前检索是关键词命中计数（score = 命中的词数），所以 1 的含义是
+# 「至少命中一个词」。真正意义上的相关度门槛要等向量检索与 reranker
+# （阶段计划第 9 项），届时这里换成融合后的分数下限。
+RETRIEVAL_RELEVANCE_FLOOR = 1
+
+
+def _handle_retrieve(invoker: ToolInvoker, request: InteractionRequest, ctx: NodeContext) -> dict:
+    """检索资料。
+
+    外部抓取是**可选步骤**：失败不中断流程，但必须进入结构化 issues ——
+    「抓取失败」既不等于「没有结果」，也不等于「已支持」。
+
+    证据状态由 `assess_retrieval()` 依据候选数、相关度、抓取失败、权限截断与
+    必需步骤完成度计算，**不再由「是否存在命中」决定**（02 号规格 §4）。
+
+    原实现是 `"supported" if hits else "insufficient"`：只要有一条命中就声称
+    已支持，抓取失败、低相关、步骤未完成全都不影响状态。那是最危险的一类错误
+    —— 错误的 `insufficient` 会被用户追问后修正，错误的 `supported` 会被直接采信。
+    """
+    retrieval = invoker.call("retrieve_project_chunks", {"query": request.user_input, "limit": 3})
+    hits = retrieval.get("hits", [])
+    citations = [hit["artifact"] for hit in hits]
+
+    failures: list[FetchFailure] = []
+    tool_result_unknown = False
+    required_steps_completed = True
+
+    if request.params.get("also_fetch_external"):
+        external_url = str(request.params["also_fetch_external"])
+        try:
+            invoker.call("fetch_external_url", {"url": external_url})
+            # 取回成功，但本版尚未把外部内容并入引用 —— 这是一步**未完成的工作**，
+            # 必须反映到证据状态上，不能只在旁白里提一句就当作完成。
+            required_steps_completed = False
+        except PlatformError as exc:
+            if exc.code is ErrorCode.RECONCILIATION_REQUIRED:
+                # 结果未知：**必须先对账**，不可自动重试 ——
+                # 未知状态下重试会产生第二次副作用，那不是恢复，是放大。
+                tool_result_unknown = True
+            else:
+                failures.append(
+                    FetchFailure(
+                        source_ref=external_url,
+                        error_code=str(exc.code),
+                        # 可重试性由错误策略给出，不在这里统一推导（02 号规格 §4）。
+                        retryable=exc.retryable,
+                    )
+                )
+
+    signals = RetrievalSignals(
+        candidate_count=len(hits),
+        top_score=float(hits[0]["score"]) if hits else 0.0,
+        relevance_floor=RETRIEVAL_RELEVANCE_FLOOR,
+        required_steps_completed=required_steps_completed,
+        fetch_failures=tuple(failures),
+        tool_result_unknown=tool_result_unknown,
+        # ⚠️ 显式写空并说明原因，而不是靠默认值悄悄为空。
+        # 「本次检索必须支撑哪些核心结论」与「哪些已站住」都来自冻结的核心结论
+        # 标注集（计划第 9 项），首版没有。因此证据状态会落在 `insufficient`
+        # 并带一条 MISSING_SUPPORT —— 这是**正确的**：
+        # 我们现在确实无法证明核心结论有充分证据。
+        required_claim_refs=(),
+        supported_claim_refs=(),
+    )
+    assessment = assess_retrieval(signals)
+
+    return {
+        "hits": hits,
+        "evidence_state": str(assessment.state),
+        "issues": [issue.to_dict() for issue in assessment.issues],
+        # 过程健康度与证据状态**正交**，所以分两个字段。
+        # 曾用证据状态顺带表达"过程无异常"，导致抓取失败时仍返回 supported。
+        "retrieval_health": str(assess_retrieval_health(signals)),
+        "note": "状态由 issues 与结论覆盖推导，不由「是否存在命中」决定（02 号规格 §4）",
+        "citations": citations,
+    }
+
+
+def _handle_validate_and_record(
+    invoker: ToolInvoker, request: InteractionRequest, ctx: NodeContext
+) -> dict:
+    """验证产物并追加学习证据。此处是 A2 写入路径。"""
+    artifact = request.params.get("artifact") or {}
+    required_keys = request.params.get("required_keys") or []
+    validation = invoker.call("run_validator", {"artifact": artifact, "required_keys": required_keys})
+    if not validation.get("passed"):
+        return {
+            "passed": False,
+            "missing_keys": validation.get("missing_keys", []),
+            "note": "验证未通过，不产生学习证据；失败事实会保留",
+            "citations": [],
+        }
+
+    # 参数**原样透传用户提交的内容**（无关键会被工具实现忽略）。
+    # 这样客户端创建确认时提交的 params 与执行时的参数完全一致，确认绑定才成立。
+    # 若这里再拼装字段或补默认值，两边永远对不上，确认会静默失效。
+    recorded = invoker.call("append_project_evidence", dict(request.params))
+    return {
+        "passed": True,
+        "evidence_event_id": recorded.get("event_id"),
+        "evidence_seq": recorded.get("seq"),
+        "citations": [],
+    }
+
+
+_HANDLERS = {
+    "intake_goal": _handle_intake_goal,
+    "diagnose_prerequisites": _handle_diagnose,
+    "retrieve_material": _handle_retrieve,
+    "validate_and_record": _handle_validate_and_record,
+}

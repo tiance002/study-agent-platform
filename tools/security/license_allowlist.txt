@@ -1,0 +1,17 @@
+# 依赖许可证豁免清单
+#
+# 格式：<包名>   # 理由
+#
+# 硬规则：**不允许无理由豁免。**
+# 每条都必须写清「为什么这个 copyleft 依赖可以接受」，例如：
+#   - 只在开发/测试期使用，不随产物分发；
+#   - 以独立进程调用，未构成衍生作品（需法务确认措辞）；
+#   - 已获得商业授权。
+#
+# 扫描门见 tools/security/scan_licenses.py。
+# 当前为空 —— 现阶段依赖全部是宽松许可（MIT / BSD / Apache / PSF）。
+
+# ---- 以下为已评审的豁免（2026-09-18，随 PostgreSQL 持久化引入）----
+
+psycopg         # LGPL-3.0-only：作为依赖引入且不修改其源码；Python 源码形态天然满足 LGPL 的「可替换库」要求，分发时随附许可证文本即可。替代品 psycopg2 同为 LGPL，无更优选择。
+psycopg-binary  # psycopg[binary] 的官方预编译 wheel，理由同 psycopg。

@@ -1,0 +1,841 @@
+"""摄取仓储的**契约测试**：内存与 PostgreSQL 适配器跑同一批断言。
+
+延续 `test_product_repositories.py` 的参数化模式。本文件重点守五类
+"不会报错、只会慢慢分叉或静默出错"的语义：
+
+1. **入队原子性**：原文与任务一起出现，版本号由实现分配且并发安全；
+2. **认领的独占性**：并发 worker 不会拿到同一个任务（PG 靠 `SKIP LOCKED`）；
+3. **片段作用域**：跨项目/跨文档的片段挂不上去（否则引用会指向别人的资料）；
+4. **完成的幂等**：重复投递不追加第二套片段，也不报错；
+5. **终态的收敛**：成功/失败之后不再被认领；租约过期才允许回收。
+
+⚠️ PostgreSQL 参数被 skip 就等于这一关没过。
+"""
+
+from __future__ import annotations
+
+import threading
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pg_support
+import psycopg
+import pytest
+from app.core.errors import ErrorCode, PlatformError
+from app.core.hashing import content_hash
+from app.identity.models import Principal
+from app.knowledge.models import (
+    CHUNK_PARSER_VERSION,
+    IngestionStatus,
+    SourceDocument,
+    StoredChunk,
+)
+from app.product.models import SourceRecord
+
+#: 整场会话跑在随机临时库上（`conftest.pg_database`，会话级 autouse）——
+#: 本文件有跨租户的排空操作，绝不允许在业务库上执行。
+
+TENANT = "t_ing_pg"
+OTHER_TENANT = "t_ing_pg_other"
+ALICE = "u_ing_pg_alice"
+BOB = "u_ing_pg_bob"
+CAROL = "u_ing_pg_carol"
+
+CONTENT = "# 事务\n\n提交成功。\n\n## 回滚\n\n失败时回滚。"
+
+
+def _drain_queue() -> None:
+    """把遗留的未终态任务推进到终态，让每个用例都从空队列开始。
+
+    为什么必须显式做这件事：`claim_next` 是**跨租户**的系统级操作（worker 要先
+    发现"哪个租户有活干"），所以它拿回来的是全库最早的一条排队任务 ——
+    包括上一次运行、上一个用例留下的。用超级用户连接直接写终态，
+    是因为这一步要绕过 RLS 才能覆盖所有租户。
+
+    ⚠️ **只能发生在临时测试库上**：这一句会终结目标库里所有在途任务，
+    指向业务库时就是"跑一次测试，用户全部上传卡死"。所以先过
+    `require_test_database`（库名不以 `study_test_` 开头直接拒绝），
+    失败发生在**任何写入之前**。
+    """
+    dsn = pg_support.require_test_database(pg_support.migration_dsn())
+    with psycopg.connect(dsn) as conn:
+        with conn.transaction():
+            conn.execute(
+                "UPDATE ingestion_jobs"
+                " SET status = 'failed', error_code = 'TEST_DRAIN',"
+                "     error_detail = '测试前置：排空遗留任务',"
+                # 认领围栏也要清掉：CHECK 要求"租约三件套"与 processing 同步
+                "     lease_owner = NULL, lease_until = NULL, claim_token = NULL"
+                " WHERE status IN ('queued', 'processing')"
+            )
+
+
+@pytest.fixture(scope="module")
+def pg_seed() -> None:
+    """租户与主体用超级用户写（运维动作）。库不可达时静默返回：
+    postgres 参数上的 skipif 负责跳过 PG 用例，内存用例不被牵连。"""
+    if not pg_support.reachable():
+        return
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
+        with conn.transaction():
+            for tenant in (TENANT, OTHER_TENANT):
+                conn.execute(
+                    "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)"
+                    " ON CONFLICT (tenant_id) DO NOTHING",
+                    (tenant, tenant),
+                )
+            for principal, tenant in (
+                (ALICE, TENANT),
+                (BOB, TENANT),
+                (CAROL, OTHER_TENANT),
+            ):
+                conn.execute(
+                    "INSERT INTO principals (principal_id, tenant_id) VALUES (%s, %s)"
+                    " ON CONFLICT (principal_id) DO NOTHING",
+                    (principal, tenant),
+                )
+
+
+@dataclass
+class Env:
+    membership: object
+    products: object
+    ingestion: object
+
+
+@pytest.fixture(
+    params=[
+        pytest.param("memory", id="memory"),
+        pytest.param(
+            "postgres",
+            marks=[
+                pytest.mark.postgres,
+                pytest.mark.skipif(
+                    not pg_support.reachable(),
+                    reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）",
+                ),
+            ],
+            id="postgres",
+        ),
+    ]
+)
+def env(request, pg_seed) -> Env:
+    if request.param == "memory":
+        from app.identity.membership import MembershipStore
+        from app.knowledge.memory_store import InMemoryIngestionRepository
+        from app.product.memory_store import InMemoryProductRepository
+
+        membership = MembershipStore()
+        products = InMemoryProductRepository(membership=membership)
+        return Env(
+            membership=membership,
+            products=products,
+            ingestion=InMemoryIngestionRepository(
+                membership=membership, products=products
+            ),
+        )
+
+    from app.db.identity_store import PostgresMembershipRepository
+    from app.db.ingestion_store import PostgresIngestionRepository
+    from app.db.product_store import PostgresProductRepository
+
+    _drain_queue()
+    membership = PostgresMembershipRepository()
+    products = PostgresProductRepository(membership=membership)
+    return Env(
+        membership=membership,
+        products=products,
+        ingestion=PostgresIngestionRepository(membership=membership),
+    )
+
+
+def _unique(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:10]}"
+
+
+def _alice() -> Principal:
+    return Principal(principal_id=ALICE, tenant_id=TENANT)
+
+
+def _bob() -> Principal:
+    return Principal(principal_id=BOB, tenant_id=TENANT)
+
+
+def _register(env: Env, project_id: str, *, actor: Principal | None = None) -> SourceRecord:
+    return env.products.register_source(
+        actor or _alice(),
+        project_id,
+        source_id=_unique("src"),
+        display_name="事务讲义.md",
+        media_type="text/markdown",
+        identity_hash="sha256:" + uuid.uuid4().hex,
+        acquisition={"kind": "upload"},
+    )
+
+
+def _project(env: Env, *, actor: Principal | None = None) -> str:
+    project_id = _unique("proj")
+    env.membership.create_project_for(
+        actor or _alice(), project_id=project_id, name="摄取契约", goal=""
+    )
+    return project_id
+
+
+def _enqueue(env: Env, project_id: str, source_id: str, *, content: str = CONTENT):
+    return env.ingestion.enqueue(
+        _alice(),
+        project_id,
+        source_id,
+        document_id=_unique("doc"),
+        job_id=_unique("job"),
+        title="事务讲义",
+        content=content,
+        media_type="text/markdown",
+        language="zh",
+    )
+
+
+def _chunks_for(
+    document: SourceDocument, slices: list[tuple[int, int]]
+) -> tuple[StoredChunk, ...]:
+    """按原文区间造片段。内容一律取自原文，保证 span 与内容严丝合缝。"""
+    now = datetime.now(timezone.utc)
+    return tuple(
+        StoredChunk(
+            chunk_id=_unique("chk"),
+            tenant_id=document.tenant_id,
+            project_id=document.project_id,
+            source_id=document.source_id,
+            document_id=document.document_id,
+            chunk_index=index,
+            heading_path=(),
+            heading_level=0,
+            span_start=start,
+            span_end=end,
+            content=document.content[start:end],
+            parser_version=CHUNK_PARSER_VERSION,
+            created_at=now,
+        )
+        for index, (start, end) in enumerate(slices)
+    )
+
+
+# ------------------------------------------------------------------ 入队
+
+
+@pytest.mark.invariant
+def test_enqueue_writes_document_and_queued_job(env):
+    project_id = _project(env)
+    source = _register(env, project_id)
+    document, job = _enqueue(env, project_id, source.source_id)
+
+    assert document.version == 1
+    assert document.content == CONTENT
+    assert document.content_hash.startswith("sha256:")
+    assert document.taint_sources == ("uploaded_source",)
+    assert job.status is IngestionStatus.QUEUED
+    assert job.attempt_count == 0
+    assert job.document_id == document.document_id
+    assert env.ingestion.get_job(_alice(), project_id, job.job_id).job_id == job.job_id
+
+
+@pytest.mark.invariant
+def test_reupload_allocates_next_version_instead_of_overwriting(env):
+    """同一份资料的第二次上传是**新版本**，不是改旧行。
+
+    覆盖旧行会让所有已发出的引用指向另一段文字，而 `content_hash` 依然是旧的 ——
+    引用"可核验"就此变成一句空话。
+    """
+    project_id = _project(env)
+    source = _register(env, project_id)
+    first, first_job = _enqueue(env, project_id, source.source_id)
+    second, second_job = _enqueue(env, project_id, source.source_id, content="# 新版本")
+
+    assert (first.version, second.version) == (1, 2)
+    assert first_job.job_id != second_job.job_id
+    # 旧版本仍按原样存在于库里。
+    assert env.ingestion.load_document(first_job).content == CONTENT
+
+
+@pytest.mark.invariant
+def test_source_from_another_project_cannot_be_enqueued(env):
+    """给别的项目的资料挂原文会被拒绝 —— 这是引用跨项目的入口。"""
+    project_a = _project(env)
+    project_b = _project(env, actor=_bob())
+    source_b = _register(env, project_b, actor=_bob())
+
+    with pytest.raises(PlatformError) as excinfo:
+        _enqueue(env, project_a, source_b.source_id)
+    assert excinfo.value.code is ErrorCode.CROSS_TENANT_DENIED
+
+
+# ------------------------------------------------------------------ 认领
+
+
+@pytest.mark.invariant
+def test_claim_marks_processing_and_holds_lease(env):
+    project_id = _project(env)
+    source = _register(env, project_id)
+    _document, job = _enqueue(env, project_id, source.source_id)
+
+    claimed = env.ingestion.claim_next(worker_id="worker-a", lease_seconds=300)
+    assert claimed is not None
+    assert claimed.job_id == job.job_id
+    assert claimed.status is IngestionStatus.PROCESSING
+    assert claimed.attempt_count == 1
+    assert claimed.lease_owner == "worker-a"
+    assert claimed.lease_until is not None
+
+    # 另一个 worker 在没有新任务时拿不到任何东西 —— 而不是拿到同一个。
+    assert env.ingestion.claim_next(worker_id="worker-b", lease_seconds=300) is None
+
+
+@pytest.mark.invariant
+def test_concurrent_workers_never_claim_the_same_job(env, racy_scheduling):
+    """独占性必须实测。PG 版靠 `FOR UPDATE SKIP LOCKED`，
+    内存版靠锁 —— 但"应该如此"要跑过才算数。"""
+    project_id = _project(env)
+    source = _register(env, project_id)
+    jobs = {
+        _enqueue(env, project_id, source.source_id)[1].job_id for _ in range(4)
+    }
+
+    barrier = threading.Barrier(4)
+    results: list[object] = []
+    lock = threading.Lock()
+
+    def worker(name: str) -> None:
+        barrier.wait()
+        try:
+            claimed = env.ingestion.claim_next(worker_id=name, lease_seconds=300)
+            with lock:
+                results.append(claimed.job_id if claimed else None)
+        except Exception as exc:  # noqa: BLE001 — 收集全部异常用于断言
+            with lock:
+                results.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(f"w{i}",)) for i in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert all(isinstance(item, str) for item in results), results
+    assert len(set(results)) == 4, f"同一任务被认领多次：{results}"
+    assert set(results) == jobs
+
+
+@pytest.mark.invariant
+def test_expired_lease_is_reclaimable_but_terminal_job_is_not(env):
+    """崩溃残留（租约过期）必须可回收；终态任务必须不被回收。
+
+    两条一起测：只测前者会漏掉"成功之后又被捞起来做一遍"，
+    只测后者会漏掉"崩一次任务就永远卡住"。
+    """
+    project_id = _project(env)
+    source = _register(env, project_id)
+    document, job = _enqueue(env, project_id, source.source_id)
+
+    crashed = env.ingestion.claim_next(worker_id="crashed", lease_seconds=0)
+    assert crashed is not None and crashed.job_id == job.job_id
+
+    reclaimed = env.ingestion.claim_next(worker_id="worker-b", lease_seconds=300)
+    assert reclaimed is not None
+    assert reclaimed.job_id == job.job_id, "租约过期后应被重新认领"
+    assert reclaimed.attempt_count == 2, "重试次数必须如实累积"
+    assert reclaimed.lease_owner == "worker-b"
+
+    env.ingestion.complete(reclaimed, _chunks_for(document, [(0, 5)]))
+    assert env.ingestion.claim_next(worker_id="worker-c", lease_seconds=300) is None, (
+        "succeeded 是终态，不得被重新认领"
+    )
+
+
+# ------------------------------------------------------------------ 完成
+
+
+@pytest.mark.invariant
+def test_cross_project_chunks_cannot_be_attached(env):
+    """把一个项目的片段挂到另一个项目的任务上必须被拒绝。
+
+    少了这道判定，它只是一个参数写错，而引用会指向别人的资料 —— 且看起来正常。
+    """
+    project_id = _project(env)
+    source = _register(env, project_id)
+    document, job = _enqueue(env, project_id, source.source_id)
+    env.ingestion.claim_next(worker_id="worker-a", lease_seconds=300)
+
+    foreign = _chunks_for(document, [(0, 5)])[0]
+    strayed = StoredChunk(
+        chunk_id=foreign.chunk_id,
+        tenant_id=foreign.tenant_id,
+        project_id=_unique("proj_elsewhere"),
+        source_id=foreign.source_id,
+        document_id=foreign.document_id,
+        chunk_index=0,
+        heading_path=(),
+        heading_level=0,
+        span_start=0,
+        span_end=5,
+        content=foreign.content,
+        parser_version=foreign.parser_version,
+        created_at=foreign.created_at,
+    )
+    with pytest.raises(PlatformError) as excinfo:
+        env.ingestion.complete(job, (strayed,))
+    assert excinfo.value.code is ErrorCode.CROSS_PROJECT_DENIED
+
+    # 被拒绝之后任务仍是 processing：可以修正后重来，而不是变成终态失败。
+    assert (
+        env.ingestion.get_job(_alice(), project_id, job.job_id).status
+        is IngestionStatus.PROCESSING
+    )
+
+
+@pytest.mark.invariant
+def test_chunk_index_gap_is_rejected(env):
+    """序号必须是 0..n-1 连续。留空洞意味着有原文没有任何可引用片段，
+    而检索结果完全看不出来。"""
+    project_id = _project(env)
+    source = _register(env, project_id)
+    document, job = _enqueue(env, project_id, source.source_id)
+    env.ingestion.claim_next(worker_id="worker-a", lease_seconds=300)
+
+    chunks = _chunks_for(document, [(0, 5), (5, 10)])
+    shifted = (
+        chunks[0],
+        StoredChunk(
+            chunk_id=chunks[1].chunk_id,
+            tenant_id=chunks[1].tenant_id,
+            project_id=chunks[1].project_id,
+            source_id=chunks[1].source_id,
+            document_id=chunks[1].document_id,
+            chunk_index=7,  # 空洞
+            heading_path=(),
+            heading_level=0,
+            span_start=chunks[1].span_start,
+            span_end=chunks[1].span_end,
+            content=chunks[1].content,
+            parser_version=chunks[1].parser_version,
+            created_at=chunks[1].created_at,
+        ),
+    )
+    with pytest.raises(PlatformError) as excinfo:
+        env.ingestion.complete(job, shifted)
+    assert excinfo.value.code is ErrorCode.PARAMS_INVALID
+
+
+@pytest.mark.invariant
+def test_duplicate_delivery_produces_one_chunk_set_and_one_terminal_result(env):
+    """重复投递是幂等成功：不追加第二套片段，也不报唯一键冲突。"""
+    project_id = _project(env)
+    source = _register(env, project_id)
+    document, job = _enqueue(env, project_id, source.source_id)
+    claimed = env.ingestion.claim_next(worker_id="worker-a", lease_seconds=300)
+    assert claimed is not None
+    chunks = _chunks_for(document, [(0, 8), (8, 16)])
+
+    env.ingestion.complete(claimed, chunks)
+    env.ingestion.complete(claimed, chunks)  # 重放
+
+    assert (
+        env.ingestion.get_job(_alice(), project_id, job.job_id).status
+        is IngestionStatus.SUCCEEDED
+    )
+    assert env.ingestion.stored_chunks(_alice(), project_id) == chunks
+
+
+@pytest.mark.invariant
+def test_complete_requires_processing_state(env):
+    """没认领就完成会被拒绝：否则"任务状态"就不再是事实的记录，而是可跳过的装饰。"""
+    project_id = _project(env)
+    source = _register(env, project_id)
+    document, job = _enqueue(env, project_id, source.source_id)
+
+    with pytest.raises(PlatformError) as excinfo:
+        env.ingestion.complete(job, _chunks_for(document, [(0, 5)]))
+    assert excinfo.value.code is ErrorCode.ILLEGAL_STATE_TRANSITION
+
+
+@pytest.mark.invariant
+def test_fail_is_terminal_and_idempotent(env):
+    project_id = _project(env)
+    source = _register(env, project_id)
+    _document, job = _enqueue(env, project_id, source.source_id)
+    claimed = env.ingestion.claim_next(worker_id="worker-a", lease_seconds=300)
+    assert claimed is not None
+
+    env.ingestion.fail(claimed, error_code="PARSE_FAILED", safe_detail="原文不是有效的 UTF-8 文本")
+    env.ingestion.fail(claimed, error_code="PARSE_FAILED", safe_detail="重复上报")
+
+    stored = env.ingestion.get_job(_alice(), project_id, job.job_id)
+    assert stored.status is IngestionStatus.FAILED
+    assert stored.error_code == "PARSE_FAILED"
+    assert stored.error_detail == "原文不是有效的 UTF-8 文本", "首次上报的详情不被重复上报覆盖"
+    assert env.ingestion.claim_next(worker_id="worker-b", lease_seconds=300) is None
+
+
+# ------------------------------------------------------------------ 认领围栏
+
+
+@pytest.mark.invariant
+def test_a_stale_claim_cannot_settle_a_reclaimed_job(env):
+    """A 超时 → B 接管 → **A 的迟到落定必须被拒绝**（R4-02）。
+
+    为什么必须单独测：单独测"租约过期可回收"只证明了 B 能接手，
+    测不出"回收之后 A 还能不能回来改"。而后者才是真实故障 ——
+    任务被 B 正常处理着，A 苏醒后一个 `fail` 把它打成终态，
+    可恢复的状态就变成了不可恢复。
+
+    用 `lease_seconds=0` 造"已经过期的认领"，而不是 `sleep`：
+    租约过期的定义就是"到期时间落在现在之前"，把那一次认领的期限设为 0
+    是这句话的逐字实现，不需要等。
+    """
+    project_id = _project(env)
+    source = _register(env, project_id)
+    document, job = _enqueue(env, project_id, source.source_id)
+
+    stale = env.ingestion.claim_next(worker_id="worker-a", lease_seconds=0)
+    assert stale is not None and stale.job_id == job.job_id
+    assert stale.claim_token, "认领必须产生一个不可复用的围栏 token"
+
+    takeover = env.ingestion.claim_next(worker_id="worker-b", lease_seconds=300)
+    assert takeover is not None and takeover.job_id == job.job_id
+    assert takeover.attempt_count == 2, "接管恰好发生一次"
+    assert takeover.claim_token != stale.claim_token, "每次认领必须换一个 token"
+
+    chunks = _chunks_for(document, [(0, 5), (5, 10)])
+
+    with pytest.raises(PlatformError) as excinfo:
+        env.ingestion.complete(stale, chunks)
+    assert excinfo.value.code is ErrorCode.ILLEGAL_STATE_TRANSITION
+
+    with pytest.raises(PlatformError) as excinfo:
+        env.ingestion.fail(stale, error_code="PARSE_FAILED", safe_detail="迟到的失败上报")
+    assert excinfo.value.code is ErrorCode.ILLEGAL_STATE_TRANSITION
+
+    # B 的任务**逐字段未变**：状态、代次、持有者、错误码，片段一条没写。
+    held = env.ingestion.get_job(_alice(), project_id, job.job_id)
+    assert held.status is IngestionStatus.PROCESSING
+    assert held.attempt_count == 2
+    assert held.lease_owner == "worker-b"
+    assert held.claim_token == takeover.claim_token
+    assert held.error_code == ""
+    assert env.ingestion.stored_chunks(_alice(), project_id) == ()
+
+    # 阳性对照：B 自己**能**落定。没有这一条，上面那些"没变"在任务
+    # 彻底卡死（谁都写不进去）时也会全部通过。
+    env.ingestion.complete(takeover, chunks)
+    settled = env.ingestion.get_job(_alice(), project_id, job.job_id)
+    assert settled.status is IngestionStatus.SUCCEEDED
+    assert settled.claim_token == "", "落定后不再持有认领"
+    assert env.ingestion.stored_chunks(_alice(), project_id) == chunks
+
+
+@pytest.mark.invariant
+def test_the_same_worker_id_does_not_make_a_stale_claim_current(env):
+    """两次认领用**同一个 worker_id** 时，旧代次照样被拒。
+
+    `--worker-id` 由运维提供，同一个进程重启后是同一个名字。拿名字当代次，
+    等于"重启后用同一个 id 就能改写接手者的任务"。所以代次要由
+    **不可复用的 token** 表示，而不是由身份标识表示。
+    """
+    project_id = _project(env)
+    source = _register(env, project_id)
+    document, job = _enqueue(env, project_id, source.source_id)
+
+    stale = env.ingestion.claim_next(worker_id="worker-same", lease_seconds=0)
+    assert stale is not None
+    takeover = env.ingestion.claim_next(worker_id="worker-same", lease_seconds=300)
+    assert takeover is not None and takeover.job_id == job.job_id
+    assert takeover.lease_owner == stale.lease_owner, "前提：两次的名字确实相同"
+    assert takeover.claim_token != stale.claim_token
+
+    with pytest.raises(PlatformError) as excinfo:
+        env.ingestion.complete(stale, _chunks_for(document, [(0, 5)]))
+    assert excinfo.value.code is ErrorCode.ILLEGAL_STATE_TRANSITION
+    assert (
+        env.ingestion.get_job(_alice(), project_id, job.job_id).status
+        is IngestionStatus.PROCESSING
+    )
+
+
+@pytest.mark.invariant
+def test_an_expired_claim_cannot_settle_even_before_anyone_takes_over(env):
+    """租约过期、**还没人接管**时，旧持有者也不能落定。
+
+    这一条把"期限"与"token 匹配"分开验证：token 完全正确，
+    但它已经不作数了 —— 条件是"**仍然**持有有效的认领"，不是"曾经持有过"。
+    """
+    project_id = _project(env)
+    source = _register(env, project_id)
+    document, job = _enqueue(env, project_id, source.source_id)
+
+    expired = env.ingestion.claim_next(worker_id="worker-a", lease_seconds=0)
+    assert expired is not None and expired.claim_token
+
+    with pytest.raises(PlatformError) as excinfo:
+        env.ingestion.complete(expired, _chunks_for(document, [(0, 5)]))
+    assert excinfo.value.code is ErrorCode.ILLEGAL_STATE_TRANSITION
+
+    # 任务回到"可被认领"的状态，而不是被写成某个终态。
+    assert (
+        env.ingestion.get_job(_alice(), project_id, job.job_id).status
+        is IngestionStatus.PROCESSING
+    )
+    assert env.ingestion.stored_chunks(_alice(), project_id) == ()
+
+
+# ---------------------------------------------------------- 片段来源核验
+
+
+def _forged(document: SourceDocument, *, span: tuple[int, int], content: str):
+    """造一条"长度对口、哈希自洽，但内容不是原文切片"的片段。
+
+    它**能**通过 `StoredChunk` 的全部构造校验 —— 那正是 R4-05 要说明的事：
+    类型约束保证的是长度，`content_hash` 保证的是自洽，两者都不涉及原文。
+    """
+    return StoredChunk(
+        chunk_id=_unique("chk"),
+        tenant_id=document.tenant_id,
+        project_id=document.project_id,
+        source_id=document.source_id,
+        document_id=document.document_id,
+        chunk_index=0,
+        heading_path=(),
+        heading_level=0,
+        span_start=span[0],
+        span_end=span[1],
+        content=content,
+        parser_version=CHUNK_PARSER_VERSION,
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+@pytest.mark.invariant
+def test_a_same_length_forgery_never_reaches_the_database(env):
+    """同长度的伪内容必须被拒，而且**在写入之前**（R4-05）。
+
+    核验对象是**持久化原文**：把 `alphabet` 的片段换成等长的 `XXXXXXXX`，
+    构造层过得去（长度对口）、`content_hash` 也自洽（对片段自身取哈希），
+    R4-05 之前它一路落库并被检索到 —— 而引用回读时会把假的当成真的。
+    """
+    project_id = _project(env)
+    source = _register(env, project_id)
+    document, job = _enqueue(env, project_id, source.source_id, content="alphabet")
+    claimed = env.ingestion.claim_next(worker_id="worker-a", lease_seconds=300)
+    assert claimed is not None
+
+    forged = _forged(document, span=(0, 8), content="XXXXXXXX")
+    # 前提：这条伪片段在**类型层**完全合法。写出来是为了让"它为什么能通过"
+    # 一眼可见 —— 否则下一个人会以为构造校验本该拦住它。
+    assert forged.span_end - forged.span_start == len(forged.content)
+    assert forged.content_hash == content_hash("XXXXXXXX")
+
+    with pytest.raises(PlatformError) as excinfo:
+        env.ingestion.complete(claimed, (forged,))
+    assert excinfo.value.code is ErrorCode.INTERNAL_CONSISTENCY_ERROR
+
+    # 无片段落库、无成功状态（半完成状态不允许出现）。
+    assert env.ingestion.stored_chunks(_alice(), project_id) == ()
+    assert (
+        env.ingestion.get_job(_alice(), project_id, job.job_id).status
+        is IngestionStatus.PROCESSING
+    )
+
+    # 阳性对照：换成**真实切片**就能落定。没有它，上面那两条断言在
+    # "这个任务根本写不进去"时也会通过。
+    real = _chunks_for(document, [(0, 8)])
+    env.ingestion.complete(claimed, real)
+    assert env.ingestion.stored_chunks(_alice(), project_id) == real
+
+
+@pytest.mark.invariant
+def test_a_span_beyond_the_document_is_rejected(env):
+    """跨度越出原文长度必须被拒，且报的是**越界**而不是别的错。
+
+    `match="越出"` 是刻意的：只断言错误码的话，"切片不相等"那条判定
+    也会给出同一个码，于是这条用例证明不了"边界确实被单独检查过"。
+    """
+    project_id = _project(env)
+    source = _register(env, project_id)
+    document, _job = _enqueue(env, project_id, source.source_id, content="alphabet")
+    claimed = env.ingestion.claim_next(worker_id="worker-a", lease_seconds=300)
+    assert claimed is not None
+
+    beyond = _forged(document, span=(0, 999), content="x" * 999)
+    with pytest.raises(PlatformError, match="越出"):
+        env.ingestion.complete(claimed, (beyond,))
+    assert env.ingestion.stored_chunks(_alice(), project_id) == ()
+
+
+# ------------------------------------------------------------------ 隔离
+
+
+@pytest.mark.invariant
+def test_job_of_ungranted_principal_is_invisible(env):
+    """同租户但未被授予该项目的主体看不到任务 —— 与"不存在"同一个拒绝。"""
+    project_id = _project(env)
+    source = _register(env, project_id)
+    _document, job = _enqueue(env, project_id, source.source_id)
+
+    with pytest.raises(PlatformError) as excinfo:
+        env.ingestion.get_job(_bob(), project_id, job.job_id)
+    assert excinfo.value.code is ErrorCode.CROSS_TENANT_DENIED
+
+
+@pytest.mark.invariant
+def test_stored_chunks_are_scoped_to_the_project(env):
+    """片段读取自行过滤：调用方不需要、也不应该自己判断作用域。"""
+    project_a = _project(env)
+    project_b = _project(env, actor=_bob())
+    source_a = _register(env, project_a)
+    document_a, job_a = _enqueue(env, project_a, source_a.source_id)
+    claimed = env.ingestion.claim_next(worker_id="worker-a", lease_seconds=300)
+    assert claimed is not None and claimed.job_id == job_a.job_id
+    env.ingestion.complete(claimed, _chunks_for(document_a, [(0, 5)]))
+
+    # 自己看得到。
+    assert len(env.ingestion.stored_chunks(_alice(), project_a)) == 1
+    # 别的项目看不到，也不会因为"同一个租户"而漏出来。
+    assert env.ingestion.stored_chunks(_bob(), project_b) == ()
+
+
+# ------------------------------------------------------------------ 不可变性
+
+
+@pytest.mark.postgres
+@pytest.mark.invariant
+@pytest.mark.skipif(
+    not pg_support.reachable(), reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）"
+)
+def test_grants_match_the_contract_and_the_database():
+    """权限的**三方一致**：迁移声明、生成契约、数据库实际授权。
+
+    为什么直接查数据库而不是读迁移里的常量：迁移里的 `APPEND_ONLY` /
+    `APP_ROLE_GRANTS_OVERRIDES` 都是人工声明，真正生效的是
+    `information_schema.table_privileges`。0008 把 `ingestion_jobs` 的
+    `UPDATE` 从应用角色收回并给了 worker 角色 —— 若契约生成器不认识这条声明，
+    文档会继续写"应用角色能 UPDATE 队列"，而**没人会问为什么**（铁律 34）。
+
+    （`http_idempotency` 曾经就是这个问题：策略只保护到租户级，
+    而声明常量写着"租户级"，看起来完全正常。）
+    """
+    tables = ("source_documents", "ingestion_jobs", "source_chunks")
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
+        rows = conn.execute(
+            "SELECT grantee, table_name, privilege_type FROM information_schema"
+            ".table_privileges"
+            " WHERE grantee IN ('study_app', 'study_worker') AND table_name = ANY(%s)",
+            (list(tables),),
+        ).fetchall()
+
+    actual: dict[str, set[str]] = {}
+    for grantee, table, privilege in rows:
+        actual.setdefault(f"{grantee}:{table}", set()).add(privilege)
+
+    # 数据库层的实际授权（R4-01 的全部要求都落在这一张表上）
+    assert actual["study_app:source_documents"] == {"SELECT", "INSERT"}, actual
+    assert actual["study_app:source_chunks"] == {"SELECT", "INSERT"}, actual
+    # 应用角色不再能推进状态：`complete` / `fail` 是 worker 路径。
+    assert actual["study_app:ingestion_jobs"] == {"SELECT", "INSERT"}, actual
+    # worker 角色按最小集：认领要 SELECT + UPDATE（FOR UPDATE 需要行锁）。
+    assert actual["study_worker:ingestion_jobs"] == {"SELECT", "UPDATE"}, actual
+    assert actual["study_worker:source_documents"] == {"SELECT"}, actual
+    assert actual["study_worker:source_chunks"] == {"SELECT", "INSERT"}, actual
+
+    # 生成契约必须与数据库说同一件事。
+    contract = _contract_role_grants()
+    for table in tables:
+        assert contract[table]["study_app"] == _as_contract_text(
+            actual[f"study_app:{table}"]
+        ), f"{table} 的应用角色权限：契约与数据库不一致"
+        assert contract[table]["study_worker"] == _as_contract_text(
+            actual[f"study_worker:{table}"]
+        ), f"{table} 的 worker 角色权限：契约与数据库不一致"
+
+
+#: 契约与迁移里的权限写法顺序。**不用字母序**：`SELECT, INSERT` 与
+#: `INSERT, SELECT` 是同一个授权，但契约是给人读的，写法要稳定 ——
+#: 两边各按自己的习惯排，比对就会变成"随机红"。
+_PRIVILEGE_ORDER = ("SELECT", "INSERT", "UPDATE", "DELETE")
+
+
+def _as_contract_text(privileges: set[str]) -> str:
+    """把数据库读回来的权限集排成契约里的写法。"""
+    unknown = privileges - set(_PRIVILEGE_ORDER)
+    assert not unknown, f"出现契约写法没覆盖的权限：{sorted(unknown)}"
+    return ", ".join(name for name in _PRIVILEGE_ORDER if name in privileges)
+
+
+def _contract_columns() -> dict[str, list[str]]:
+    """从生成的 `sql-schema.md`「列明细」里读每张表的列名（按顺序）。
+
+    列明细是 3 列的行（表 / 列 / 类型），表总览是 6 列 —— 用列数区分，
+    不去匹配小节标题：标题文字会变，而行形状由模板决定。
+    """
+    path = (
+        Path(__file__).resolve().parents[2] / "docs" / "skills" / "contracts" / "sql-schema.md"
+    )
+    found: dict[str, list[str]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if len(cells) != 3:
+            continue
+        found.setdefault(cells[0].strip("`"), []).append(cells[1].strip("`"))
+    return found
+
+
+@pytest.mark.postgres
+@pytest.mark.invariant
+def test_contract_columns_match_the_database():
+    """契约里的列必须与数据库**逐列一致**（列名与顺序）。
+
+    为什么需要这一条：`gen_contracts.py` 靠正则读迁移里的
+    `ALTER TABLE ... ADD COLUMN`。迁移若用 f-string 插值表名，
+    正则一条也匹配不上 —— 契约少一列，而**没有任何东西报警**
+    （实测 0009 的 `claim_token` 就这样被漏掉过）。
+
+    "文档说有哪些字段"与"库里有什么"分家时，读文档的人无从分辨；
+    所以这里直接查数据库比对，而不是读迁移里的声明（铁律 34）。
+    """
+    tables = ("source_documents", "ingestion_jobs", "source_chunks")
+    contract = _contract_columns()
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
+        for table in tables:
+            rows = conn.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_name = %s ORDER BY ordinal_position",
+                (table,),
+            ).fetchall()
+            actual = [row[0] for row in rows]
+            assert contract.get(table) == actual, (
+                f"{table} 的列明细与数据库不一致：契约 {contract.get(table)}"
+                f" vs 数据库 {actual}。生成器解析不了这种迁移写法，"
+                "或者有人手改了生成区"
+            )
+
+
+def _contract_role_grants() -> dict[str, dict[str, str]]:
+    """从生成的 `sql-schema.md` 表总览里读两类角色的权限列。"""
+    path = (
+        Path(__file__).resolve().parents[2] / "docs" / "skills" / "contracts" / "sql-schema.md"
+    )
+    text = path.read_text(encoding="utf-8")
+    found: dict[str, dict[str, str]] = {}
+    for line in text.splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if len(cells) != 6:
+            continue
+        name = cells[0].strip("`")
+        if name not in {"source_documents", "ingestion_jobs", "source_chunks"}:
+            continue
+        found[name] = {"study_app": cells[3], "study_worker": cells[4]}
+    assert set(found) == {"source_documents", "ingestion_jobs", "source_chunks"}, found
+    return found

@@ -1,0 +1,47 @@
+# ===== 密钥与环境（项目红线：密钥不进仓库）=====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# ===== 运行时数据（本地存储、审计 sink、对象制品）=====
+var/
+*.db
+*.sqlite3
+*.sqlite3-journal
+
+# ===== 测试报告产物（可随时重新生成，不入库）=====
+# 用 / 锚定仓库根，避免误伤子目录里同名的东西。
+/output.json
+/pytest_html_report.html
+/archive/
+
+# ===== Node / 前端 =====
+node_modules/
+dist/
+.vite/
+
+# ===== 本地工作记忆 =====
+# 含内部讨论日志与决策过程，不属于产品仓库内容。
+# 若希望公开这部分记录，删掉下面这行即可。
+.workbuddy/
+
+# ===== 编辑器与系统 =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

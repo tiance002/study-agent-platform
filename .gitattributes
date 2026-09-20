@@ -1,0 +1,14 @@
+# 统一行尾为 LF，避免 Windows / Linux 协作时产生无意义的整文件 diff。
+* text=auto eol=lf
+
+# Windows 批处理文件例外：必须 CRLF，且内容必须保持纯 ASCII。
+# 原因见 README「启动数据库」一节 —— cmd.exe 按系统代码页逐字节解析 .cmd，
+# 编码或行尾不对都会让解析偏移错位，报出看不懂的「不是内部或外部命令」。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 二进制与生成物不做行尾转换。
+*.png binary
+*.jpg binary
+*.pdf binary
+*.db binary

@@ -1,0 +1,44 @@
+# 依赖锁定快照（requirements.lock.txt）
+#
+# 生成方式：pip freeze（Windows / CPython 3.12）
+# 权威约束仍是 pyproject.toml（范围声明）；本文件记录当前已验证的精确版本组合，
+# 用于全新环境的可复现安装：pip install -r requirements.lock.txt
+# 依赖变更后需重新生成，并在提交说明里写明动机。
+
+alembic==1.20.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+ast_serialize==0.11.2
+certifi==2026.7.22
+click==8.5.0
+colorama==0.4.6
+fastapi==0.141.1
+greenlet==3.5.6
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.20
+iniconfig==2.3.0
+librt==0.15.0
+Mako==1.4.1
+MarkupSafe==3.0.3
+mypy==2.3.1
+mypy_extensions==1.1.0
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.6.0
+psycopg==3.3.5
+psycopg-binary==3.3.5
+pydantic==2.13.5
+pydantic_core==2.46.5
+Pygments==2.21.0
+pytest==9.1.1
+PyYAML==6.0.3
+ruff==0.16.8
+SQLAlchemy==2.0.54
+starlette==1.6.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+tzdata==2026.4
+uvicorn==0.53.0
