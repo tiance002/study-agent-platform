@@ -473,8 +473,12 @@ def test_worker_command_once_processes_exactly_one_job(learner):
     assert main(["--once", "--worker-id", "wk-test"], platform_factory=factory) == 0
     assert main(["--once", "--worker-id", "wk-test"], platform_factory=factory) == 0
 
-    chunks = platform.ingestion.stored_chunks(_principal(), project_id)
-    # 两份原文各自成功：一共两个任务，恰好两批片段。
+    # `latest_only=False`：这里问的是"两批片段都写进库了吗"，不是"检索看哪一版"。
+    # 两份上传是**同一个来源的两个版本**，默认只看最新版本时会只剩一批 ——
+    # 那正是 R4-03 要的检索语义，所以这一条必须显式要求全部版本。
+    chunks = platform.ingestion.stored_chunks(
+        _principal(), project_id, latest_only=False
+    )
     assert len({chunk.document_id for chunk in chunks}) == 2
 
 

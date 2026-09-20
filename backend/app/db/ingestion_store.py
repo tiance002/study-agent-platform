@@ -345,19 +345,59 @@ class PostgresIngestionRepository:
         return _document_from_row(row)
 
     def stored_chunks(
-        self, actor: Principal, project_id: str
+        self, actor: Principal, project_id: str, *, latest_only: bool = True
     ) -> tuple[StoredChunk, ...]:
+        """该项目下的片段。`latest_only` 时每个来源只取最新版本（见端口契约）。
+
+        「最新成功版本」由 `DISTINCT ON (source_id) ... ORDER BY version DESC`
+        在**数据库内**确定：应用层先取全部再挑，会把历史版本的片段也拉回来
+        （作用域虽然没错，但"该看见什么"的判断就跑到了应用层，而那是
+        02 号规格 §7 明确要避免的形状）。
+        """
         self.membership.get(actor, project_id)
+        scope = ""
+        if latest_only:
+            scope = (
+                " AND document_id IN ("
+                " SELECT DISTINCT ON (d.source_id) d.document_id"
+                " FROM source_documents d"
+                " JOIN source_chunks x ON x.document_id = d.document_id"
+                " WHERE d.project_id = %s"
+                " ORDER BY d.source_id, d.version DESC)"
+            )
         with tenant_transaction(
             tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
         ) as conn:
             rows = conn.execute(
                 "SELECT " + _CHUNK_COLUMNS
                 + " FROM source_chunks WHERE project_id = %s"
-                " ORDER BY document_id, chunk_index",
-                (project_id,),
+                + scope
+                + " ORDER BY document_id, chunk_index",
+                (project_id, project_id) if latest_only else (project_id,),
             ).fetchall()
         return tuple(_chunk_from_row(row) for row in rows)
+
+    def chunk_at(
+        self,
+        actor: Principal,
+        project_id: str,
+        *,
+        document_id: str,
+        span: tuple[int, int],
+    ) -> StoredChunk | None:
+        """按不可变标识精确回读（见端口契约：禁止"挑第一条"）。"""
+        self.membership.get(actor, project_id)
+        with tenant_transaction(
+            tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
+        ) as conn:
+            row = conn.execute(
+                "SELECT " + _CHUNK_COLUMNS
+                + " FROM source_chunks"
+                " WHERE project_id = %s AND document_id = %s"
+                "   AND span_start = %s AND span_end = %s",
+                (project_id, document_id, span[0], span[1]),
+            ).fetchone()
+        return _chunk_from_row(row) if row is not None else None
 
     # ------------------------------------------------------------------ 队列
 

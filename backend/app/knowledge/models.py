@@ -429,9 +429,14 @@ class StoredChunk:
         return mark_tainted(self.chunk_id, self.content, TaintSource.UPLOADED_SOURCE)
 
     def as_artifact_ref(self) -> ArtifactRef:
-        """转成谱系引用。内容本体不进上下文，只带指针与指纹。"""
+        """转成谱系引用。内容本体不进上下文，只带指针与指纹。
+
+        `document_id` 必须在场（见 `ArtifactRef` 的 docstring）：同一来源的两版
+        片段可能落在同一个 span 上，只有不可变标识能区分它们。
+        """
         return ArtifactRef(
             source_id=self.source_id,
+            document_id=self.document_id,
             span=self.span,
             content_hash=self.content_hash,
             parser_version=self.parser_version,

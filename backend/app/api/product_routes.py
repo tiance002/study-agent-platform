@@ -464,14 +464,35 @@ def search_knowledge(
     }
 
 
-@router.get("/projects/{project_id}/sources/{source_id}/span")
+@router.get(
+    "/projects/{project_id}/sources/{source_id}/span",
+    # 契约表只有"路径 / 方法 / 说明"三列，所以**必填参数写进说明**：
+    # `document_id` 是客户端可见的破坏性变更（少了它请求无法表达"要哪一版"），
+    # 让它只出现在 OpenAPI 的 hash 变化里、不出现在契约文字里，等于把
+    # "契约必须与权威源有机械联系"这句话放空一半。
+    summary="Read Source Span (document_id required)",
+)
 def read_source_span(
-    request: Request, project_id: str, source_id: str, start: int, end: int
+    request: Request,
+    project_id: str,
+    source_id: str,
+    document_id: str,
+    start: int,
+    end: int,
+    content_hash: str = "",
 ) -> dict:
-    """按 `source_id` + `span` 精确回读原文切片 —— 引用可核验的落点。
+    """按**引用里的不可变标识**精确回读原文切片 —— 引用可核验的落点。
 
-    找不到、跨项目、跨租户**返回同一个 404 与同一句话术**：区分原因等于提供
-    存在性探针，探测者据此能数出别的项目/租户有多少资料。
+    `document_id` 是**必填**的。这不是"多一个参数以防万一"：同一来源的两版
+    片段可能落在同一个跨度上，只按 `source_id + span` 回读会返回**另一版**
+    （R4-03 实测：命中 `doc_v2/'delta!'`、回读拿到 `doc_v1/'bravo!'`），
+    而调用方毫无察觉。少了它，请求本身就无法表达"我要哪一版"。
+
+    `content_hash` 可选：给了就核对，对不上**返回同一个 404** —— 客户端
+    拿到的不是"另一段内容"，而是"你要的那一段不在这里"。
+
+    找不到、跨项目、跨租户、标识对不上**返回同一个 404 与同一句话术**：
+    区分原因等于提供存在性探针，探测者据此能数出别的项目/租户有多少资料。
 
     响应里的 `content_hash` 由 `content` **派生**（`StoredChunk` 的属性），
     因此它与返回的切片不可能不一致；数据库列上的同名值由适配器在读路径上
@@ -484,7 +505,12 @@ def read_source_span(
         raise deny(ErrorCode.PARAMS_INVALID, "span 必须满足 0 <= start < end")
     state = _state(request)
     chunk = state.knowledge.read_span(
-        _actor(request), project_id, source_id, (start, end)
+        _actor(request),
+        project_id,
+        source_id,
+        (start, end),
+        document_id=document_id,
+        content_hash=content_hash,
     )
     if chunk is None:
         raise deny(ErrorCode.CROSS_TENANT_DENIED, "资源不存在", source_id=source_id)

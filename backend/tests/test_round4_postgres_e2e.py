@@ -106,6 +106,7 @@ class _Stage:
     cookie: str
     project_id: str
     source_id: str
+    document_id: str
     job_id: str
 
     @property
@@ -257,6 +258,7 @@ def _stage(tmp_path: Path) -> _Stage:
         cookie=cookie,
         project_id=project_id,
         source_id=source_id,
+        document_id=payload["document"]["document_id"],
         job_id=payload["job"]["job_id"],
     )
 
@@ -324,6 +326,10 @@ def test_ingestion_survives_a_full_platform_restart_and_stays_citable(tmp_path):
     assert DOCUMENT[start:end] == hit["content"], "span 指回的位置与内容不一致"
     assert content_hash(hit["content"]) == hit["content_hash"]
     assert hit["citation"]["source_id"] == stage.source_id
+    # 引用必须带**不可变标识**：同一来源的两版片段可能落在同一个跨度上，
+    # 少了它，回读可能拿到另一版（R4-03）。
+    assert hit["citation"]["document_id"] == stage.document_id
+    assert hit["document_id"] == stage.document_id
     assert hit["citation"]["span"] == [start, end]
     assert hit["citation"]["content_hash"] == hit["content_hash"]
     assert hit["citation"]["parser_version"] == hit["parser_version"]
@@ -331,7 +337,11 @@ def test_ingestion_survives_a_full_platform_restart_and_stays_citable(tmp_path):
     # ---- 引用回读：拿到引用的人应当能独立取回同一段原文
     span = client.get(
         f"/projects/{stage.project_id}/sources/{stage.source_id}/span",
-        params={"start": start, "end": end},
+        params={
+            "document_id": stage.document_id,
+            "start": start,
+            "end": end,
+        },
     )
     assert span.status_code == 200, span.text
     assert span.json()["content"] == hit["content"]
@@ -393,7 +403,7 @@ def test_another_project_and_another_tenant_cannot_retrieve_or_read(tmp_path):
 
     assert stage.client.get(
         f"/projects/{other_project}/sources/{stage.source_id}/span",
-        params={"start": 0, "end": 5},
+        params={"document_id": stage.document_id, "start": 0, "end": 5},
     ).status_code == 404
     assert stage.client.get(
         f"/projects/{other_project}/ingestion-jobs/{stage.job_id}"
@@ -412,7 +422,7 @@ def test_another_project_and_another_tenant_cannot_retrieve_or_read(tmp_path):
     assert denied.status_code == 404
     outsider_denied = outsider.get(
         f"/projects/{stage.project_id}/sources/{stage.source_id}/span",
-        params={"start": 0, "end": 5},
+        params={"document_id": stage.document_id, "start": 0, "end": 5},
     )
     assert outsider_denied.status_code == 404
     assert outsider.get(
@@ -425,7 +435,7 @@ def test_another_project_and_another_tenant_cannot_retrieve_or_read(tmp_path):
     # 一根存在性探针：探测者据此能数出别人的项目里有哪些资料。
     missing = stage.client.get(
         f"/projects/{stage.project_id}/sources/src_不存在/span",
-        params={"start": 0, "end": 5},
+        params={"document_id": stage.document_id, "start": 0, "end": 5},
     )
     assert missing.status_code == 404
     assert _without_request_id(outsider_denied) == _without_request_id(missing)

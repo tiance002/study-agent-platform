@@ -85,6 +85,17 @@ def pg_seed() -> None:
             )
 
 
+@dataclass(frozen=True)
+class _Learner:
+    """`learner` 夹具的具名结果（见该夹具的 docstring）。"""
+
+    client: object
+    platform: object
+    project_id: str
+    source_id: str
+    document_id: str
+
+
 @dataclass
 class Env:
     membership: object
@@ -396,7 +407,13 @@ def test_each_hit_round_trips_through_exact_span_and_hash(env):
     assert hits, "夹具内容里明明有'回滚'"
 
     for hit in hits:
-        exact = knowledge.read_span(alice, project, hit.chunk.source_id, hit.chunk.span)
+        exact = knowledge.read_span(
+            alice,
+            project,
+            hit.chunk.source_id,
+            hit.chunk.span,
+            document_id=hit.chunk.document_id,
+        )
         assert exact is not None
         assert exact.content == hit.chunk.content
         assert content_hash(exact.content) == hit.chunk.content_hash
@@ -451,16 +468,31 @@ def test_read_span_misses_are_one_value_and_denials_are_one_code(env):
 
     # 存在的 span：先拿到一个真实的
     hit = knowledge.search(alice, project, "提交", limit=1)[0]
-    assert knowledge.read_span(alice, project, source_id, hit.chunk.span) is not None
+    assert (
+        knowledge.read_span(
+            alice, project, source_id, hit.chunk.span,
+            document_id=hit.chunk.document_id,
+        )
+        is not None
+    )
 
     # 粒度落空：三种情况同一个 `None`。
-    assert knowledge.read_span(alice, project, "src_不存在", (0, 5)) is None
-    assert knowledge.read_span(alice, project, source_id, (0, 9999)) is None
-    assert knowledge.read_span(alice, other_project, source_id, hit.chunk.span) is None
+    doc = hit.chunk.document_id
+    assert knowledge.read_span(
+        alice, project, "src_不存在", (0, 5), document_id=doc
+    ) is None
+    assert knowledge.read_span(
+        alice, project, source_id, (0, 9999), document_id=doc
+    ) is None
+    assert knowledge.read_span(
+        alice, other_project, source_id, hit.chunk.span, document_id=doc
+    ) is None
 
     # 授权拒绝：抛出与 search 同一个码（同租户未授予的主体）。
     with pytest.raises(PlatformError) as span_denied:
-        knowledge.read_span(_actor(BOB), project, source_id, hit.chunk.span)
+        knowledge.read_span(
+            _actor(BOB), project, source_id, hit.chunk.span, document_id=doc
+        )
     with pytest.raises(PlatformError) as search_denied:
         knowledge.search(_actor(BOB), project, "提交", limit=1)
 
@@ -471,6 +503,90 @@ def test_read_span_misses_are_one_value_and_denials_are_one_code(env):
         ErrorCode.CROSS_TENANT_DENIED,
         ErrorCode.CROSS_PROJECT_DENIED,
     )
+
+
+def test_two_versions_with_the_same_span_read_back_independently(env):
+    """同一来源的两版、**同一个 span、不同内容**：各回各的文本（R4-03）。
+
+    这是被实测复现过的缺陷：只按 `source_id + span` 回读时，"先到先得"
+    取决于存储顺序 —— 命中 `doc_v2/'delta!'`，回读拿到 `doc_v1/'bravo!'`，
+    而引用看起来完全正常、`content_hash` 也对得上（对的是**另一版**的哈希）。
+
+    两版内容刻意**等长**：长度不等时"读到了错的那版"还能靠长度碰巧发现，
+    等长才是真正会静默出错的情形。
+    """
+    alice = _actor()
+    project = _project(env)
+    source_id = _unique("src")
+    old_text, new_text = "bravo!", "delta!"
+    assert len(old_text) == len(new_text)
+
+    first_job = _ingest(
+        env, alice, project, source_id=source_id, title="讲义", content=old_text
+    )
+    second_job = _ingest(
+        env, alice, project, source_id=source_id, title="讲义", content=new_text
+    )
+    old_doc = env.ingestion.get_job(alice, project, first_job).document_id
+    new_doc = env.ingestion.get_job(alice, project, second_job).document_id
+    assert old_doc != new_doc
+
+    knowledge = env.knowledge()
+    # 两版的片段**落在同一个 span 上** —— 这正是问题所在：跨度相同的两版，
+    # 只按 (source_id, span) 回读无法区分。span 从库里读，不写死：
+    # 切块规则一变，写死的跨度就会让这条用例变成"测了个空"。
+    stored = env.ingestion.stored_chunks(alice, project, latest_only=False)
+    old_chunk = next(chunk for chunk in stored if chunk.document_id == old_doc)
+    new_chunk = next(chunk for chunk in stored if chunk.document_id == new_doc)
+    assert old_chunk.span == new_chunk.span, "前提：两版的片段必须落在同一个跨度上"
+    span = old_chunk.span
+    assert old_chunk.content == "bravo!" and new_chunk.content == "delta!"
+    assert old_chunk.content_hash != new_chunk.content_hash
+
+    # 按标识回读：每一版都拿回**自己**那一段。
+    old_read = knowledge.read_span(alice, project, source_id, span, document_id=old_doc)
+    new_read = knowledge.read_span(alice, project, source_id, span, document_id=new_doc)
+    assert old_read is not None and old_read.content == old_chunk.content
+    assert new_read is not None and new_read.content == new_chunk.content
+    assert old_read.document_id == old_doc and new_read.document_id == new_doc
+
+    # 引用自带不可变标识 —— 拿到引用的人不会读到另一版。
+    hit = knowledge.search(alice, project, "delta", limit=5)[0]
+    assert hit.citation.document_id == new_doc
+    assert hit.chunk.content == new_chunk.content
+
+    # 指纹对不上时返回"没找到"，而不是换一段内容给它。
+    assert (
+        knowledge.read_span(
+            alice,
+            project,
+            source_id,
+            span,
+            document_id=old_doc,
+            content_hash=new_chunk.content_hash,
+        )
+        is None
+    )
+
+    # 标识对不自洽（别人的 document_id 配我的 source_id）同样不能命中。
+    assert (
+        knowledge.read_span(alice, project, _unique("src"), span, document_id=old_doc)
+        is None
+    )
+
+    # 检索默认只看**最新成功版本**：旧版正文搜不到了 —— 但它没有丢，
+    # 按引用仍然读得回来（上面那两条断言就是证据）。
+    assert knowledge.search(alice, project, "bravo", limit=5) == ()
+    assert (
+        knowledge.search(alice, project, "delta", limit=5)[0].chunk.content
+        == new_chunk.content
+    )
+
+    # 历史检视要显式开口：`latest_only=False` 时两版都在。
+    assert {chunk.content for chunk in stored} == {"bravo!", "delta!"}
+    assert {chunk.content for chunk in env.ingestion.stored_chunks(alice, project)} == {
+        "delta!"
+    }
 
 
 # --------------------------------------------- 三、判定：命中不等于支持
@@ -644,8 +760,12 @@ def test_fixture_baseline_matches_what_the_corpus_actually_yields():
 
 
 @pytest.fixture
-def learner(cookie_project, platform):
-    """已登录 cookie 用户 + 一个项目 + 一份已切块入库的资料。"""
+def learner(cookie_project, platform) -> _Learner:
+    """已登录 cookie 用户 + 一个项目 + 一份已切块入库的资料。
+
+    返回**具名结构**而不是元组：R4-03 之后回读还需要 `document_id`，
+    而位置解包在这种时候会让每个调用点都得重数一遍"第几个是什么"。
+    """
     client, project_id = cookie_project
     source = client.post(
         f"/projects/{project_id}/sources",
@@ -667,7 +787,13 @@ def learner(cookie_project, platform):
     from app.workers.ingestion import run_once
 
     assert run_once(platform, worker_id="retr-api").kind == "succeeded"
-    return client, platform, project_id, source_id
+    return _Learner(
+        client=client,
+        platform=platform,
+        project_id=project_id,
+        source_id=source_id,
+        document_id=upload.json()["document"]["document_id"],
+    )
 
 
 def _keyed(key: str | None = None) -> dict:
@@ -690,7 +816,9 @@ def _without_request_id(response) -> dict:
 
 @pytest.mark.invariant
 def test_search_endpoint_returns_citations_and_a_conservative_state(learner):
-    client, _platform, project_id, _source_id = learner
+    client = learner.client
+    project_id = learner.project_id
+    source_id = learner.source_id
 
     response = client.post(
         f"/projects/{project_id}/knowledge/search",
@@ -705,7 +833,7 @@ def test_search_endpoint_returns_citations_and_a_conservative_state(learner):
     assert payload["evidence"]["state"] == "insufficient"
     assert payload["hits"], "语料里明明有'回滚'"
     hit = payload["hits"][0]
-    assert hit["citation"]["source_id"] == _source_id
+    assert hit["citation"]["source_id"] == source_id
     assert hit["citation"]["span"] == hit["span"]
     assert hit["citation"]["content_hash"] == hit["content_hash"]
     assert hit["parser_version"] == "structure/v1"
@@ -719,7 +847,8 @@ def test_search_endpoint_does_not_demand_an_idempotency_key(learner):
     给没有副作用的操作套上幂等守卫不保护任何东西，只多一个必填头；
     而"必填但无意义"的字段会被一路照抄到真正需要它的地方，那时它已经不表示什么了。
     """
-    client, _, project_id, _ = learner
+    client = learner.client
+    project_id = learner.project_id
 
     response = client.post(
         f"/projects/{project_id}/knowledge/search",
@@ -733,7 +862,8 @@ def test_search_endpoint_does_not_demand_an_idempotency_key(learner):
 
 @pytest.mark.invariant
 def test_search_request_bounds_are_enforced(learner):
-    client, _, project_id, _ = learner
+    client = learner.client
+    project_id = learner.project_id
     headers = {"Origin": "http://testserver"}
 
     assert client.post(
@@ -760,7 +890,9 @@ def test_search_request_bounds_are_enforced(learner):
 
 @pytest.mark.invariant
 def test_span_endpoint_returns_the_exact_slice(learner):
-    client, _, project_id, source_id = learner
+    client = learner.client
+    project_id = learner.project_id
+    source_id = learner.source_id
     search = client.post(
         f"/projects/{project_id}/knowledge/search",
         json={"query": "回滚", "limit": 1},
@@ -771,7 +903,7 @@ def test_span_endpoint_returns_the_exact_slice(learner):
 
     response = client.get(
         f"/projects/{project_id}/sources/{source_id}/span",
-        params={"start": start, "end": end},
+        params={"document_id": learner.document_id, "start": start, "end": end},
     )
 
     assert response.status_code == 200, response.text
@@ -792,7 +924,9 @@ def test_span_endpoint_miss_wording_is_identical_for_every_kind_of_miss(learner)
     （服务端生成的追踪 id），把它算进"逐字相同"等于要求追踪失效。
     要比的是客户端据以分支的那几个字段。
     """
-    client, _, project_id, source_id = learner
+    client = learner.client
+    project_id = learner.project_id
+    source_id = learner.source_id
     headers = _keyed()
     other_project = client.post(
         "/projects", json={"name": "另一个项目"}, headers=headers
@@ -800,13 +934,16 @@ def test_span_endpoint_miss_wording_is_identical_for_every_kind_of_miss(learner)
 
     responses = [
         client.get(
-            f"/projects/{project_id}/sources/{source_id}/span", params={"start": 0, "end": 9999}
+            f"/projects/{project_id}/sources/{source_id}/span",
+            params={"document_id": learner.document_id, "start": 0, "end": 9999},
         ),
         client.get(
-            f"/projects/{project_id}/sources/src_不存在/span", params={"start": 0, "end": 5}
+            f"/projects/{project_id}/sources/src_不存在/span",
+            params={"document_id": learner.document_id, "start": 0, "end": 5},
         ),
         client.get(
-            f"/projects/{other_project}/sources/{source_id}/span", params={"start": 0, "end": 5}
+            f"/projects/{other_project}/sources/{source_id}/span",
+            params={"document_id": learner.document_id, "start": 0, "end": 5},
         ),
     ]
 
@@ -820,10 +957,13 @@ def test_span_endpoint_miss_wording_is_identical_for_every_kind_of_miss(learner)
 
 @pytest.mark.invariant
 def test_span_endpoint_rejects_an_inverted_range(learner):
-    client, _, project_id, source_id = learner
+    client = learner.client
+    project_id = learner.project_id
+    source_id = learner.source_id
 
     response = client.get(
-        f"/projects/{project_id}/sources/{source_id}/span", params={"start": 9, "end": 3}
+        f"/projects/{project_id}/sources/{source_id}/span",
+        params={"document_id": learner.document_id, "start": 9, "end": 3},
     )
 
     assert response.status_code == 400

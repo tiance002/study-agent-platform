@@ -68,9 +68,17 @@ class IngestionRepository(Protocol):
         ...
 
     def stored_chunks(
-        self, actor: Principal, project_id: str
+        self, actor: Principal, project_id: str, *, latest_only: bool = True
     ) -> tuple[StoredChunk, ...]:
-        """该项目下的全部片段（按 `document_id`、`chunk_index` 排序）。
+        """该项目下的片段（按 `document_id`、`chunk_index` 排序）。
+
+        `latest_only=True`（**默认**）：每个来源只取**最新的成功版本**。
+        同一份资料可以上传多版，历史版本的片段必须留在库里（老引用要能
+        回读原版），但检索不该同时看到两版 —— 否则一次查询返回两份近似结果，
+        而"哪份是当前的"客户端无从判断（R4-03 的修改要求）。
+
+        `latest_only=False`：全部版本，供历史检视。**没有任何默认调用方** ——
+        它是一个显式选择，不是"以防万一多拿一点"。
 
         **作用域过滤在实现内部完成**，调用方不需要、也不应该自己判断 ——
         把隔离留给调用方，等于把安全交给"记得写"。
@@ -78,6 +86,27 @@ class IngestionRepository(Protocol):
         这是检索适配器的读取入口：分数计算可以在应用层做，
         但**候选集必须先由数据库按 tenant/project 收窄**
         （02 号规格 §7 明确禁止把跨项目候选拉回应用层再筛）。
+        """
+        ...
+
+    def chunk_at(
+        self,
+        actor: Principal,
+        project_id: str,
+        *,
+        document_id: str,
+        span: tuple[int, int],
+    ) -> StoredChunk | None:
+        """按**不可变标识**精确回读一个片段。
+
+        为什么不拿 `source_id + span` 去 `stored_chunks` 里挑第一条：
+        同一来源的两版片段**可能落在同一个跨度上**（改写过的段落常常长度相近），
+        此时"先到先得"取决于存储顺序 —— 实测命中 `doc_v2/'delta!'`，
+        回读拿到 `doc_v1/'bravo!'`，而引用看起来完全正常。
+
+        返回 `None` 只表示**粒度落空**（该文档里没有这个跨度）。
+        授权拒绝仍由成员关系那一层抛码（与 `get_job` 同源），
+        不在本方法里翻译成一个空值。
         """
         ...
 

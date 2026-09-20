@@ -344,7 +344,7 @@ def test_envelope_requires_evidence_for_sourced_claim():
             ChildEnvelope(
                 child_run_id="child_1",
                 status=EnvelopeStatus.OK,
-                artifacts=(ArtifactRef("s1", (0, 10), "sha256:x", "p/v1", DisplayPolicy.FULL),),
+                artifacts=(ArtifactRef("s1", "doc_1", (0, 10), "sha256:x", "p/v1", DisplayPolicy.FULL),),
                 claims=(Claim(text="我读完了这些资料，结论是……", evidence_refs=(), kind=ClaimKind.SOURCED),),
             )
         )
@@ -360,7 +360,7 @@ def test_envelope_requires_verifiable_content_hash():
             ChildEnvelope(
                 child_run_id="child_1",
                 status=EnvelopeStatus.OK,
-                artifacts=(ArtifactRef("s1", (0, 10), "not-a-hash", "p/v1"),),
+                artifacts=(ArtifactRef("s1", "doc_1", (0, 10), "not-a-hash", "p/v1"),),
             )
         )
 
@@ -383,7 +383,7 @@ def test_inference_claims_are_not_learning_evidence():
     envelope = ChildEnvelope(
         child_run_id="child_1",
         status=EnvelopeStatus.OK,
-        artifacts=(ArtifactRef("s1", (0, 10), "sha256:x", "p/v1"),),
+        artifacts=(ArtifactRef("s1", "doc_1", (0, 10), "sha256:x", "p/v1"),),
         claims=(
             Claim(text="有来源的结论", evidence_refs=(0,), kind=ClaimKind.SOURCED),
             Claim(text="我的推测", evidence_refs=(), kind=ClaimKind.INFERENCE),

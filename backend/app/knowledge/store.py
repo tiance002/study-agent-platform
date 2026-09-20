@@ -18,6 +18,10 @@
 应用层再筛"：那样即使筛对了，越界内容也已经离开了它该在的边界，
 而任何一次筛漏都会变成静默的越权。
 
+它同时默认 `latest_only=True`：同一来源**只检索最新成功版本**。
+历史版本的片段必须留在库里（老引用要按 `document_id` 回读原版），
+但让检索同时看到两版会返回两份近似结果，而"哪份是当前的"客户端无从判断。
+
 ## 为什么不在 SQL 里预筛关键词
 
 可以，但那会引入一个**与打分不同的语义**：SQL 的 `ILIKE` 与这里的 NFKC 归一 +
@@ -99,7 +103,9 @@ class KnowledgeRepository:
         连"这个项目有几条片段"都不该知道）。把它做成可选参数会立刻出现
         "忘了传"的调用点，而那种调用默认拿到什么，取决于实现者的心情。
         """
-        scoped = self._ingestion.stored_chunks(actor, project_id)
+        # 默认就是最新版本（`latest_only=True`）：这是**检索**该有的语义，
+        # 历史版本由引用按 `document_id` 精确回读，不经检索。
+        scoped = self._ingestion.stored_chunks(actor, project_id, latest_only=True)
         return rank_chunks(scoped, query, limit=limit)
 
     def read_span(
@@ -108,8 +114,22 @@ class KnowledgeRepository:
         project_id: str,
         source_id: str,
         span: tuple[int, int],
+        *,
+        document_id: str,
+        content_hash: str = "",
     ) -> StoredChunk | None:
-        """按 `source_id` + `span` 精确回读原文切片。
+        """按**引用里的不可变标识**精确回读原文切片。
+
+        `document_id` 是必需参数，不是可选的"精细定位"。理由见
+        `ArtifactRef` 的 docstring：同一来源的两版片段可能落在同一个跨度上，
+        只按 `source_id + span` 回读会**静默返回另一版**（实测命中
+        `doc_v2/'delta!'`、回读拿到 `doc_v1/'bravo!'`）—— 而引用看起来完全正常，
+        没有任何东西会报警。所以精确读取直接按标识查库，**禁止挑第一条**。
+
+        `content_hash` 与 `source_id` 是**附加的一致性校验**：调用方给了就核对，
+        对不上返回 `None`（"你要的那一版这一段不存在"），而不是换一段内容给它。
+        少了这两条，客户端可以把别人的 `document_id` 与自己的 `source_id`
+        拼成一个"看起来自洽"的引用。
 
         **有权访问本项目时，粒度上的落空一律是同一个 `None`**：来源不存在、
         span 越界、这段片段属于本项目的另一份原文 —— 三者不可区分。
@@ -125,14 +145,24 @@ class KnowledgeRepository:
         出口保证（拒绝 → 404 + "资源不存在"），而不是靠每个读取方法各自
         把拒绝翻译成 `None`。"形状一致"要收在一处，否则它只是碰巧一致。
 
-        返回的 `StoredChunk.content` 与 `span` 之间由类型强制
-        （`span_end - span_start == len(content)`），所以引用能回读原文这件事
-        不依赖本方法写得对。
+        ⚠️ 返回值里 `content` 与 `span` 的长度一致**只**由类型强制
+        （`span_end - span_start == len(content)`）。"它真的是原文的切片"
+        由写入侧核验（`assert_chunks_match_document`，见 `models.py`），
+        不是这一层能保证的 —— 这里的注释曾经把两者混为一谈（R4-05）。
         """
-        for chunk in self._ingestion.stored_chunks(actor, project_id):
-            if chunk.source_id == source_id and chunk.span == span:
-                return chunk
-        return None
+        chunk = self._ingestion.chunk_at(
+            actor, project_id, document_id=document_id, span=span
+        )
+        if chunk is None:
+            return None
+        if chunk.source_id != source_id:
+            # 调用方给了一对不自洽的（source_id, document_id）：这不是"落空"，
+            # 而是"你拼出来的引用本身矛盾"。两者对外同形（都是没找到），
+            # 但这里绝不能返回那个片段 —— 否则引用会指向另一个来源。
+            return None
+        if content_hash and chunk.content_hash != content_hash:
+            return None
+        return chunk
 
     def assess(self, hits: tuple[ScoredChunk, ...]) -> RetrievalAssessment:
         """把候选转成证据判定。

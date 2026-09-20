@@ -155,10 +155,13 @@ class InMemoryIngestionRepository:
         return document
 
     def stored_chunks(
-        self, actor: Principal, project_id: str
+        self, actor: Principal, project_id: str, *, latest_only: bool = True
     ) -> tuple[StoredChunk, ...]:
-        """该项目下的全部片段。**过滤在方法内完成** —— 调用方不需要、
-        也不应该自己判断作用域（把隔离交给"记得写"迟早会漏）。"""
+        """该项目下的片段。`latest_only` 时每个来源只取最新版本。
+
+        **过滤在方法内完成** —— 调用方不需要、也不应该自己判断作用域
+        （把隔离交给"记得写"迟早会漏）。
+        """
         self.membership.get(actor, project_id)
         with self._lock:
             rows = [
@@ -166,8 +169,51 @@ class InMemoryIngestionRepository:
                 for chunk in self._chunks.values()
                 if chunk.tenant_id == actor.tenant_id and chunk.project_id == project_id
             ]
+            if latest_only:
+                rows = self._only_latest_versions(rows)
         rows.sort(key=lambda chunk: (chunk.document_id, chunk.chunk_index))
         return tuple(rows)
+
+    def chunk_at(
+        self,
+        actor: Principal,
+        project_id: str,
+        *,
+        document_id: str,
+        span: tuple[int, int],
+    ) -> StoredChunk | None:
+        """按不可变标识精确回读。**不挑"第一条匹配"**（见端口契约）。"""
+        self.membership.get(actor, project_id)
+        with self._lock:
+            for chunk in self._chunks.values():
+                if (
+                    chunk.tenant_id == actor.tenant_id
+                    and chunk.project_id == project_id
+                    and chunk.document_id == document_id
+                    and chunk.span == span
+                ):
+                    return chunk
+        return None
+
+    def _only_latest_versions(
+        self, chunks: list[StoredChunk]
+    ) -> list[StoredChunk]:
+        """每个来源只保留**版本号最大**的那一版片段。
+
+        与 PostgreSQL 版的 `DISTINCT ON (source_id) ... ORDER BY version DESC`
+        同一语义：版本号来自 `_documents`（片段本身不存版本号）。
+        只保留"有片段的版本"—— 一个失败的版本没有片段，不会把旧版本挤掉。
+        """
+        newest: dict[str, tuple[int, str]] = {}
+        for chunk in chunks:
+            document = self._documents.get(chunk.document_id)
+            if document is None:  # pragma: no cover - 片段必有原文，缺了是内部不一致
+                continue
+            current = newest.get(chunk.source_id)
+            if current is None or document.version > current[0]:
+                newest[chunk.source_id] = (document.version, chunk.document_id)
+        keep = {document_id for _version, document_id in newest.values()}
+        return [chunk for chunk in chunks if chunk.document_id in keep]
 
     # ------------------------------------------------------------------ 队列
 

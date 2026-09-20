@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:c0cffa390ab27e12a739bf42247a415a8250e18c4709c1eb8ce45ffc2d0d5a1b, generated_at=2026-09-20T03:52:09Z -->
-> 生成时间：2026-09-20T03:52:09Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:917db0a82d2fd8016d5d6c041f207991f70b4164b4cffdc789f201da92078011, generated_at=2026-09-20T04:57:27Z -->
+> 生成时间：2026-09-20T04:57:27Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -45,7 +45,7 @@
 | `/projects/{project_id}/sources` | GET | List Sources |
 | `/projects/{project_id}/sources` | POST | Register Source |
 | `/projects/{project_id}/sources/{source_id}/content` | POST | Upload Source Content |
-| `/projects/{project_id}/sources/{source_id}/span` | GET | Read Source Span |
+| `/projects/{project_id}/sources/{source_id}/span` | GET | Read Source Span (document_id required) |
 | `/projects/{project_id}/tasks/{task_id}` | GET | Get Task |
 | `/projects/{project_id}/tasks/{task_id}/submissions` | GET | List Task Submissions |
 | `/projects/{project_id}/tasks/{task_id}/submissions` | POST | Submit Task |

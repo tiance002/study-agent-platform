@@ -143,7 +143,12 @@ class ScoredChunk:
     @property
     def citation(self) -> ArtifactRef:
         """谱系引用。**内容本体不进响应也不需要**：拿到
-        `source_id + span + content_hash + parser_version` 就能把原文取回来。"""
+        `source_id + document_id + span + content_hash + parser_version`
+        就能把**那一版**的原文取回来。
+
+        `document_id` 是必需的：同一来源的两版片段可能落在同一个 span 上，
+        少了它，回读可能返回另一版（见 `ArtifactRef` 的 docstring）。
+        """
         return self.chunk.as_artifact_ref()
 
     def as_tainted(self) -> TaintedValue:
@@ -235,10 +240,18 @@ class Chunk:
     origin: TaintSource = TaintSource.UPLOADED_SOURCE
 
     def artifact_ref(self) -> ArtifactRef:
-        """转成谱系引用。内容本体不进上下文，只带指针与指纹。"""
+        """转成谱系引用。内容本体不进上下文，只带指针与指纹。
+
+        `document_id` 传空串：本适配器是**进程内**的，没有持久化文档，
+        因此不存在"同一来源多版本、跨度相同"的问题 ——
+        那条路径上的精确回读由进程内的 `chunk_id` 承担。
+        持久化路径（`knowledge/models.py` 的 `StoredChunk`）必须带上真实
+        `document_id`。
+        """
         value = mark_tainted(self.chunk_id, self.text, self.origin)
         return ArtifactRef(
             source_id=self.source_id,
+            document_id="",
             span=self.span,
             content_hash=value.content_hash,
             parser_version=self.parser_version,
