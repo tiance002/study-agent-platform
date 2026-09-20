@@ -56,7 +56,7 @@ class InMemoryProductRepository:
     _milestones: dict[str, list[Milestone]] = field(default_factory=dict)
     _tasks: dict[str, list[LearningTask]] = field(default_factory=dict)
     _sources: dict[str, SourceRecord] = field(default_factory=dict)
-    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _lock: threading.RLock = field(default_factory=threading.RLock)
 
     # ------------------------------------------------------------------ 会话
 
@@ -186,28 +186,24 @@ class InMemoryProductRepository:
         """
         self.membership.get(actor, project_id)
         with self._lock:
-            versions = self._plans.get(project_id, [])
-            next_version = (
-                max(p.version for p in versions) + 1 if versions else 1
+            return self._replace_plan_locked(project_id, bundle)
+
+    def _replace_plan_locked(self, project_id: str, bundle: PlanBundle) -> PlanBundle:
+        """调用方必须持有 ``_lock``；供跨仓储原子命令复用。"""
+        versions = self._plans.get(project_id, [])
+        next_version = max((p.version for p in versions), default=0) + 1
+        plan = replace(bundle.plan, version=next_version)
+        if any(p.version == next_version for p in versions):
+            raise deny(
+                ErrorCode.VERSION_CONFLICT,
+                "计划版本冲突；请重试（将基于最新状态重新分配版本）",
             )
-            plan = replace(bundle.plan, version=next_version)
-            if any(p.version == next_version for p in versions):
-                # 理论不可达（同锁内取号），防御性保留 —— 与 PG 的
-                # UNIQUE 约束同语义。
-                raise deny(
-                    ErrorCode.VERSION_CONFLICT,
-                    "计划版本冲突；请重试（将基于最新状态重新分配版本）",
-                )
-            milestones = tuple(
-                replace(m, plan_id=plan.plan_id) for m in bundle.milestones
-            )
-            # tasks 不改 plan_id：LearningTask 契约没有该字段 ——
-            # 任务挂在里程碑下，里程碑才挂计划。归属随里程碑走。
-            tasks = bundle.tasks
-            self._plans.setdefault(project_id, []).append(plan)
-            self._milestones[plan.plan_id] = list(milestones)
-            self._tasks[plan.plan_id] = list(tasks)
-            return PlanBundle(plan=plan, milestones=milestones, tasks=tasks)
+        milestones = tuple(replace(m, plan_id=plan.plan_id) for m in bundle.milestones)
+        tasks = bundle.tasks
+        self._plans.setdefault(project_id, []).append(plan)
+        self._milestones[plan.plan_id] = list(milestones)
+        self._tasks[plan.plan_id] = list(tasks)
+        return PlanBundle(plan=plan, milestones=milestones, tasks=tasks)
 
     def plan_history(
         self, actor: Principal, project_id: str

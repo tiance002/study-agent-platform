@@ -375,11 +375,25 @@ def interact(
 
 @router.get("/projects/{project_id}/mastery")
 def mastery(request: Request, project_id: str) -> dict:
-    """读掌握投影。作用域来自认证上下文，不来自查询参数。"""
+    """从全部合法证据重建掌握投影；产品状态不参与计算。"""
+    from app.learning.ports import GRAPH_VERSION_V1
+
     state = _state(request)
-    _, context = _project_scope(request, project_id)
-    with tenant_scope(context):
-        projection = state.runtime.projection()
+    principal, context = _project_scope(request, project_id)
+    persisted = state.evidence.events_for(principal, project_id)
+    runtime_events = state.evidence_log.events_scoped(
+        tenant_id=context.tenant_id, project_id=project_id
+    )
+    event_ids = {event.event_id for event in (*persisted, *runtime_events)}
+    corrections = (
+        *state.evidence.corrections_for(principal, project_id, event_ids),
+        *state.evidence_log.corrections_scoped(event_ids=event_ids),
+    )
+    projection = state.projector.project_from(
+        events=(*persisted, *runtime_events),
+        corrections=corrections,
+        graph_version=GRAPH_VERSION_V1,
+    )
     return projection.to_dict()
 
 

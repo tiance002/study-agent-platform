@@ -59,6 +59,7 @@ from app.db.identity_store import (
     PostgresMembershipRepository,
     PostgresSessionRepository,
 )
+from app.db.learning_store import PostgresLearningLoopRepository
 from app.db.product_store import PostgresProductRepository
 from app.db.rate_limit_store import PostgresRateLimiter
 from app.db.settings import DEFAULT_APP_DSN
@@ -82,8 +83,9 @@ from app.identity.rate_limit import InMemoryRateLimiter, RateLimiter
 from app.identity.session import SessionIssuer
 from app.knowledge.retrieval import ChunkIndex
 from app.learning.evidence import EvidenceLog
+from app.learning.loop_store import InMemoryLearningLoopRepository
 from app.learning.memory_store import InMemoryEvidenceRepository
-from app.learning.ports import EvidenceRepository
+from app.learning.ports import EvidenceRepository, LearningLoopRepository
 from app.learning.projector import Projector
 from app.policy.gateway import PolicyGateway
 from app.policy.token import TokenIssuer
@@ -144,6 +146,8 @@ class PlatformState:
     http_idempotency: HttpIdempotencyStore | None
     # 学习证据仓储（append-only）。掌握度投影的唯一事实源入口。
     evidence: EvidenceRepository
+    # 跨产品表与证据表的原子学习闭环命令。
+    learning_loop: LearningLoopRepository
     #: 会话 cookie 的有效期（也是兑换出的数据库会话的过期时间）。
     session_ttl: timedelta = DEFAULT_SESSION_TTL
     #: 生产环境置 True（HTTPS-only cookie）。测试与本机开发保持 False：
@@ -244,6 +248,7 @@ def build_platform(
     products: ProductRepository
     http_idempotency: HttpIdempotencyStore | None
     evidence: EvidenceRepository
+    learning_loop: LearningLoopRepository
     audit_outbox: AuditOutbox
 
     if loaded.use_postgres:
@@ -263,6 +268,9 @@ def build_platform(
         products = PostgresProductRepository(membership=membership, clock=clock, dsn=dsn)
         http_idempotency = PostgresHttpIdempotencyStore(dsn)
         evidence = PostgresEvidenceRepository(clock, dsn)
+        learning_loop = PostgresLearningLoopRepository(
+            products=products, evidence=evidence, dsn=dsn
+        )
         rate_limiter: RateLimiter = PostgresRateLimiter(
             limit=loaded.exchange_limit,
             window_seconds=loaded.exchange_window_seconds,
@@ -304,6 +312,7 @@ def build_platform(
             products=products,
             http_idempotency=http_idempotency,
             evidence=evidence,
+            learning_loop=learning_loop,
             session_ttl=loaded.session_ttl,
             cookie_secure=loaded.cookie_secure,
             rate_limiter=rate_limiter,
@@ -333,6 +342,7 @@ def build_platform(
     products = InMemoryProductRepository(membership=membership)
     http_idempotency = InMemoryHttpIdempotencyStore()
     evidence = InMemoryEvidenceRepository(clock=clock)
+    learning_loop = InMemoryLearningLoopRepository(products, evidence)
     rate_limiter = InMemoryRateLimiter(
         limit=loaded.exchange_limit,
         window_seconds=loaded.exchange_window_seconds,
@@ -372,6 +382,7 @@ def build_platform(
         products=products,
         http_idempotency=http_idempotency,
         evidence=evidence,
+        learning_loop=learning_loop,
         session_ttl=loaded.session_ttl,
         cookie_secure=loaded.cookie_secure,
         rate_limiter=rate_limiter,

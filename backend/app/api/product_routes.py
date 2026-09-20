@@ -23,7 +23,7 @@ from app.core.hashing import canonical_json
 from app.core.ids import new_id
 from app.identity.models import Principal
 from app.learning.evidence import Direction, EvidenceKind, Validity
-from app.learning.ports import GRAPH_VERSION_V1
+from app.learning.ports import COMPONENTS_V1, TaskAssessment
 from app.product.models import (
     LearningPlan,
     LearningTask,
@@ -102,6 +102,25 @@ class SourceBody(BaseModel):
     display_name: str = Field(min_length=1, max_length=200)
     media_type: str = Field(default="", max_length=100)
     acquisition: dict = Field(default_factory=dict)
+
+
+class DiagnosisBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    experience_level: Literal["beginner", "familiar", "experienced"]
+    weekly_hours: int = Field(ge=1, le=40)
+    preferred_style: Literal["reading", "practice", "mixed"]
+
+
+class GeneratePlanBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class SubmissionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["self_report"]
+    content: str = Field(min_length=1, max_length=20_000)
 
 
 # ---------------------------------------------------------------- 会话与消息
@@ -391,20 +410,181 @@ def transition_task(
         return result
 
 
-@router.get("/projects/{project_id}/mastery")
-def get_mastery(request: Request, project_id: str) -> dict:
-    """掌握度投影：**唯一**由证据回放生成，无任何直接写入路径。
+# ----------------------------------------------------- 诊断 / 生成 / 提交闭环
 
-    投影每次全量重算（可重建读模型）—— 没有"掌握度表"，就没有
-    "投影与事实源不一致"的可能性。
-    """
-    state = _state(request)
-    actor = _actor(request)
-    events = state.evidence.events_for(actor, project_id)
-    corrections = state.evidence.corrections_for(
-        actor, project_id, {e.event_id for e in events}
+
+def _diagnosis_summary(body: DiagnosisBody) -> str:
+    levels = {
+        "beginner": "初学",
+        "familiar": "有一些基础",
+        "experienced": "已有实践经验",
+    }
+    styles = {"reading": "阅读", "practice": "动手实践", "mixed": "混合方式"}
+    return (
+        f"{levels[body.experience_level]}；每周可投入 {body.weekly_hours} 小时；"
+        f"偏好{styles[body.preferred_style]}。"
     )
-    projection = state.projector.project_from(
-        events=events, corrections=corrections, graph_version=GRAPH_VERSION_V1
+
+
+@router.post("/projects/{project_id}/diagnosis", status_code=201, response_model=None)
+def create_diagnosis(
+    request: Request, project_id: str, body: DiagnosisBody
+) -> dict | JSONResponse:
+    from app.api.http_idempotency import idempotent_write
+
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+        row = _state(request).learning_loop.record_diagnosis(
+            guard.principal,
+            project_id,
+            diagnosis_id=new_id("diag"),
+            answers=body.model_dump(mode="json"),
+            summary=_diagnosis_summary(body),
+        )
+        result = row.to_dict()
+        guard.complete(201, result)
+        return result
+
+
+@router.get("/projects/{project_id}/diagnosis")
+def latest_diagnosis(request: Request, project_id: str):
+    row = _state(request).learning_loop.latest_diagnosis(_actor(request), project_id)
+    if row is None:
+        return JSONResponse(status_code=204, content=None)
+    return row.to_dict()
+
+
+def _generated_bundle(
+    actor: Principal, project_id: str, goal: str, summary: str, *, now
+) -> tuple[PlanBundle, tuple[TaskAssessment, ...]]:
+    plan_id = new_id("plan")
+    # 标题有模型层 200 字上限；保留目标与诊断的首段，完整值仍在项目/诊断记录中。
+    context = f"{goal.strip() or '完成学习目标'}（{summary}）"[:120]
+    stage_specs = (
+        ("理解核心概念", f"理解并解释：{context}"),
+        ("完成实践练习", f"动手完成一个练习：{context}"),
+        ("复盘与迁移", f"总结并迁移到新情境：{context}"),
     )
-    return projection.to_dict()
+    milestones: list[Milestone] = []
+    tasks: list[LearningTask] = []
+    assessments: list[TaskAssessment] = []
+    for order, ((milestone_title, task_title), component) in enumerate(
+        zip(stage_specs, COMPONENTS_V1, strict=True)
+    ):
+        milestone_id = new_id("mile")
+        task_id = new_id("task")
+        milestones.append(
+            Milestone(
+                milestone_id, actor.tenant_id, project_id, plan_id,
+                order, milestone_title, "",
+            )
+        )
+        tasks.append(
+            LearningTask(
+                task_id, actor.tenant_id, project_id, milestone_id,
+                0, task_title, TaskStatus.PENDING,
+            )
+        )
+        assessments.append(
+            TaskAssessment(
+                new_id("asm"), task_id, component,
+                "self-report/v1", "graph-v1/task-v1",
+            )
+        )
+    bundle = PlanBundle(
+        LearningPlan(
+            plan_id, actor.tenant_id, project_id, 1, goal,
+            PlanStatus.ACTIVE, now,
+        ),
+        tuple(milestones),
+        tuple(tasks),
+    )
+    return bundle, tuple(assessments)
+
+
+@router.post("/projects/{project_id}/plan/generate", status_code=201, response_model=None)
+def generate_plan(
+    request: Request, project_id: str, body: GeneratePlanBody
+) -> dict | JSONResponse:
+    from app.api.http_idempotency import idempotent_write
+    from app.core.errors import ErrorCode, deny
+
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+        state = _state(request)
+        diagnosis = state.learning_loop.latest_diagnosis(guard.principal, project_id)
+        if diagnosis is None:
+            raise deny(ErrorCode.PARAMS_INVALID, "请先完成基础诊断，再生成学习计划")
+        project = state.membership.get(guard.principal, project_id)
+        bundle, assessments = _generated_bundle(
+            guard.principal, project_id, project.goal, diagnosis.summary,
+            now=state.clock.now(),
+        )
+        saved = state.learning_loop.install_generated_plan(
+            guard.principal, project_id, bundle, assessments
+        )
+        result = {
+            "generator": "template/graph-v1",
+            "plan": saved.plan.to_dict(),
+            "milestones": [item.to_dict() for item in saved.milestones],
+            "tasks": [item.to_dict() for item in saved.tasks],
+        }
+        guard.complete(201, result)
+        return result
+
+
+@router.post(
+    "/projects/{project_id}/tasks/{task_id}/submissions",
+    status_code=201,
+    response_model=None,
+)
+def submit_task(
+    request: Request, project_id: str, task_id: str, body: SubmissionBody
+) -> dict | JSONResponse:
+    from app.api.http_idempotency import idempotent_write
+
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+        submission, event = _state(request).learning_loop.submit_self_report(
+            guard.principal,
+            project_id,
+            task_id,
+            submission_id=new_id("sub"),
+            content=body.content,
+        )
+        verdict = event.verdicts[0]
+        result = {
+            "submission": submission.to_dict(),
+            "evidence": {
+                "event_id": event.event_id,
+                "component_id": verdict.component_id,
+                "observation_strength": int(verdict.observation_strength),
+                "independence_level": str(verdict.independence_level),
+                "confidence_note": "self_report_low_observation",
+            },
+        }
+        guard.complete(201, result)
+        return result
+
+
+@router.get("/projects/{project_id}/tasks/{task_id}/submissions")
+def list_task_submissions(request: Request, project_id: str, task_id: str) -> dict:
+    rows = _state(request).learning_loop.submissions_for_task(
+        _actor(request), project_id, task_id
+    )
+    return {"submissions": [row.to_dict() for row in rows]}

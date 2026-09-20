@@ -88,26 +88,34 @@ class PostgresEvidenceRepository:
         mapping_version: str,
         verdicts: tuple,
     ) -> EvidenceEvent:
-        from app.core.hashing import canonical_json
-
-        # 先在应用层构造完整事件（走 EvidenceLog 的全部校验），
-        # 再原样落库 —— 校验逻辑不出现第二份。
-        from app.learning.memory_store import InMemoryEvidenceRepository
-
-        staging = InMemoryEvidenceRepository(clock=self._clock)
-        event = staging.append_learning(
-            actor,
-            project_id=project_id,
-            task_id=task_id,
-            contract_id=contract_id,
-            mapping_version=mapping_version,
-            verdicts=verdicts,
-        )
         try:
             with tenant_transaction(
                 tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
             ) as conn:
-                row = conn.execute(
+                return self.append_learning_in_transaction(
+                    conn, actor, project_id=project_id, task_id=task_id,
+                    contract_id=contract_id, mapping_version=mapping_version,
+                    verdicts=verdicts,
+                )
+        except pg_errors.UniqueViolation as exc:
+            raise deny(
+                ErrorCode.EVIDENCE_IMMUTABLE,
+                "证据事件 ID 冲突；事件是不可变的，请勿重放同一 event_id",
+            ) from exc
+
+    def append_learning_in_transaction(
+        self, conn, actor: Principal, *, project_id: str, task_id: str,
+        contract_id: str, mapping_version: str, verdicts: tuple,
+    ) -> EvidenceEvent:
+        from app.core.hashing import canonical_json
+        from app.learning.memory_store import InMemoryEvidenceRepository
+
+        event = InMemoryEvidenceRepository(clock=self._clock).append_learning(
+            actor, project_id=project_id, task_id=task_id,
+            contract_id=contract_id, mapping_version=mapping_version,
+            verdicts=verdicts,
+        )
+        row = conn.execute(
                     "INSERT INTO evidence_events"
                     " (event_id, tenant_id, project_id, kind, task_id,"
                     "  contract_id, mapping_version, graph_version, occurred_at,"
@@ -127,13 +135,7 @@ class PostgresEvidenceRepository:
                         canonical_json(event.payload()),
                     ),
                 ).fetchone()
-        except pg_errors.UniqueViolation as exc:
-            raise deny(
-                ErrorCode.EVIDENCE_IMMUTABLE,
-                "证据事件 ID 冲突；事件是不可变的，请勿重放同一 event_id",
-            ) from exc
         assert row is not None, "INSERT 成功却拿不到 RETURNING 行"
-        # 用库分配的 seq 替换暂存对象里的内存序号 —— 全局单调以库为准。
         return _event_from_row(int(row[0]), json.loads(canonical_json(event.payload())))
 
     def events_for(self, actor: Principal, project_id: str) -> tuple[EvidenceEvent, ...]:

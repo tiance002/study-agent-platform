@@ -296,21 +296,26 @@ class PostgresProductRepository:
         with tenant_transaction(
             tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
         ) as conn:
-            version_row = conn.execute(
+            return self._replace_plan_in_transaction(conn, actor, project_id, bundle)
+
+    def _replace_plan_in_transaction(
+        self, conn, actor: Principal, project_id: str, bundle: PlanBundle
+    ) -> PlanBundle:
+        """在调用方已有事务内写整版计划，供学习闭环冻结映射时复用。"""
+        version_row = conn.execute(
                 "SELECT COALESCE(MAX(version), 0) FROM learning_plans"
                 " WHERE project_id = %s",
                 (project_id,),
             ).fetchone()
-            assert version_row is not None, "聚合查询必须返回一行（COALESCE 保证非 NULL）"
-            next_version = int(version_row[0]) + 1
-            plan = replace_plan_version(bundle.plan, next_version)
-            milestones = tuple(
-                replace_milestone_plan_id(m, plan.plan_id) for m in bundle.milestones
-            )
-            # tasks 的归属随里程碑走（LearningTask 契约无 plan_id 字段）。
-            tasks = bundle.tasks
-            try:
-                conn.execute(
+        assert version_row is not None, "聚合查询必须返回一行（COALESCE 保证非 NULL）"
+        next_version = int(version_row[0]) + 1
+        plan = replace_plan_version(bundle.plan, next_version)
+        milestones = tuple(
+            replace_milestone_plan_id(m, plan.plan_id) for m in bundle.milestones
+        )
+        tasks = bundle.tasks
+        try:
+            conn.execute(
                     "INSERT INTO learning_plans (plan_id, tenant_id, project_id,"
                     " version, goal, status)"
                     " VALUES (%s, %s, %s, %s, %s, %s)",
@@ -323,8 +328,8 @@ class PostgresProductRepository:
                         str(plan.status),
                     ),
                 )
-                for milestone in milestones:
-                    conn.execute(
+            for milestone in milestones:
+                conn.execute(
                         "INSERT INTO milestones (milestone_id, tenant_id, project_id,"
                         " plan_id, order_index, title, description)"
                         " VALUES (%s, %s, %s, %s, %s, %s, %s)",
@@ -338,8 +343,8 @@ class PostgresProductRepository:
                             milestone.description,
                         ),
                     )
-                for task in tasks:
-                    conn.execute(
+            for task in tasks:
+                conn.execute(
                         "INSERT INTO learning_tasks (task_id, tenant_id, project_id,"
                         " milestone_id, order_index, title, status)"
                         " VALUES (%s, %s, %s, %s, %s, %s, %s)",
@@ -353,13 +358,11 @@ class PostgresProductRepository:
                             str(task.status),
                         ),
                     )
-            except pg_errors.UniqueViolation as exc:
-                # 并发 PUT 分配了同一版本：UNIQUE (project_id, version) 兜底。
-                # 可重试 —— 客户端重新 PUT，实现基于最新状态重新分配。
-                raise deny(
-                    ErrorCode.VERSION_CONFLICT,
-                    "计划版本冲突；请重新提交（将基于最新状态重新分配版本）",
-                ) from exc
+        except pg_errors.UniqueViolation as exc:
+            raise deny(
+                ErrorCode.VERSION_CONFLICT,
+                "计划版本冲突；请重新提交（将基于最新状态重新分配版本）",
+            ) from exc
         return PlanBundle(plan=plan, milestones=milestones, tasks=tasks)
 
     def plan_history(
@@ -563,5 +566,4 @@ def replace_milestone_plan_id(milestone: Milestone, plan_id: str) -> Milestone:
     from dataclasses import replace
 
     return replace(milestone, plan_id=plan_id)
-
 

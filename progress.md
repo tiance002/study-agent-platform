@@ -256,3 +256,28 @@ PostgreSQL 身份与产品仓储：`identity/ports.py`、`db/identity_store.py`�
   退出后会话撤销、cookie 立即失效。442 项测试全过，八道门禁全绿。
 - **坑**：幂等 store 曾漏设 RLS 上下文（铁律 33 又犯）；测试脚本固定幂等键 + PG 缓存跨运行持久
   → "上次运行的项目被重放回来"，键必须 per-run 随机。
+
+## 第 3 轮：学习闭环 MVP（2026-09-20）
+
+- **闭环 API**：固定三问诊断、确定性三阶段计划生成、任务流转、自报练习提交、提交历史、
+  verified 计算结论与掌握度重建；写端点全部复用 cookie/CSRF/持久化 HTTP 幂等。
+- **事前冻结**：生成计划时为 concept/practice/reflection 三任务冻结 assessment contract；
+  手工计划没有 mapping，提交稳定拒绝为 `EVIDENCE_UNMAPPED`，不能事后追认学习证据。
+- **原子性**：新增 `LearningLoopRepository`。内存版使用产品仓储同一把 `RLock`；PG 版使用
+  `full_transaction`，计划+assessment 映射以及 submission+EvidenceEvent 分别同事务落库。
+  故障注入证明证据追加失败时 submission 回滚，不留下半完成事实。
+- **证据诚实性**：自报只产生 `OBS_1 / INTRODUCED / POSITIVE / VALID`，独立组等于
+  `submission_id`；一次自报投影为 `introduced / low`，不伪装成高强度验证。
+- **兼容修复**：发现旧 runtime `/projects/{id}/mastery` 路由先注册，遮蔽新持久化路由。
+  已收敛为唯一入口，合并作用域内 runtime 与持久化证据后由同一个 `Projector` 重建。
+- **双适配器一致性**：补齐仓储直调的提交长度校验，内存/PG 都对空内容和 >20,000 字符
+  返回 `PARAMS_INVALID`，不再由 PG CHECK 单独决定语义。
+- **PostgreSQL 退出门**：真实 cookie 用户完成“建项目 → 诊断 → 生成计划 → 开始任务 →
+  提交 → 重启全平台 → verified/mastery 恢复 → 完成任务”；状态变化前后掌握投影完全相同，
+  证明任务状态不能伪造掌握度。
+- **机械验证**：后端 **493 项**全量测试通过（PG 无 skip）；
+  Ruff、mypy、`gen_contracts.py --all --check`、`git diff --check` 通过；临时空库完成
+  `upgrade head → downgrade 0004 → upgrade head`，最终版本 `0006`，临时库已删除。
+- **下一轮**：已写
+  `docs/superpowers/plans/2026-09-20-round-4-source-ingestion-retrieval.md`；按用户要求仅给计划，
+  不实施。范围限定为 durable 摄取、纯文本/Markdown 结构化切块、中文关键词基线、可核验引用。
