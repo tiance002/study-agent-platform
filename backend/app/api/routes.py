@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -549,3 +550,51 @@ def error_response(exc: PlatformError):
         # 而盲目重试正是这条错误要阻止的行为。
         status = 409
     return JSONResponse(status_code=status, content=payload)
+
+
+def _sanitize_utf8(text: str) -> str:
+    """把无法编码成 UTF-8 的字符换掉（孤立代理项）。
+
+    这是最后一道兜底。下面只用了 pydantic 的固定话术与字段路径，理论上不含
+    请求输入 —— 但"理论上"不该被用来保证一条会把 422 变成 500 的路径。
+    """
+    return text.encode("utf-8", "replace").decode("utf-8", "replace")
+
+
+def request_validation_response(exc: RequestValidationError) -> JSONResponse:
+    """请求**形状**不合法（pydantic 校验失败）的响应。
+
+    与 `error_response` 并列，构成对外错误体的两个出口：一个是"业务拒绝了"
+    （`PlatformError`），一个是"请求压根不合法"（`RequestValidationError`）。
+    两者共用 `public_error_payload`，形状因此必然一致 —— FastAPI 的默认实现
+    返回的是 `{"detail": [...]}`，那是**第二种形状**：客户端得为它单独写一套解析，
+    而"新增一个字段只落到一部分出口"的老毛病正是这么来的。
+
+    ⚠️ 这里**绝不回显 `exc.errors()` 的 `input`**。那不是洁癖：JSON 允许
+    `"\\ud800"` 这样的孤立代理项转义，解出来是 Python 能持有、却编码不成
+    UTF-8 的字符串；把它放进响应体，`JSONResponse` 会在编码阶段抛
+    `UnicodeEncodeError` —— 于是一个"应该 422"的请求变成 500，
+    而真正的原因（我们没拦非 UTF-8）在日志里完全看不出来。
+
+    只回显**字段位置**与 pydantic 的固定话术：两者都不含请求输入。
+    """
+    fields: list[str] = []
+    for error in exc.errors():
+        location = ".".join(str(part) for part in error.get("loc", ()))
+        message = str(error.get("msg", ""))
+        fields.append(_sanitize_utf8(f"{location}: {message}" if location else message))
+    summary = "；".join(fields[:5]) or "无法解析请求"
+    if len(fields) > 5:
+        summary += f"；…共 {len(fields)} 处"
+    return JSONResponse(
+        status_code=422,
+        content=public_error_payload(
+            # 语义是"请求参数不对"。**422 与 400 的差别是层次，不是语义**：
+            # 422 = 请求形状（还没进业务层），400 = 业务参数不合法。
+            # 两边都用 `PARAMS_INVALID` 是刻意的 —— 客户端按**码**分支，
+            # 同一个原因不该有两个码。
+            ErrorCode.PARAMS_INVALID.value,
+            f"请求参数不符合接口要求：{summary}",
+            request_id=current_request_id(),
+        ),
+    )

@@ -17,11 +17,12 @@ from typing import Literal
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.hashing import canonical_json
 from app.core.ids import new_id
 from app.identity.models import Principal
+from app.knowledge.models import MAX_DOCUMENT_BYTES, require_document_content
 from app.learning.evidence import Direction, EvidenceKind, Validity
 from app.learning.ports import COMPONENTS_V1, TaskAssessment
 from app.product.models import (
@@ -39,6 +40,8 @@ router = APIRouter()
 CONTENT_MAX_CHARS = 32_000
 TITLE_MAX_CHARS = 200
 GOAL_MAX_CHARS = 2000
+#: 资料标题上限。比会话标题宽松：文献标题常带编号与副标题，200 字容易不够。
+DOCUMENT_TITLE_MAX_CHARS = 300
 
 
 def _state(request: Request):
@@ -102,6 +105,28 @@ class SourceBody(BaseModel):
     display_name: str = Field(min_length=1, max_length=200)
     media_type: str = Field(default="", max_length=100)
     acquisition: dict = Field(default_factory=dict)
+
+
+class SourceContentBody(BaseModel):
+    """上传一版原文并把摄取任务入队。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=DOCUMENT_TITLE_MAX_CHARS)
+    #: ⚠️ 这里的 `max_length` 是**字符**上限，只是字节上限的**粗筛**：
+    #: UTF-8 每个字符至少一字节，所以字符数 ≤ 字节数 —— 超过字节上限的输入
+    #: 必然也超过字符上限，粗筛不会漏（它的作用是不把巨量输入解码进内存）。
+    #: 反方向不成立（中文一字三字节），因此真正的判定按字节做，
+    #: 由下面的校验器调用 `require_document_content` —— **同一个出口**，
+    #: 否则 40 万字中文能过应用层校验、却在数据库 CHECK 上炸成 500。
+    content: str = Field(min_length=1, max_length=MAX_DOCUMENT_BYTES)
+    media_type: Literal["text/plain", "text/markdown"]
+    language: str = Field(default="zh", pattern=r"^[a-z]{2,3}(-[A-Za-z0-9]+)*$")
+
+    @field_validator("content")
+    @classmethod
+    def _validate_content(cls, value: str) -> str:
+        return require_document_content(value)
 
 
 class DiagnosisBody(BaseModel):
@@ -333,6 +358,63 @@ def list_sources(request: Request, project_id: str) -> dict:
     state = _state(request)
     rows = state.products.list_sources(_actor(request), project_id)
     return {"sources": [s.to_dict() for s in rows]}
+
+
+@router.post(
+    "/projects/{project_id}/sources/{source_id}/content",
+    status_code=202,
+    response_model=None,
+)
+def upload_source_content(
+    request: Request, project_id: str, source_id: str, body: SourceContentBody
+) -> dict | JSONResponse:
+    """登记一版原文并入队一个摄取任务。**返回 202，请求内不切块。**
+
+    切块是 worker 的重活，写在请求里的话：一次 1 MiB 的 Markdown 解析会占住
+    一个 web worker 若干秒，客户端超时重试又压一份进来 —— 而重试本该是安全的。
+    真正的进度看 `GET /projects/{project_id}/ingestion-jobs/{job_id}`。
+
+    原文与任务在**一次调用**里写入（`enqueue` 的契约）：拆成两次会留下
+    "原文在库里、没人处理"的半完成状态，而它看起来完全合法 ——
+    用户看到的是"上传成功但永远搜不到"。
+    """
+    from app.api.http_idempotency import idempotent_write
+
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+        state = _state(request)
+        document, job = state.ingestion.enqueue(
+            guard.principal,
+            project_id,
+            source_id,
+            document_id=new_id("doc"),
+            job_id=new_id("job"),
+            title=body.title,
+            content=body.content,
+            media_type=body.media_type,
+            language=body.language,
+        )
+        result = {"document": document.to_dict(), "job": job.to_dict()}
+        guard.complete(202, result)
+        return result
+
+
+@router.get("/projects/{project_id}/ingestion-jobs/{job_id}")
+def get_ingestion_job(request: Request, project_id: str, job_id: str) -> dict:
+    """摄取任务的稳定状态。只含状态、尝试次数、安全错误码与时间戳。
+
+    **不含原文与片段**：这个端点会被客户端轮询，把原文放进来就是一个
+    客户端可控的响应体放大入口（同一条理由让 `SourceDocument.to_dict()`
+    不含 `content`）。原文回读走引用（`source_id + span + content_hash`）。
+    """
+    state = _state(request)
+    job = state.ingestion.get_job(_actor(request), project_id, job_id)
+    return job.to_dict()
 
 
 # ------------------------------------------------- 任务流转 / 详情 / 掌握度

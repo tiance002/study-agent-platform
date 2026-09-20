@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:7c6107927b85ed1a28f5cc5d6c9dad8fc9334c02789836fbc4be8de6d850d4c4, generated_at=2026-09-20T02:15:37Z -->
-> 生成时间：2026-09-20T02:15:37Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:044875b5f39760f598900643f5e06039cb57fe40119c37ffad0287327dd6c0f7, generated_at=2026-09-20T03:19:08Z -->
+> 生成时间：2026-09-20T03:19:08Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -33,6 +33,7 @@
 | `/projects/{project_id}/conversations/{conversation_id}/messages` | POST | Append Message |
 | `/projects/{project_id}/diagnosis` | GET | Latest Diagnosis |
 | `/projects/{project_id}/diagnosis` | POST | Create Diagnosis |
+| `/projects/{project_id}/ingestion-jobs/{job_id}` | GET | Get Ingestion Job |
 | `/projects/{project_id}/interactions` | POST | Interact |
 | `/projects/{project_id}/mastery` | GET | Mastery |
 | `/projects/{project_id}/plan` | GET | Current Plan |
@@ -42,6 +43,7 @@
 | `/projects/{project_id}/retrieval/chunks` | POST | Ingest |
 | `/projects/{project_id}/sources` | GET | List Sources |
 | `/projects/{project_id}/sources` | POST | Register Source |
+| `/projects/{project_id}/sources/{source_id}/content` | POST | Upload Source Content |
 | `/projects/{project_id}/tasks/{task_id}` | GET | Get Task |
 | `/projects/{project_id}/tasks/{task_id}/submissions` | GET | List Task Submissions |
 | `/projects/{project_id}/tasks/{task_id}/submissions` | POST | Submit Task |
