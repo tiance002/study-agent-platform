@@ -7,13 +7,13 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:c68715aba182d7d07d7a94ed5f1eb7686353e7a96cfa0780e6b46c0e5787bef8, generated_at=2026-09-20T04:38:41Z -->
-> 生成时间：2026-09-20T04:38:41Z
+<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:be573ec6cf87c3ccd6ccdb59bf6c183ce1ced269cb066a64d8d90dc1e1216099, generated_at=2026-09-20T04:50:11Z -->
+> 生成时间：2026-09-20T04:50:11Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
 
-当前 head：`0008`
+当前 head：`0009`
 
 ### 表总览
 
@@ -27,7 +27,7 @@
 | `diagnoses` | 0005 | 租户+项目+主体 | SELECT, INSERT | — | 7 |
 | `evidence_events` | 0001 | 租户+项目 | SELECT, INSERT | — | 12 |
 | `http_idempotency` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE | — | 13 |
-| `ingestion_jobs` | 0007 → 0008 改写 | 租户+项目 | SELECT, INSERT | SELECT, UPDATE | 13 |
+| `ingestion_jobs` | 0007 → 0008 改写 | 租户+项目 | SELECT, INSERT | SELECT, UPDATE | 14 |
 | `invitations` | 0002 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 9 |
 | `learning_plans` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
 | `learning_tasks` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
@@ -135,6 +135,7 @@
 | `ingestion_jobs` | `error_detail` | `text` |
 | `ingestion_jobs` | `created_at` | `timestamptz` |
 | `ingestion_jobs` | `updated_at` | `timestamptz` |
+| `ingestion_jobs` | `claim_token` | `uuid` |
 | `invitations` | `invitation_id` | `text` |
 | `invitations` | `tenant_id` | `text` |
 | `invitations` | `token_hash` | `text` |

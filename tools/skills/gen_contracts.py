@@ -187,20 +187,58 @@ def _strip_sql_comment(line: str) -> str:
 
 
 def _text_blocks(tree: ast.Module) -> list[str]:
-    """模块里所有字符串字面量（按源码顺序）。
+    """模块里的字符串字面量，外加 **f-string 的插值模板**（按源码顺序）。
 
     `ALTER TABLE ... ADD COLUMN` 就是这样被发现的：表结构不只由 `CREATE TABLE`
     决定，后续迁移加列同样是结构的一部分 —— 漏掉它，契约里的列数就会骗人。
+
+    ⚠️ f-string 必须单独处理：`f"ALTER TABLE {TABLE} ADD COLUMN c text"` 在 AST 里
+    是 `ast.JoinedStr`，逐段取 `ast.Constant` 只会拿到 `"ALTER TABLE "` 与
+    `" ADD COLUMN c text"` —— **`{TABLE}` 那一段整个消失**，正则一条也匹配不上，
+    于是契约里少一列而没有任何东西报警（实测就这样漏掉了 0009 的 `claim_token`）。
+    这里把简单的 `{NAME}` 插值还原成占位符，交给调用方去查模块常量；
+    复杂表达式还原成 `{}`（无法静态解析就不猜）。
     """
-    return [
-        node.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
-    ]
+    blocks: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            blocks.append(node.value)
+        elif isinstance(node, ast.JoinedStr):
+            pieces: list[str] = []
+            for part in node.values:
+                if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                    pieces.append(part.value)
+                elif isinstance(part, ast.FormattedValue) and isinstance(
+                    part.value, ast.Name
+                ):
+                    pieces.append("{" + part.value.id + "}")
+                else:
+                    pieces.append("{}")
+            blocks.append("".join(pieces))
+    return blocks
 
 
 _ADD_COLUMN_RE = re.compile(
     r"ALTER TABLE\s+(\w+)\s+ADD COLUMN\s+(\w+)\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
+
+#: 迁移里常见的写法是把表名放进模块常量再 f-string 插值：
+#:
+#: ```python
+#: TABLE = "ingestion_jobs"
+#: op.execute(f"ALTER TABLE {TABLE} ADD COLUMN claim_token uuid")
+#: ```
+#:
+#: 这种写法下 `_ADD_COLUMN_RE` 一条也匹配不上（`{TABLE}` 里的花括号不是
+#: `\w`），于是**契约里少一列而没有任何东西报警** —— 实测就这样漏掉了
+#: 0009 的 `claim_token`。契约与权威源失去机械联系时，它能整体正确，
+#: 也能静默少一行，而读文档的人无从分辨。
+#:
+#: 所以这里把 `{NAME}` 解析成模块级字符串常量的值。只做这一层：
+#: 不实现表达式求值 —— 解析不了的写法应该让契约少一列（然后被列数比对
+#: 的测试抓住），而不是让解析器去猜。
+_PLACEHOLDER_ADD_COLUMN_RE = re.compile(
+    r"ALTER TABLE\s+\{(\w+)\}\s+ADD COLUMN\s+(\w+)\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
 
 #: 合法列名。用于自检：注释或跨行约束被读成"列"时，读出来的名字会带 `--`
@@ -329,6 +367,18 @@ def render_sql_schema() -> str:
         # 后续迁移给既有表加列，同样是表结构的一部分。
         for block in _text_blocks(tree):
             for table, column, ctype in _ADD_COLUMN_RE.findall(block):
+                info = tables.get(table)
+                if info is None:
+                    continue
+                existing = {name for name, _ in info["columns"]}  # type: ignore[union-attr]
+                if column not in existing:
+                    info["columns"].append((column, ctype.lower()))  # type: ignore[union-attr]
+            for holder, column, ctype in _PLACEHOLDER_ADD_COLUMN_RE.findall(block):
+                table = _module_literal(tree, holder)
+                if not isinstance(table, str):
+                    # 解析不出常量就当没看见 —— 但列数比对会立刻发现少了列，
+                    # 所以这不是"静默跳过"，而是"由另一道门负责报错"。
+                    continue
                 info = tables.get(table)
                 if info is None:
                     continue

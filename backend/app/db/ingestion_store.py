@@ -75,7 +75,8 @@ _DOCUMENT_COLUMNS = (
 
 _JOB_COLUMNS = (
     "job_id, tenant_id, project_id, source_id, document_id, status, attempt_count,"
-    " lease_owner, lease_until, error_code, error_detail, created_at, updated_at"
+    " lease_owner, lease_until, claim_token, error_code, error_detail, created_at,"
+    " updated_at"
 )
 
 _CHUNK_COLUMNS = (
@@ -129,10 +130,12 @@ def _job_from_row(row: tuple) -> IngestionJob:
         attempt_count=row[6],
         lease_owner=row[7] or "",
         lease_until=row[8],
-        error_code=row[9],
-        error_detail=row[10],
-        created_at=row[11],
-        updated_at=row[12],
+        # SQL 返回的是 uuid 对象，Python 契约里是字符串：空值（没有认领）读成空串。
+        claim_token=str(row[9]) if row[9] is not None else "",
+        error_code=row[10],
+        error_detail=row[11],
+        created_at=row[12],
+        updated_at=row[13],
     )
 
 
@@ -377,6 +380,7 @@ class PostgresIngestionRepository:
                 "     attempt_count = attempt_count + 1,"
                 "     lease_owner = %s,"
                 "     lease_until = now() + make_interval(secs => %s),"
+                "     claim_token = gen_random_uuid(),"
                 "     updated_at = now()"
                 " WHERE job_id = %s"
                 " RETURNING " + _JOB_COLUMNS,
@@ -386,28 +390,30 @@ class PostgresIngestionRepository:
         return _job_from_row(row)
 
     def complete(self, job: IngestionJob, chunks: tuple[StoredChunk, ...]) -> None:
+        """落定成功。**必须持有仍然有效的认领**（token + 状态 + 租约期限）。
+
+        时序上的失败模式（0009 之前存在，实测复现）：A 超时 → B 接管 →
+        A 迟到的 `complete` 抢先落结果，B 写的片段与 A 的混在一起，
+        而"谁写的"没有任何记录。所以落定不能只看"任务是不是 processing"，
+        还要看"是不是**我这一代**在持有它、且租约还没过期"。
+        """
         assert_chunks_belong_to_job(job, chunks)
         with worker_transaction(
             tenant_id=job.tenant_id, project_id=job.project_id, dsn=self._worker_dsn
         ) as conn:
-            # 行锁把并发的重复投递串行化：第二个事务在这里等，等到的已是 succeeded。
-            current = conn.execute(
-                "SELECT status FROM ingestion_jobs WHERE job_id = %s FOR UPDATE",
-                (job.job_id,),
+            settled = conn.execute(
+                "UPDATE ingestion_jobs"
+                " SET status = 'succeeded', lease_owner = NULL, lease_until = NULL,"
+                "     claim_token = NULL, updated_at = now()"
+                " WHERE job_id = %s AND status = 'processing'"
+                "   AND claim_token = %s AND lease_until > now()"
+                " RETURNING job_id",
+                (job.job_id, job.claim_token or None),
             ).fetchone()
-            if current is None:
-                raise deny(
-                    ErrorCode.CROSS_TENANT_DENIED, "任务不存在", job_id=job.job_id
-                )
-            if current[0] == str(IngestionStatus.SUCCEEDED):
-                # 重复投递：结果已落定，不追加片段 —— 也不是错误。
+            if settled is None:
+                self._reject_if_claim_is_stale(conn, job, action="complete")
+                # 走到这里 = 任务已是 succeeded：重复投递，直接返回既有结果。
                 return
-            if current[0] != str(IngestionStatus.PROCESSING):
-                raise deny(
-                    ErrorCode.ILLEGAL_STATE_TRANSITION,
-                    f"只能完成 processing 的任务，当前是 {current[0]}",
-                    job_id=job.job_id,
-                )
             for chunk in chunks:
                 conn.execute(
                     "INSERT INTO source_chunks ("
@@ -432,39 +438,81 @@ class PostgresIngestionRepository:
                         chunk.created_at,
                     ),
                 )
-            conn.execute(
-                "UPDATE ingestion_jobs"
-                " SET status = 'succeeded', lease_owner = NULL, lease_until = NULL,"
-                "     updated_at = now()"
-                " WHERE job_id = %s",
-                (job.job_id,),
-            )
 
     def fail(self, job: IngestionJob, *, error_code: str, safe_detail: str) -> None:
+        """标为失败。与 `complete` 同一套围栏：**失去租约的一方不得改写
+        新持有者的任务**。
+
+        ⚠️ 这条尤其重要：`fail` 写的是终态。若旧持有者能迟到地把 B 正在处理的
+        任务打成 `failed`，可恢复的状态就被变成了不可恢复 —— 比"不处理"更糟。
+        """
         with worker_transaction(
             tenant_id=job.tenant_id, project_id=job.project_id, dsn=self._worker_dsn
         ) as conn:
-            current = conn.execute(
-                "SELECT status FROM ingestion_jobs WHERE job_id = %s FOR UPDATE",
-                (job.job_id,),
-            ).fetchone()
-            if current is None:
-                raise deny(
-                    ErrorCode.CROSS_TENANT_DENIED, "任务不存在", job_id=job.job_id
-                )
-            if current[0] in (
-                str(IngestionStatus.SUCCEEDED),
-                str(IngestionStatus.FAILED),
-            ):
-                # 终态重复上报是幂等成功：worker 崩溃重放时会走到这里。
-                return
-            conn.execute(
+            settled = conn.execute(
                 "UPDATE ingestion_jobs"
                 " SET status = 'failed', lease_owner = NULL, lease_until = NULL,"
-                "     error_code = %s, error_detail = %s, updated_at = now()"
-                " WHERE job_id = %s",
-                (error_code, safe_detail, job.job_id),
+                "     claim_token = NULL, error_code = %s, error_detail = %s,"
+                "     updated_at = now()"
+                " WHERE job_id = %s AND status = 'processing'"
+                "   AND claim_token = %s AND lease_until > now()"
+                " RETURNING job_id",
+                (error_code, safe_detail, job.job_id, job.claim_token or None),
+            ).fetchone()
+            if settled is None:
+                self._reject_if_claim_is_stale(conn, job, action="fail")
+
+    def _reject_if_claim_is_stale(self, conn, job: IngestionJob, *, action: str) -> None:
+        """条件更新落空时，分清"幂等重放"与"这次认领已经失效"。
+
+        名字刻意不是 `is_...` / `settled_already`：返回布尔的形状容易让调用方
+        忘记看返回值而继续往下写（内存适配器就犯过一次 —— 重复上报因此覆盖了
+        首次记录的 `error_detail`，被契约测试抓下）。这里的形状是
+        "**不抛异常就一定是重复投递**"。
+
+        两种情况的处理**必须相反**：
+
+        - **重复投递**：worker 写完结果、还没确认就被杀，消息重新投递。
+          第二次落定必须**成功返回**，否则重投永远失败。
+        - **认领失效**（仍是 processing，但 token 不是我的）：租约过期后
+          任务被别的 worker 接管了。此时必须报冲突，绝不能改写对方的状态。
+
+        "哪种终态算重复投递"按动作分开，与 0007 的语义保持一致：
+
+        - `complete`：只有 `succeeded` 算重复（结果已经在那里了）；
+          已经是 `failed` 时报冲突 —— 我们要写的是成功结果，而库里记着失败，
+          静默返回会把这个矛盾藏起来。
+        - `fail`：两种终态都算重复上报（worker 崩溃重放时会走到这里）。
+
+        0007 的实现把"幂等重放"与"认领失效"混在"状态不是 processing 就抛错 /
+        是 succeeded 就返回"两个分支里，恰好把第二种情况漏成了
+        "只要状态还是 processing 就照写不误"。
+
+        ⚠️ **已知且刻意的边界**：任务已经被别人落定成 `succeeded` 之后，
+        旧持有者的迟到 `complete` 会得到幂等成功，而不是冲突 —— token 在落定时
+        被清空，事后无法区分"我做的"与"别人做的"。这不改变任何状态、
+        也不会重复写片段（唯一键还在），代价只是旧持有者不知道自己的结果被丢弃。
+        要消除这个代价就得让 token 永久保留，而那是另一个设计
+        （引用需要一个不可变的落定记录，属于后续轮次）。
+        """
+        current = conn.execute(
+            "SELECT status FROM ingestion_jobs WHERE job_id = %s FOR UPDATE",
+            (job.job_id,),
+        ).fetchone()
+        if current is None:
+            raise deny(
+                ErrorCode.CROSS_TENANT_DENIED, "任务不存在", job_id=job.job_id
             )
+        if current[0] == str(IngestionStatus.SUCCEEDED):
+            return
+        if action == "fail" and current[0] == str(IngestionStatus.FAILED):
+            return
+        raise deny(
+            ErrorCode.ILLEGAL_STATE_TRANSITION,
+            "这次认领已经失效（租约过期后任务被重新认领）；"
+            f"不得用 {action} 改写当前持有者的任务",
+            job_id=job.job_id,
+        )
 
 
 def _with_version(document: SourceDocument, version: int) -> SourceDocument:

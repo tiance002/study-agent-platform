@@ -8,7 +8,7 @@
     → 强制 worker 崩溃留下 processing 租约 → 过期租约被回收一次
     → 重复完成不产生重复片段
 
-这里把它拆成**三个**用例：三件性质各自独立成立，合起来才是那条链。
+这里把它拆成**四个**用例：四件性质各自独立成立，合起来才是那条链。
 
 1. `test_ingestion_survives_a_full_platform_restart_and_stays_citable`
    持久化 + 可核验引用。失败模式是"内存里对、重启后就没了"，
@@ -17,6 +17,10 @@
    隔离真的在挡。失败模式是"越权但看起来完全正常"—— 内容读得通，只是不属于你。
 3. `test_crashed_lease_is_reclaimed_once_and_repeated_completion_is_idempotent`
    崩溃可恢复且不重复。失败模式是"重试留下两套片段"或"任务被永久卡住"。
+4. `test_a_timed_out_worker_cannot_settle_the_job_that_was_reclaimed`
+   租约回收之后**旧持有者不能再落定**。失败模式是"A 苏醒后一个 fail
+   把 B 正在处理的任务打成终态" —— 用例 3 全绿也发现不了它
+   （它只证明了 B 能接手，没证明 A 回不来）。
 
 合成一个两百行用例的代价很具体：失败时只知道"某一步挂了"，
 而这三类失败的排查方向完全不同（存储 / 权限 / 并发）。
@@ -37,10 +41,12 @@ from pathlib import Path
 import pg_support
 import psycopg
 import pytest
+from app.core.errors import ErrorCode, PlatformError
 from app.core.hashing import content_hash
 from app.deployment import DeploymentSettings
 from app.identity.models import Principal
 from app.identity.ports import SystemContext
+from app.knowledge.processor import DocumentProcessor
 from app.knowledge.retrieval import RANKING_VERSION
 from app.main import PlatformState, build_platform, create_app
 from app.workers.ingestion import run_once
@@ -133,7 +139,8 @@ def _drain_queue() -> None:
             "UPDATE ingestion_jobs"
             " SET status = 'failed', error_code = 'TEST_DRAIN',"
             "     error_detail = '测试前置：排空遗留任务',"
-            "     lease_owner = NULL, lease_until = NULL"
+                # 认领围栏也要清掉：CHECK 要求"租约三件套"与 processing 同步
+            "     lease_owner = NULL, lease_until = NULL, claim_token = NULL"
             " WHERE status IN ('queued', 'processing')"
         )
 
@@ -483,3 +490,72 @@ def test_crashed_lease_is_reclaimed_once_and_repeated_completion_is_idempotent(t
     assert stage.platform.ingestion.get_job(
         stage.actor, stage.project_id, stage.job_id
     ).attempt_count == 2
+
+
+# ------------------------------------- 四、旧持有者不能落定被接管的任务
+
+
+def test_a_timed_out_worker_cannot_settle_the_job_that_was_reclaimed(tmp_path):
+    """A 认领 → 租约过期 → B 接管 → **A 的迟到落定被拒绝**，B 照常完成。
+
+    与用例三的区别很关键：用例三问"崩溃之后能不能恢复"，本用例问
+    "恢复之后**旧持有者还能不能回来改**"。只回答前者的话，一条
+    "A 超时 → B 接管 → A 一个 fail 把 B 正在处理的任务打成终态"的缺陷
+    会完全藏在绿色里 —— 而那正是 R4-02 实测复现的时序。
+
+    用 `_expire_lease` 而不是 `sleep`：租约过期的定义就是"到期时间落在
+    `now()` 之前"，直接改那一列是这句定义的逐字实现，不需要等 300 秒。
+    """
+    stage = _stage(tmp_path)
+
+    stale = stage.platform.ingestion.claim_next(
+        worker_id="r4-slow-" + stage.suffix, lease_seconds=300
+    )
+    assert stale is not None and stale.job_id == stage.job_id
+    assert stale.claim_token, "认领必须产生围栏 token"
+
+    _expire_lease(stage.job_id)
+
+    takeover = stage.platform.ingestion.claim_next(
+        worker_id="r4-fast-" + stage.suffix, lease_seconds=300
+    )
+    assert takeover is not None and takeover.job_id == stage.job_id
+    assert takeover.attempt_count == 2, "接管恰好发生一次"
+    assert takeover.claim_token != stale.claim_token, "代次必须换一个 token"
+
+    document = stage.platform.ingestion.load_document(takeover)
+    chunks = DocumentProcessor().parse(document)
+
+    # ------------------------------------- A 苏醒：两条落定路径都必须被拒绝
+    with pytest.raises(PlatformError) as excinfo:
+        stage.platform.ingestion.complete(stale, chunks)
+    assert excinfo.value.code is ErrorCode.ILLEGAL_STATE_TRANSITION
+
+    with pytest.raises(PlatformError) as excinfo:
+        stage.platform.ingestion.fail(
+            stale, error_code="PARSE_FAILED", safe_detail="迟到的失败上报"
+        )
+    assert excinfo.value.code is ErrorCode.ILLEGAL_STATE_TRANSITION
+
+    # B 的任务逐字段未变，且一条片段都没被 A 写进去。
+    held = stage.client.get(
+        f"/projects/{stage.project_id}/ingestion-jobs/{stage.job_id}"
+    ).json()
+    assert held["status"] == "processing"
+    assert held["attempt_count"] == 2
+    assert held["error_code"] == ""
+    assert stage.platform.ingestion.stored_chunks(stage.actor, stage.project_id) == ()
+
+    # 阳性对照：B 自己**能**落定。没有它，上面那些"没变"在任务彻底卡死时
+    # （谁都写不进去）也会全部通过。
+    stage.platform.ingestion.complete(takeover, chunks)
+
+    settled = stage.client.get(
+        f"/projects/{stage.project_id}/ingestion-jobs/{stage.job_id}"
+    ).json()
+    assert settled["status"] == "succeeded"
+    stored = stage.platform.ingestion.stored_chunks(stage.actor, stage.project_id)
+    assert len(stored) == len(chunks), "片段恰好写了一套"
+    assert {item.content_hash for item in stored} == {
+        item.content_hash for item in chunks
+    }

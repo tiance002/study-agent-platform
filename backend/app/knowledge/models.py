@@ -260,6 +260,14 @@ class IngestionJob:
     #: 持有租约的 worker 标识。空串表示没有租约（DB 里是 NULL）。
     lease_owner: str = ""
     lease_until: datetime | None = None
+    #: **认领围栏 token**：每次认领生成一个不可复用的值，`complete` / `fail`
+    #: 必须带上它才能落定。
+    #:
+    #: 为什么不拿 `lease_owner` 当代次：`--worker-id` 由运维提供，同一个进程
+    #: 重启后是同一个名字 —— "同一个名字"不等于"同一代持有者"。而租约只规定
+    #: "谁能认领"，不规定"谁能落定"：A 超时、B 接管之后，A 迟到的 `fail`
+    #: 能把 B 正在处理的任务打成 `failed`（内存适配器实测复现）。
+    claim_token: str = ""
     #: 稳定错误码与**安全**描述。原始异常文本可能含路径、SQL 片段等内容，
     #: 一律不进这里 —— 它会被状态接口原样返回给用户。
     error_code: str = ""
@@ -278,6 +286,7 @@ class IngestionJob:
         if self.updated_at < self.created_at:
             raise ValueError("updated_at 不能早于 created_at")
         require_text(self.lease_owner, "lease_owner", allow_empty=True)
+        require_text(self.claim_token, "claim_token", allow_empty=True)
         require_text(self.error_code, "error_code", allow_empty=True)
         require_text(self.error_detail, "error_detail", allow_empty=True)
 
@@ -289,10 +298,19 @@ class IngestionJob:
                     "processing 的任务必须有租约到期时间 —— 否则崩溃后无人可回收"
                 )
             require_aware(self.lease_until, "lease_until")
-        elif self.lease_owner or self.lease_until is not None:
+            if not self.claim_token.strip():
+                # 没有 token 的 processing 任务**永远无法落定**：`complete` / `fail`
+                # 的条件更新要求 token 匹配，而它匹配不上任何值。任务会静默卡死
+                # 到租约回收，然后被重新认领 —— 那时它才拿到 token。
+                # 把它挡在构造期，问题就停在写入之前，而不是留给排障。
+                raise ValueError(
+                    "processing 的任务必须带认领 token（claim_token）—— "
+                    "否则这次认领无法被落定，任务只能等租约回收"
+                )
+        elif self.lease_owner or self.lease_until is not None or self.claim_token:
             raise ValueError(
-                f"只有 processing 的任务可以携带租约，当前状态是 {self.status!r}；"
-                "终态还挂着租约会让回收逻辑把它重新捞起来"
+                f"只有 processing 的任务可以携带租约与认领 token，当前状态是 "
+                f"{self.status!r}；终态还挂着它们会让回收逻辑把它重新捞起来"
             )
 
         if self.status is IngestionStatus.FAILED:

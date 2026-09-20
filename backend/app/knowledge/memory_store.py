@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import threading
+import uuid
 from dataclasses import replace
 from datetime import timedelta
 
@@ -196,28 +197,25 @@ class InMemoryIngestionRepository:
                 attempt_count=job.attempt_count + 1,
                 lease_owner=worker_id,
                 lease_until=now + timedelta(seconds=lease_seconds),
+                # 每次认领一个新的、不可复用的围栏 token（见 `complete`）。
+                claim_token=uuid.uuid4().hex,
                 updated_at=now,
             )
             self._jobs[job.job_id] = claimed
             return claimed
 
     def complete(self, job: IngestionJob, chunks: tuple[StoredChunk, ...]) -> None:
+        assert_chunks_belong_to_job(job, chunks)
         with self._lock:
             current = self._jobs.get(job.job_id)
             if current is None:
                 raise deny(
                     ErrorCode.CROSS_TENANT_DENIED, "任务不存在", job_id=job.job_id
                 )
-            if current.status is IngestionStatus.SUCCEEDED:
-                # 重复投递：结果已经落定，直接返回既有状态，不追加片段。
+            if not self._holds_settlement_rights(current, job):
+                self._reject_if_claim_is_stale(current, job, action="complete")
+                # 走到这里 = 任务已是 succeeded：重复投递，直接返回既有状态。
                 return
-            if current.status is not IngestionStatus.PROCESSING:
-                raise deny(
-                    ErrorCode.ILLEGAL_STATE_TRANSITION,
-                    f"只能完成 processing 的任务，当前是 {current.status}",
-                    job_id=job.job_id,
-                )
-            assert_chunks_belong_to_job(current, chunks)
             self._assert_chunk_slots_free(current, chunks)
             for chunk in chunks:
                 self._chunks[chunk.chunk_id] = chunk
@@ -227,6 +225,7 @@ class InMemoryIngestionRepository:
                 status=IngestionStatus.SUCCEEDED,
                 lease_owner="",
                 lease_until=None,
+                claim_token="",
                 updated_at=self._clock.now(),
             )
 
@@ -237,20 +236,77 @@ class InMemoryIngestionRepository:
                 raise deny(
                     ErrorCode.CROSS_TENANT_DENIED, "任务不存在", job_id=job.job_id
                 )
-            if current.is_terminal:
-                # 终态重复上报是幂等成功：worker 崩溃重放时会走到这里。
+            if not self._holds_settlement_rights(current, job):
+                self._reject_if_claim_is_stale(current, job, action="fail")
+                # 走到这里 = 终态重复上报：幂等成功，**不覆盖**首次记录的错误。
                 return
             self._jobs[job.job_id] = replace(
                 current,
                 status=IngestionStatus.FAILED,
                 lease_owner="",
                 lease_until=None,
+                claim_token="",
                 error_code=error_code,
                 error_detail=safe_detail,
                 updated_at=self._clock.now(),
             )
 
     # ------------------------------------------------------------------ 内部
+
+    def _holds_settlement_rights(
+        self, current: IngestionJob, claim: IngestionJob
+    ) -> bool:
+        """这次认领现在**仍然有权**落定吗（状态 + token + 未过期的租约）。
+
+        三个条件缺一不可：
+
+        - **状态**：`processing` 之外没有可落定的东西；
+        - **token**：`lease_owner` 由运维提供（`--worker-id`），同一个进程重启后
+          是同一个名字 —— "同一个名字"不等于"同一代持有者"，只有不可复用的
+          token 才能分辨；
+        - **期限**：过了期的持有者不该再落定任何东西，即使 token 还对。
+        """
+        return (
+            current.status is IngestionStatus.PROCESSING
+            and current.claim_token != ""
+            and current.claim_token == claim.claim_token
+            and current.lease_until is not None
+            and self._clock.now() < current.lease_until
+        )
+
+    def _reject_if_claim_is_stale(
+        self, current: IngestionJob, job: IngestionJob, *, action: str
+    ) -> None:
+        """条件落空时分辨两种情况，**只有当这次调用是重复投递时才正常返回**。
+
+        名字刻意不是 `is_...` / `settled_already`：那种返回布尔的形状，
+        调用方容易忘记看返回值而继续往下写 —— 本适配器就犯过一次
+        （重复上报因此覆盖了首次记录的 `error_detail`，被契约测试抓下）。
+        这里的形状是"**不抛异常就一定是重复投递**"，忘不掉。
+
+        两种情况的处理必须相反：
+
+        - 重复投递 → 正常返回（幂等成功）；
+        - 这次认领已失效 → 抛冲突（绝不能改写新持有者的任务，
+          而它可能正在被正常处理）。
+
+        "哪种终态算重复投递"按动作分开，与 0007 的语义保持一致：
+
+        - `complete`：只有 `succeeded` 算重复（结果已经在那里了）；
+          已经是 `failed` 时**报冲突** —— 我们要写的是成功结果，而库里
+          记着失败，静默返回会把这个矛盾藏起来。
+        - `fail`：两种终态都算重复上报（worker 崩溃重放时会走到这里）。
+        """
+        if current.status is IngestionStatus.SUCCEEDED:
+            return
+        if action == "fail" and current.status is IngestionStatus.FAILED:
+            return
+        raise deny(
+            ErrorCode.ILLEGAL_STATE_TRANSITION,
+            "这次认领已经失效（租约过期后任务被重新认领）；"
+            f"不得用 {action} 改写当前持有者的任务",
+            job_id=job.job_id,
+        )
 
     def _assert_chunk_slots_free(
         self, job: IngestionJob, chunks: tuple[StoredChunk, ...]

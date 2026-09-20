@@ -307,8 +307,9 @@ def seed_job(dsn: str, *, status: str = "queued", tag: str | None = None) -> See
         )
         conn.execute(
             "INSERT INTO ingestion_jobs (job_id, tenant_id, project_id, source_id,"
-            " document_id, status, attempt_count, lease_owner, lease_until)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            " document_id, status, attempt_count, lease_owner, lease_until,"
+            " claim_token)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 ids.job_id,
                 ids.tenant_id,
@@ -319,6 +320,9 @@ def seed_job(dsn: str, *, status: str = "queued", tag: str | None = None) -> See
                 1 if processing else 0,
                 "sentinel-holder" if processing else None,
                 datetime.now(timezone.utc) + SENTINEL_LEASE if processing else None,
+                # processing 行必须带认领围栏（0009 的 CHECK）——
+                # 少了它连插入都会被拒绝，而拒绝比"插进去一条永远无法落定的任务"好。
+                uuid.uuid4() if processing else None,
             ),
         )
     return ids

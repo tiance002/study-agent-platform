@@ -89,6 +89,9 @@ class IngestionRepository(Protocol):
 
         实现必须用 `FOR UPDATE SKIP LOCKED` 单条 SQL 完成"选 + 占"：
         「先查后占」是 check-then-act，两个 worker 会认领同一个任务。
+
+        返回的 `claim_token` 是这一代的**围栏**：每次认领换一个新的、
+        不可复用的值，`complete` / `fail` 必须带上它才能落定。
         """
         ...
 
@@ -102,14 +105,27 @@ class IngestionRepository(Protocol):
     def complete(self, job: IngestionJob, chunks: tuple[StoredChunk, ...]) -> None:
         """把片段集合与任务终态**在同一事务**写入。
 
+        ⚠️ **必须持有仍然有效的认领**：`job.claim_token` 要等于库里的那一代，
+        状态要是 `processing`，租约也还没过期。三者是**一条条件更新**里的
+        判定，不是"先查再写"。
+
+        为什么：租约只规定"谁能认领"，不规定"谁能落定"。A 超时、B 接管之后，
+        A 迟到的 `complete` 会抢先落结果，B 写的东西没人知道是谁写的
+        （R4-02 实测复现）。`lease_owner` 不能当代次 —— 它是运维给的
+        `--worker-id`，同一个进程重启后是同一个名字。
+
         幂等：任务已经是 `succeeded` 时直接返回既有结果，不重复插入片段 ——
-        重复投递（worker 完成写入后进程被杀、消息重新投递）必须是幂等成功，
-        而不是留下两套片段或报唯一键冲突。
+        重复投递（worker 完成写入后进程被杀、消息重新投递）必须是幂等成功。
+        **但这与"认领失效"是两件相反的事**：后者必须抛
+        `ILLEGAL_STATE_TRANSITION`，绝不能改写新持有者的任务。
         """
         ...
 
     def fail(self, job: IngestionJob, *, error_code: str, safe_detail: str) -> None:
         """把任务标为 `failed` 并记下稳定错误码与**安全**描述。
+
+        与 `complete` 同一套认领围栏。这条尤其重要：`fail` 写的是**终态**，
+        旧持有者迟到的一次上报会把"可恢复"变成"不可恢复" —— 比不处理更糟。
 
         `safe_detail` 会被状态接口原样返回给用户，因此不得包含原始异常文本、
         文件路径或 SQL 片段。已经是终态的任务重复调用是幂等成功。

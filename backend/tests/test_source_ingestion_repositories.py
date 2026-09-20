@@ -65,7 +65,8 @@ def _drain_queue() -> None:
                 "UPDATE ingestion_jobs"
                 " SET status = 'failed', error_code = 'TEST_DRAIN',"
                 "     error_detail = '测试前置：排空遗留任务',"
-                "     lease_owner = NULL, lease_until = NULL"
+                # 认领围栏也要清掉：CHECK 要求"租约三件套"与 processing 同步
+                "     lease_owner = NULL, lease_until = NULL, claim_token = NULL"
                 " WHERE status IN ('queued', 'processing')"
             )
 
@@ -475,6 +476,117 @@ def test_fail_is_terminal_and_idempotent(env):
     assert env.ingestion.claim_next(worker_id="worker-b", lease_seconds=300) is None
 
 
+# ------------------------------------------------------------------ 认领围栏
+
+
+@pytest.mark.invariant
+def test_a_stale_claim_cannot_settle_a_reclaimed_job(env):
+    """A 超时 → B 接管 → **A 的迟到落定必须被拒绝**（R4-02）。
+
+    为什么必须单独测：单独测"租约过期可回收"只证明了 B 能接手，
+    测不出"回收之后 A 还能不能回来改"。而后者才是真实故障 ——
+    任务被 B 正常处理着，A 苏醒后一个 `fail` 把它打成终态，
+    可恢复的状态就变成了不可恢复。
+
+    用 `lease_seconds=0` 造"已经过期的认领"，而不是 `sleep`：
+    租约过期的定义就是"到期时间落在现在之前"，把那一次认领的期限设为 0
+    是这句话的逐字实现，不需要等。
+    """
+    project_id = _project(env)
+    source = _register(env, project_id)
+    document, job = _enqueue(env, project_id, source.source_id)
+
+    stale = env.ingestion.claim_next(worker_id="worker-a", lease_seconds=0)
+    assert stale is not None and stale.job_id == job.job_id
+    assert stale.claim_token, "认领必须产生一个不可复用的围栏 token"
+
+    takeover = env.ingestion.claim_next(worker_id="worker-b", lease_seconds=300)
+    assert takeover is not None and takeover.job_id == job.job_id
+    assert takeover.attempt_count == 2, "接管恰好发生一次"
+    assert takeover.claim_token != stale.claim_token, "每次认领必须换一个 token"
+
+    chunks = _chunks_for(document, [(0, 5), (5, 10)])
+
+    with pytest.raises(PlatformError) as excinfo:
+        env.ingestion.complete(stale, chunks)
+    assert excinfo.value.code is ErrorCode.ILLEGAL_STATE_TRANSITION
+
+    with pytest.raises(PlatformError) as excinfo:
+        env.ingestion.fail(stale, error_code="PARSE_FAILED", safe_detail="迟到的失败上报")
+    assert excinfo.value.code is ErrorCode.ILLEGAL_STATE_TRANSITION
+
+    # B 的任务**逐字段未变**：状态、代次、持有者、错误码，片段一条没写。
+    held = env.ingestion.get_job(_alice(), project_id, job.job_id)
+    assert held.status is IngestionStatus.PROCESSING
+    assert held.attempt_count == 2
+    assert held.lease_owner == "worker-b"
+    assert held.claim_token == takeover.claim_token
+    assert held.error_code == ""
+    assert env.ingestion.stored_chunks(_alice(), project_id) == ()
+
+    # 阳性对照：B 自己**能**落定。没有这一条，上面那些"没变"在任务
+    # 彻底卡死（谁都写不进去）时也会全部通过。
+    env.ingestion.complete(takeover, chunks)
+    settled = env.ingestion.get_job(_alice(), project_id, job.job_id)
+    assert settled.status is IngestionStatus.SUCCEEDED
+    assert settled.claim_token == "", "落定后不再持有认领"
+    assert env.ingestion.stored_chunks(_alice(), project_id) == chunks
+
+
+@pytest.mark.invariant
+def test_the_same_worker_id_does_not_make_a_stale_claim_current(env):
+    """两次认领用**同一个 worker_id** 时，旧代次照样被拒。
+
+    `--worker-id` 由运维提供，同一个进程重启后是同一个名字。拿名字当代次，
+    等于"重启后用同一个 id 就能改写接手者的任务"。所以代次要由
+    **不可复用的 token** 表示，而不是由身份标识表示。
+    """
+    project_id = _project(env)
+    source = _register(env, project_id)
+    document, job = _enqueue(env, project_id, source.source_id)
+
+    stale = env.ingestion.claim_next(worker_id="worker-same", lease_seconds=0)
+    assert stale is not None
+    takeover = env.ingestion.claim_next(worker_id="worker-same", lease_seconds=300)
+    assert takeover is not None and takeover.job_id == job.job_id
+    assert takeover.lease_owner == stale.lease_owner, "前提：两次的名字确实相同"
+    assert takeover.claim_token != stale.claim_token
+
+    with pytest.raises(PlatformError) as excinfo:
+        env.ingestion.complete(stale, _chunks_for(document, [(0, 5)]))
+    assert excinfo.value.code is ErrorCode.ILLEGAL_STATE_TRANSITION
+    assert (
+        env.ingestion.get_job(_alice(), project_id, job.job_id).status
+        is IngestionStatus.PROCESSING
+    )
+
+
+@pytest.mark.invariant
+def test_an_expired_claim_cannot_settle_even_before_anyone_takes_over(env):
+    """租约过期、**还没人接管**时，旧持有者也不能落定。
+
+    这一条把"期限"与"token 匹配"分开验证：token 完全正确，
+    但它已经不作数了 —— 条件是"**仍然**持有有效的认领"，不是"曾经持有过"。
+    """
+    project_id = _project(env)
+    source = _register(env, project_id)
+    document, job = _enqueue(env, project_id, source.source_id)
+
+    expired = env.ingestion.claim_next(worker_id="worker-a", lease_seconds=0)
+    assert expired is not None and expired.claim_token
+
+    with pytest.raises(PlatformError) as excinfo:
+        env.ingestion.complete(expired, _chunks_for(document, [(0, 5)]))
+    assert excinfo.value.code is ErrorCode.ILLEGAL_STATE_TRANSITION
+
+    # 任务回到"可被认领"的状态，而不是被写成某个终态。
+    assert (
+        env.ingestion.get_job(_alice(), project_id, job.job_id).status
+        is IngestionStatus.PROCESSING
+    )
+    assert env.ingestion.stored_chunks(_alice(), project_id) == ()
+
+
 # ------------------------------------------------------------------ 隔离
 
 
@@ -572,6 +684,56 @@ def _as_contract_text(privileges: set[str]) -> str:
     unknown = privileges - set(_PRIVILEGE_ORDER)
     assert not unknown, f"出现契约写法没覆盖的权限：{sorted(unknown)}"
     return ", ".join(name for name in _PRIVILEGE_ORDER if name in privileges)
+
+
+def _contract_columns() -> dict[str, list[str]]:
+    """从生成的 `sql-schema.md`「列明细」里读每张表的列名（按顺序）。
+
+    列明细是 3 列的行（表 / 列 / 类型），表总览是 6 列 —— 用列数区分，
+    不去匹配小节标题：标题文字会变，而行形状由模板决定。
+    """
+    path = (
+        Path(__file__).resolve().parents[2] / "docs" / "skills" / "contracts" / "sql-schema.md"
+    )
+    found: dict[str, list[str]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if len(cells) != 3:
+            continue
+        found.setdefault(cells[0].strip("`"), []).append(cells[1].strip("`"))
+    return found
+
+
+@pytest.mark.postgres
+@pytest.mark.invariant
+def test_contract_columns_match_the_database():
+    """契约里的列必须与数据库**逐列一致**（列名与顺序）。
+
+    为什么需要这一条：`gen_contracts.py` 靠正则读迁移里的
+    `ALTER TABLE ... ADD COLUMN`。迁移若用 f-string 插值表名，
+    正则一条也匹配不上 —— 契约少一列，而**没有任何东西报警**
+    （实测 0009 的 `claim_token` 就这样被漏掉过）。
+
+    "文档说有哪些字段"与"库里有什么"分家时，读文档的人无从分辨；
+    所以这里直接查数据库比对，而不是读迁移里的声明（铁律 34）。
+    """
+    tables = ("source_documents", "ingestion_jobs", "source_chunks")
+    contract = _contract_columns()
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
+        for table in tables:
+            rows = conn.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_name = %s ORDER BY ordinal_position",
+                (table,),
+            ).fetchall()
+            actual = [row[0] for row in rows]
+            assert contract.get(table) == actual, (
+                f"{table} 的列明细与数据库不一致：契约 {contract.get(table)}"
+                f" vs 数据库 {actual}。生成器解析不了这种迁移写法，"
+                "或者有人手改了生成区"
+            )
 
 
 def _contract_role_grants() -> dict[str, dict[str, str]]:
