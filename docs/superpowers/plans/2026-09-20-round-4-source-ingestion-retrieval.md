@@ -35,7 +35,7 @@
 - Produces tables: `source_documents`, `ingestion_jobs`, `source_chunks` with tenant/project composite foreign keys and FORCE RLS.
 - `source_documents` and `source_chunks` are immutable to `study_app`; `ingestion_jobs` exposes only the columns needed for state transitions.
 
-- [ ] **Step 1: Write failing migration and repository contract tests**
+- [x] **Step 1: Write failing migration and repository contract tests**
 
 ```python
 def test_enqueue_and_claim_are_project_scoped(env):
@@ -50,13 +50,13 @@ def test_cross_project_worker_cannot_attach_chunks(env):
     assert exc.value.code is ErrorCode.CROSS_PROJECT_DENIED
 ```
 
-- [ ] **Step 2: Run the tests and confirm the missing contract failure**
+- [x] **Step 2: Run the tests and confirm the missing contract failure**
 
 Run: `.\.venv\Scripts\python.exe -m pytest backend/tests/test_source_ingestion_repositories.py -q`
 
 Expected: collection fails because `app.knowledge.models` and `IngestionRepository` do not exist.
 
-- [ ] **Step 3: Add migration `0007`**
+- [x] **Step 3: Add migration `0007`**
 
 Create these columns and constraints exactly:
 
@@ -86,7 +86,7 @@ source_chunks:
 
 Add composite foreign keys back to `projects`, `sources`, and `source_documents`; enable and force RLS on all three tables. Grant `source_documents` SELECT/INSERT, `source_chunks` SELECT/INSERT, and narrowly scoped `ingestion_jobs` SELECT/INSERT/UPDATE to `study_app`. Downgrade must remove all policies, tables, indexes, and grants in reverse order.
 
-- [ ] **Step 4: Implement domain models and the port**
+- [x] **Step 4: Implement domain models and the port**
 
 ```python
 class IngestionRepository(Protocol):
@@ -101,7 +101,7 @@ class IngestionRepository(Protocol):
 
 Validate enum values and aware timestamps in `__post_init__`; expose no update/delete method for documents or chunks.
 
-- [ ] **Step 5: Implement memory and PostgreSQL adapters under the same tests**
+- [x] **Step 5: Implement memory and PostgreSQL adapters under the same tests**
 
 For PostgreSQL claim, use one transaction:
 
@@ -117,7 +117,7 @@ LIMIT 1;
 
 Then conditionally update the selected row to `processing`, increment `attempt_count`, and set the lease. `complete()` must insert all chunks and transition the job to `succeeded` in one transaction; a duplicate delivery must return the existing succeeded state without duplicating chunks.
 
-- [ ] **Step 6: Run repository, RLS, migration, lint, and type gates**
+- [x] **Step 6: Run repository, RLS, migration, lint, and type gates**
 
 Run:
 
@@ -129,7 +129,7 @@ Run:
 
 Expected: memory and PostgreSQL cases pass with no skips while local PG is running.
 
-- [ ] **Step 7: Commit Task 12**
+- [x] **Step 7: Commit Task 12**
 
 ```powershell
 git add alembic/versions/0007_source_ingestion.py backend/app/knowledge backend/app/main.py backend/tests/test_source_ingestion_repositories.py
@@ -153,7 +153,7 @@ git commit -m "feat: add durable source ingestion storage"
 - Produces: `DocumentProcessor.parse(document) -> tuple[StoredChunk, ...]`.
 - Produces endpoints `POST /projects/{project_id}/sources/{source_id}/content` and `GET /projects/{project_id}/ingestion-jobs/{job_id}`.
 
-- [ ] **Step 1: Write processor boundary tests before implementation**
+- [x] **Step 1: Write processor boundary tests before implementation**
 
 ```python
 def test_markdown_chunks_preserve_exact_source_spans():
@@ -170,17 +170,17 @@ def test_oversized_section_splits_on_paragraph_boundaries():
     assert [chunk.chunk_index for chunk in chunks] == list(range(len(chunks)))
 ```
 
-- [ ] **Step 2: Run tests and confirm `DocumentProcessor` is missing**
+- [x] **Step 2: Run tests and confirm `DocumentProcessor` is missing**
 
 Run: `.\.venv\Scripts\python.exe -m pytest backend/tests/test_document_processor.py -q`
 
 Expected: FAIL at import/collection.
 
-- [ ] **Step 3: Implement Markdown/plain-text structural parsing**
+- [x] **Step 3: Implement Markdown/plain-text structural parsing**
 
 Recognize ATX headings (`#` through `######`), blank-line paragraphs, fenced code blocks, lists, and tables without rewriting their text. Build heading paths with a stack. Split only sections over 4,000 characters, prefer paragraph boundaries, use at most 200 characters of overlap, and compute spans against the original document. Reject invalid UTF-8 before this boundary; do not guess titles or language.
 
-- [ ] **Step 4: Write API tests for enqueue, replay, status, and input limits**
+- [x] **Step 4: Write API tests for enqueue, replay, status, and input limits**
 
 ```python
 def test_cookie_user_enqueues_content_idempotently(cookie_user, source):
@@ -195,7 +195,7 @@ def test_content_over_one_mib_is_rejected_before_enqueue(cookie_user, source):
     assert response.status_code == 422
 ```
 
-- [ ] **Step 5: Implement enqueue and status endpoints**
+- [x] **Step 5: Implement enqueue and status endpoints**
 
 Request model:
 
@@ -210,11 +210,11 @@ class SourceContentBody(BaseModel):
 
 The POST command must use `idempotent_write`, return `202`, and never call `DocumentProcessor`. Status returns only stable state, attempt count, safe error code/detail, and timestamps.
 
-- [ ] **Step 6: Implement one-shot worker command**
+- [x] **Step 6: Implement one-shot worker command**
 
 `python -m app.workers.ingestion --once` claims at most one job, loads the immutable document, parses it, and calls `complete`. Expected parse/input failures call `fail` with a stable code and safe detail; unexpected exceptions release only by lease expiry and exit nonzero so supervision can detect the crash.
 
-- [ ] **Step 7: Verify and commit Task 13**
+- [x] **Step 7: Verify and commit Task 13**
 
 Run:
 
@@ -249,7 +249,7 @@ git commit -m "feat: process uploaded learning sources"
 - Produces endpoints `POST /projects/{project_id}/knowledge/search` and `GET /projects/{project_id}/sources/{source_id}/span?start=&end=`.
 - Search response contains `retrieval_health`, conservative `evidence_assessment`, hits, and `ArtifactRef` citations.
 
-- [ ] **Step 1: Write isolation, ranking, and citation tests**
+- [x] **Step 1: Write isolation, ranking, and citation tests**
 
 ```python
 def test_search_filters_scope_inside_repository(pg_knowledge):
@@ -265,25 +265,34 @@ def test_each_hit_can_be_verified_against_exact_span(pg_knowledge):
     assert content_hash(exact.content) == hit.content_hash
 ```
 
-- [ ] **Step 2: Run the tests and confirm no PostgreSQL knowledge adapter exists**
+- [x] **Step 2: Run the tests and confirm no PostgreSQL knowledge adapter exists**
 
 Run: `.\.venv\Scripts\python.exe -m pytest backend/tests/test_knowledge_search.py -q`
 
 Expected: FAIL at missing `PostgresKnowledgeRepository`.
 
-- [ ] **Step 3: Implement deterministic baseline ranking**
+> **实施偏差（保留原文以便对照）**：计划假设存在一个按后端分叉的知识适配器，实际落地时**没有**
+> `PostgresKnowledgeRepository`。检索这一层是纯 Python 整数打分，没有任何后端相关逻辑；
+> 真正按后端分叉的是**隔离**，而它已经住在 `IngestionRepository` 里（内存版靠类内判定，
+> PostgreSQL 版靠 FORCE RLS + 组合外键）。硬写第二份实现只能把同一段排序代码再抄一遍，
+> 于是"两个适配器行为一致"从「结构相同」退化成「两份代码碰巧一样」。
+> 现在只有 `KnowledgeRepository`（`app/knowledge/store.py`），
+> 隔离与回读断言在**两个** `IngestionRepository` 实现上各跑一遍。
+> 理由写在 `store.py` 的模块 docstring 里。
+
+- [x] **Step 3: Implement deterministic baseline ranking**
 
 Normalize Unicode with NFKC and lowercasing. Preserve the original query and derive additive terms from whitespace/punctuation runs plus Chinese 2-grams. SQL must include tenant/project predicates under FORCE RLS before scoring. Score exact phrase, title/heading matches, and content term matches with fixed integer weights; tie-break by `source_id`, `chunk_index`. Do not label the result `supported` merely because hits exist.
 
-- [ ] **Step 4: Add search and exact-span APIs**
+- [x] **Step 4: Add search and exact-span APIs**
 
 Search request: `query` 1..2,000 chars and `limit` 1..20. Build `ArtifactRef` directly from stored hash/span/parser/display policy. Pass deterministic signals to `assess_retrieval`; because this round has no frozen claim set, return `insufficient + MISSING_SUPPORT` alongside a healthy retrieval process. Exact span must return 404 for missing, cross-project, and cross-tenant rows with identical public wording.
 
-- [ ] **Step 5: Add a frozen retrieval fixture and baseline gate**
+- [x] **Step 5: Add a frozen retrieval fixture and baseline gate**
 
 `retrieval_v1.json` must contain at least 20 Chinese queries across paragraph, heading, code, and no-hit cases with expected source/chunk ids. Add a test calculating recall@5 and MRR; freeze the initial observed baseline as the minimum. Any tokenizer, chunker, parser, or ranking version change must rerun this fixture.
 
-- [ ] **Step 6: Add PostgreSQL restart and failure recovery exit test**
+- [x] **Step 6: Add PostgreSQL restart and failure recovery exit test**
 
 The test must execute:
 
@@ -296,7 +305,7 @@ cookie login -> create project -> register source -> upload Markdown -> API retu
 -> repeated completion produces no duplicate chunks
 ```
 
-- [ ] **Step 7: Run all release gates**
+- [x] **Step 7: Run all release gates**
 
 Run:
 
@@ -310,7 +319,7 @@ git diff --check
 
 Additionally create a temporary database and prove `upgrade 0006 -> 0007 -> downgrade 0006 -> upgrade 0007`; PostgreSQL tests may not skip.
 
-- [ ] **Step 8: Update records, commit, and push Round 4**
+- [x] **Step 8: Update records, commit, and push Round 4**
 
 Mark Round 4 complete in `task_plan.md`, append exact commands/results and test counts to `progress.md`, and record retrieval limitations in `findings.md`. Then:
 

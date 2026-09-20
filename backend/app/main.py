@@ -86,6 +86,7 @@ from app.identity.session import SessionIssuer
 from app.knowledge.memory_store import InMemoryIngestionRepository
 from app.knowledge.ports import IngestionRepository
 from app.knowledge.retrieval import ChunkIndex
+from app.knowledge.store import KnowledgeRepository
 from app.learning.evidence import EvidenceLog
 from app.learning.loop_store import InMemoryLearningLoopRepository
 from app.learning.memory_store import InMemoryEvidenceRepository
@@ -155,6 +156,11 @@ class PlatformState:
     # 资料摄取：原文、摄取任务与可引用片段。必填同理 —— 上传端点不能等
     # 第一个请求才暴露装配缺失。
     ingestion: IngestionRepository
+    # 项目内检索：作用域收窄 + 确定性排序 + 保守的证据判定。
+    # 它没有后端分支（排序是纯函数，隔离由 ingestion 承担），所以
+    # 两个分支里构造出来的其实是同一个类 —— 这一点写在装配处，免得
+    # 后来的人以为"少装配了一个 PG 版"。
+    knowledge: KnowledgeRepository
     #: 会话 cookie 的有效期（也是兑换出的数据库会话的过期时间）。
     session_ttl: timedelta = DEFAULT_SESSION_TTL
     #: 生产环境置 True（HTTPS-only cookie）。测试与本机开发保持 False：
@@ -257,6 +263,7 @@ def build_platform(
     evidence: EvidenceRepository
     learning_loop: LearningLoopRepository
     ingestion: IngestionRepository
+    knowledge: KnowledgeRepository
     audit_outbox: AuditOutbox
 
     if loaded.use_postgres:
@@ -282,6 +289,7 @@ def build_platform(
         ingestion = PostgresIngestionRepository(
             membership=membership, clock=clock, dsn=dsn
         )
+        knowledge = KnowledgeRepository(ingestion=ingestion)
         rate_limiter: RateLimiter = PostgresRateLimiter(
             limit=loaded.exchange_limit,
             window_seconds=loaded.exchange_window_seconds,
@@ -325,6 +333,7 @@ def build_platform(
             evidence=evidence,
             learning_loop=learning_loop,
             ingestion=ingestion,
+            knowledge=knowledge,
             session_ttl=loaded.session_ttl,
             cookie_secure=loaded.cookie_secure,
             rate_limiter=rate_limiter,
@@ -358,6 +367,7 @@ def build_platform(
     ingestion = InMemoryIngestionRepository(
         membership=membership, products=products, clock=clock
     )
+    knowledge = KnowledgeRepository(ingestion=ingestion)
     rate_limiter = InMemoryRateLimiter(
         limit=loaded.exchange_limit,
         window_seconds=loaded.exchange_window_seconds,
@@ -399,6 +409,7 @@ def build_platform(
         evidence=evidence,
         learning_loop=learning_loop,
         ingestion=ingestion,
+        knowledge=knowledge,
         session_ttl=loaded.session_ttl,
         cookie_secure=loaded.cookie_secure,
         rate_limiter=rate_limiter,

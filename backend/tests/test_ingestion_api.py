@@ -19,13 +19,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta
 from pathlib import Path
 
 import pytest
 from app.core.errors import ERROR_PAYLOAD_KEYS
 from app.identity.models import Principal
-from app.identity.ports import SystemContext
 from app.knowledge.models import MAX_DOCUMENT_BYTES
 from app.main import DEMO_PRINCIPAL, DEMO_TENANT
 from app.workers.ingestion import Outcome, main, run_once
@@ -49,12 +47,6 @@ def _keyed(key: str | None = None) -> dict:
     return {**ORIGIN, "Idempotency-Key": key or "ing-" + uuid.uuid4().hex}
 
 
-def _hash(raw: str) -> str:
-    import hashlib
-
-    return f"sha256:{hashlib.sha256(raw.encode()).hexdigest()}"
-
-
 def _content_path(project_id: str, source_id: str) -> str:
     return CONTENT_PATH.format(project=project_id, source=source_id)
 
@@ -64,28 +56,15 @@ def _job_path(project_id: str, job_id: str) -> str:
 
 
 @pytest.fixture
-def learner(client, platform):
+def learner(cookie_project, platform):
     """已登录用户 + 一个已创建的项目 + 一份已登记的资料。
 
     返回 `(client, platform, project_id, source_id)`。身份走完整认证路径
     （签发邀请 → 兑换 cookie 会话），不绕过认证 —— 绕过就等于用另一种形式
-    把"客户端自报身份"放回来。
+    把"客户端自报身份"放回来。登录舞蹈本身在 `conftest.cookie_project` 里，
+    与检索测试共用一份，避免两处各抄一遍再各自分叉。
     """
-    token = "ing-api-" + uuid.uuid4().hex
-    now = platform.clock.now()
-    platform.invitations.issue(
-        SystemContext(DEMO_TENANT, "摄取 API 测试"),
-        invitation_id="inv_" + uuid.uuid4().hex[:8],
-        token_hash=_hash(token),
-        issued_by=DEMO_PRINCIPAL,
-        invitee_principal_id=DEMO_PRINCIPAL,
-        issued_at=now,
-        expires_at=now + timedelta(days=1),
-    )
-    assert client.post("/auth/invitations/exchange", json={"token": token}).status_code == 200
-    created = client.post("/projects", json={"name": "摄取 API 项目"}, headers=_keyed())
-    assert created.status_code == 201
-    project_id = created.json()["project_id"]
+    client, project_id = cookie_project
     source = client.post(
         f"/projects/{project_id}/sources",
         json={"display_name": "事务讲义"},

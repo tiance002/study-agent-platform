@@ -281,3 +281,84 @@ PostgreSQL 身份与产品仓储：`identity/ports.py`、`db/identity_store.py`�
 - **下一轮**：已写
   `docs/superpowers/plans/2026-09-20-round-4-source-ingestion-retrieval.md`；按用户要求仅给计划，
   不实施。范围限定为 durable 摄取、纯文本/Markdown 结构化切块、中文关键词基线、可核验引用。
+
+## 第 4 轮：资料摄取与可核验引用（2026-09-20，8071bcd / a7eaece / 任务 14）
+
+**范围**：PostgreSQL durable 摄取、纯文本/Markdown 结构化切块、中文关键词检索、可核验引用。
+明确排除：模型教学交互、React 前端、向量检索、reranker、网页抓取、PDF/Office/OCR/embedding。
+
+### 任务 12（8071bcd）：持久化原文与片段
+
+- `0007_source_ingestion` 三张表（`source_documents` / `ingestion_jobs` / `source_chunks`）+
+  FORCE RLS + 列级 GRANT；`source_documents`/`source_chunks` 对 `study_app` 只有 `SELECT, INSERT`
+  （「不可变」由权限系统保证，不是靠代码自觉），`ingestion_jobs` 有 `SELECT, INSERT, UPDATE` 但无 `DELETE`。
+- 指向 `principals`/`projects` 的外键一律 `(tenant_id, X_id)` **组合键**，物理上排除跨租户父子关系。
+- 双适配器（`InMemoryIngestionRepository` / `PostgresIngestionRepository`）跑**同一套**契约测试；
+  PG 认领用单条 `FOR UPDATE SKIP LOCKED` 把「选 + 占」压进一条 SQL。
+- `ingestion_jobs` 有**第二条独立命名策略** `ingestion_jobs_worker`（`current_setting('app.worker_id') IS NOT NULL`）——
+  worker 必须先发现"哪个租户有活干"才能建立租户上下文，这正是全项目唯一没有 `Principal` 参数的仓储方法。
+
+### 任务 13（a7eaece）：切块器、worker 与两个端点
+
+- `DocumentProcessor`：ATX 标题 / 空行段落 / 围栏代码块 / 列表 / 表格，**不改写原文**，
+  只为切片附上 `span`、`heading_path` 等结构元数据；超长节按段落边界切、重叠上限 200 字符。
+- span 硬不变量由类型强制（`span_end - span_start == len(content)`），切块器**算错偏移会被拒绝构造**。
+- `POST /projects/{id}/sources/{sid}/content` 只登记入队并返回 202，**从不调用切块器**；
+  worker（`python -m app.workers.ingestion --once`）承担重活。
+- 内容上限的唯一校验出口是 `require_document_content()`：领域模型与 HTTP 请求模型不可能给出两个
+  "多大算太大"的答案（否则 40 万字中文会过应用层、在 DB CHECK 上炸成 500）。
+  请求模型的 `max_length` 只是**字符粗筛**（UTF-8 每字符至少一字节，粗筛不漏），真正判定按字节。
+
+### 任务 14：检索与引用
+
+- `retrieval.py` 重写：`RANKING_VERSION = "keyword/v1"`，NFKC + 小写归一，
+  汉字段内 2-gram，整数加法权重（精确短语 100 / 标题命中 10 / 正文命中 3 / 全覆盖 15），
+  tie-break 用 `(source_id, chunk_index)` —— **不用随机 `chunk_id`**，否则同一查询每次顺序都可能不同。
+- `store.py` 的 `KnowledgeRepository`：`search` 的第一步就是 `ingestion.stored_chunks(actor, project_id)`，
+  作用域收窄发生在 SQL / RLS 里、**在打分之前**（02 号规格 §7 禁止把跨项目候选拉回应用层再筛）。
+- 判定与健康度**正交**：`evidence` 答"核心结论有没有足够证据"，`retrieval_health` 答"这次检索有没有跑完"。
+  本轮没有冻结的核心结论标注集 → 证据状态**必然** `insufficient + MISSING_SUPPORT`，
+  同时过程健康度如实报 `clean`。这是正确结果，不是待修缺陷。
+- 新增 `POST /projects/{id}/knowledge/search`（**读端点，不要求 `Idempotency-Key`**）与
+  `GET /projects/{id}/sources/{sid}/span?start=&end=`（`start<0 或 end<=start` → 400 `PARAMS_INVALID`）。
+- 冻结夹具 `backend/tests/fixtures/retrieval_v1.json`：25 条中文查询（标题/段落/代码/表格/英文/归一化/
+  多词/无命中），期望答案**手写**而非抄实现输出；基线 recall@5 = 1.0、MRR = 1.0、22 命中 + 3 无命中。
+
+### 退出门验收（全部实测）
+
+- 后端 **600 项**全量测试通过（**PG 无 skip**）；Ruff、mypy（87 files）、三份生成契约 `--all --check`、
+  `git diff --check` 全绿。
+- 临时空库证明 `upgrade 0006 → 0007 → downgrade 0006 → upgrade 0007`，每一步都实测
+  「三张表存在 **且** `relforcerowsecurity = true`」，临时库已删除。
+- `test_round4_postgres_e2e.py` 三个用例覆盖计划 Step 6 的整条链：
+  ①cookie 登录 → 建项目 → 登记资料 → 上传 Markdown（202/`queued`）→ worker 切块 →
+  **重建整个 PlatformState（新实例 + 新本地目录）** → 中文查询命中 → `原始文本[start:end] == 片段内容`
+  且指纹一致 → 引用回读同一切片；
+  ②同一主体的另一个项目搜不到、读不到，另一个租户搜索/回读/任务状态/资料列表一律 404，
+  且跨租户 404 与"来源不存在"404 **除 `request_id` 外逐字相同**；
+  ③认领后崩溃留下租约 → 租约期内第二个 worker 抢不到 → 租约过期后被回收**恰好一次**
+  （`attempt_count` 1 → 2）→ 片段只落一套 → 重复 `complete` 不追加第二套。
+
+### 反向验证与坑（本轮新增）
+
+- **"一次就绿"要当场证伪**：给用例 2 补了**阳性对照**（先证明本项目内搜得到），
+  注入"跳过 worker"后该断言立刻失败 —— 否则"别的项目搜不到"在摄取产出零片段时也会通过，
+  测的是"什么都没有"而不是"隔离生效"。另一条注入：去掉 `_expire_lease` 后用例 3 立刻变红。
+- **`_expire_lease` 直接改库而不是 `sleep`**：租约过期的语义就是"`lease_until` 落在 `now()` 之前"，
+  改那一列是这句话的逐字实现；睡满租约（300 秒）不可行，睡 1 秒只是让租约变短、语义变模糊。
+- **`claim_next` 是跨租户的系统级操作**，所以端到端用例必须**先排空全库遗留任务**
+  （超级用户 UPDATE 到终态），否则认领回来的可能是上一次运行留下的任务。
+- **`request_id` 不参与"逐字相同"的比对**：它按设计每请求唯一，把它算进去等于要求追踪失效。
+- **`read_span` 不做"拒绝 → `None`"的翻译**：授权拒绝由 `IngestionRepository` 抛出那**一个**拒绝码
+  （与 `search`/`get_job` 同源），两条路在 HTTP 上同形由 `error_response` 这个**唯一**出口保证。
+  让 `read_span` 也吞成 `None` 就是第二个判定出口，日后必然分叉。
+- **`RequestValidationError` 必须自定义处理器**：FastAPI 默认 422 体会**回显请求输入**，
+  而孤立代理项（`\ud800`）无法编码成 UTF-8 → 编码响应时抛异常 → 422 静默变 500，
+  且形状与本项目规范错误体不同。已改为 `public_error_payload` 规范体，只回显字段路径。
+- **计划偏差**：没有 `PostgresKnowledgeRepository`（计划假设按后端分叉，实际检索层没有后端逻辑），
+  理由与替代方案已回注计划 Step 2 并写在 `store.py` 模块 docstring。
+
+### 下一轮
+
+- 第 5 轮：provider/模型路由、带引用的教学回答、流式输出、prompt/版本评测、成本预算。
+- 第 6 轮：React 普通用户界面、可访问性与浏览器工作流测试。

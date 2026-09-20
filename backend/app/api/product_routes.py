@@ -23,6 +23,7 @@ from app.core.hashing import canonical_json
 from app.core.ids import new_id
 from app.identity.models import Principal
 from app.knowledge.models import MAX_DOCUMENT_BYTES, require_document_content
+from app.knowledge.retrieval import RANKING_VERSION
 from app.learning.evidence import Direction, EvidenceKind, Validity
 from app.learning.ports import COMPONENTS_V1, TaskAssessment
 from app.product.models import (
@@ -42,6 +43,8 @@ TITLE_MAX_CHARS = 200
 GOAL_MAX_CHARS = 2000
 #: 资料标题上限。比会话标题宽松：文献标题常带编号与副标题，200 字容易不够。
 DOCUMENT_TITLE_MAX_CHARS = 300
+#: 查询串上限。单次检索的工作量 ≈ 查询项数 × 项目内片段数，两头都要有界。
+QUERY_MAX_CHARS = 2000
 
 
 def _state(request: Request):
@@ -415,6 +418,77 @@ def get_ingestion_job(request: Request, project_id: str, job_id: str) -> dict:
     state = _state(request)
     job = state.ingestion.get_job(_actor(request), project_id, job_id)
     return job.to_dict()
+
+
+# ------------------------------------------------------------- 检索与引用
+
+
+class KnowledgeSearchBody(BaseModel):
+    """检索请求。
+
+    `query` 上下限与 `limit` 上限都是**硬边界**，不是建议值：检索要在
+    项目内全部片段上打分，而这两个参数都直接乘进工作量 ——
+    不设界就是一个客户端可控的放大入口。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=QUERY_MAX_CHARS)
+    limit: int = Field(default=10, ge=1, le=20)
+
+
+@router.post("/projects/{project_id}/knowledge/search")
+def search_knowledge(
+    request: Request, project_id: str, body: KnowledgeSearchBody
+) -> dict:
+    """项目内中文关键词检索。返回候选、谱系引用与**保守的**证据判定。
+
+    ⚠️ 这里的 POST 是"用请求体传查询条件"，不是命令：它**没有副作用**，
+    因此**不要求 `Idempotency-Key`**。给查询套上幂等守卫不会保护任何东西
+    （没有可重复的副作用），只会让客户端多一个必填头 ——
+    而"必填但无意义"的字段迟早会被一路照抄到真正需要它的地方，那时它已经不表示什么了。
+
+    `evidence` 与 `retrieval_health` 是两个**不同的问题**，不要合读：
+    前者答"核心结论有没有足够证据"，后者答"这次检索有没有按预期跑完"。
+    本轮没有冻结的核心结论标注集，所以前者必然是
+    `insufficient` + `MISSING_SUPPORT` —— 这是正确结果，不是待修的缺陷。
+    """
+    state = _state(request)
+    actor = _actor(request)
+    hits = state.knowledge.search(actor, project_id, body.query, limit=body.limit)
+    assessment = state.knowledge.assess(hits)
+    return {
+        **assessment.to_dict(),
+        "ranking_version": RANKING_VERSION,
+        "hits": [hit.to_dict() for hit in hits],
+    }
+
+
+@router.get("/projects/{project_id}/sources/{source_id}/span")
+def read_source_span(
+    request: Request, project_id: str, source_id: str, start: int, end: int
+) -> dict:
+    """按 `source_id` + `span` 精确回读原文切片 —— 引用可核验的落点。
+
+    找不到、跨项目、跨租户**返回同一个 404 与同一句话术**：区分原因等于提供
+    存在性探针，探测者据此能数出别的项目/租户有多少资料。
+
+    响应里的 `content_hash` 由 `content` **派生**（`StoredChunk` 的属性），
+    因此它与返回的切片不可能不一致；数据库列上的同名值由适配器在读路径上
+    断言相等（`db/ingestion_store.py`）。这里**不另设一个 `verified` 字段**：
+    那种字段只能证明"我刚算过一遍自己"，看起来像验证，实际什么也没验证。
+    """
+    from app.core.errors import ErrorCode, deny
+
+    if start < 0 or end <= start:
+        raise deny(ErrorCode.PARAMS_INVALID, "span 必须满足 0 <= start < end")
+    state = _state(request)
+    chunk = state.knowledge.read_span(
+        _actor(request), project_id, source_id, (start, end)
+    )
+    if chunk is None:
+        raise deny(ErrorCode.CROSS_TENANT_DENIED, "资源不存在", source_id=source_id)
+    return {**chunk.to_dict(), "citation": chunk.as_artifact_ref().to_dict()}
 
 
 # ------------------------------------------------- 任务流转 / 详情 / 掌握度

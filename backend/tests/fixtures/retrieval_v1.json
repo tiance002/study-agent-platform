@@ -1,0 +1,69 @@
+{
+  "version": "keyword/v1",
+  "note": [
+    "第 4 轮检索的冻结夹具。期望答案是**手写**的（按语料人工判断'哪一段才是对的答案'），",
+    "只有 baseline 的两个指标是从首次实测冻结下来的下限。",
+    "分词器、切块器、解析器或排序规则任一变化，都必须重跑本夹具并显式更新 version ——",
+    "版本没变而指标变了，说明召回被无意改动了。",
+    "chunk_index 依赖切块器的划分，所以它同样是一条隐藏的切块回归断言。"
+  ],
+  "corpus": [
+    {
+      "source_id": "src_tx",
+      "title": "事务讲义",
+      "media_type": "text/markdown",
+      "content": "# 事务\n\n事务是一组要么全部成功、要么全部失败的操作。\n\n## 提交\n\n提交把修改持久化到磁盘。\n\n## 回滚\n\n回滚撤销本事务已经执行的全部修改。\n\n```bash\n# 开启事务（这是 shell 注释，不是 Markdown 标题）\npsql -c 'BEGIN'\n```\n\n| 隔离级别 | 现象 |\n|---|---|\n| 读已提交 | 不可重复读 |\n"
+    },
+    {
+      "source_id": "src_index",
+      "title": "索引讲义",
+      "media_type": "text/markdown",
+      "content": "# 索引\n\n索引让查询不必扫描整张表。\n\n## 复合索引\n\n复合索引的列顺序决定它能支撑哪些查询。\n\n## B-tree\n\nB-tree 是 PostgreSQL 默认的索引结构。\n"
+    },
+    {
+      "source_id": "src_repl",
+      "title": "复制讲义",
+      "media_type": "text/markdown",
+      "content": "# 主从复制\n\n主库负责写入，从库异步接收变更。\n\n## 复制延迟\n\n复制延迟是主库与从库之间的时间差。\n"
+    },
+    {
+      "source_id": "src_meeting",
+      "title": "会议纪要",
+      "media_type": "text/markdown",
+      "content": "# 会议纪要\n\n下周三讨论排期与预算，会议室改到三楼。\n"
+    }
+  ],
+  "cases": [
+    {"query": "回滚", "kind": "heading", "expect": [{"source_id": "src_tx", "chunk_index": 2}]},
+    {"query": "提交", "kind": "heading", "expect": [{"source_id": "src_tx", "chunk_index": 1}]},
+    {"query": "复合索引", "kind": "heading", "expect": [{"source_id": "src_index", "chunk_index": 1}]},
+    {"query": "复制延迟", "kind": "heading", "expect": [{"source_id": "src_repl", "chunk_index": 1}]},
+    {"query": "主从复制", "kind": "heading", "expect": [{"source_id": "src_repl", "chunk_index": 0}]},
+    {"query": "要么全部成功", "kind": "paragraph", "expect": [{"source_id": "src_tx", "chunk_index": 0}]},
+    {"query": "撤销本事务已经执行的全部修改", "kind": "paragraph", "expect": [{"source_id": "src_tx", "chunk_index": 2}]},
+    {"query": "列顺序", "kind": "paragraph", "expect": [{"source_id": "src_index", "chunk_index": 1}]},
+    {"query": "时间差", "kind": "paragraph", "expect": [{"source_id": "src_repl", "chunk_index": 1}]},
+    {"query": "不必扫描整张表", "kind": "paragraph", "expect": [{"source_id": "src_index", "chunk_index": 0}]},
+    {"query": "异步接收变更", "kind": "paragraph", "expect": [{"source_id": "src_repl", "chunk_index": 0}]},
+    {"query": "主库负责写入，从库异步接收变更。", "kind": "paragraph", "expect": [{"source_id": "src_repl", "chunk_index": 0}]},
+    {"query": "BEGIN", "kind": "code", "expect": [{"source_id": "src_tx", "chunk_index": 2}]},
+    {"query": "psql", "kind": "code", "expect": [{"source_id": "src_tx", "chunk_index": 2}]},
+    {"query": "shell 注释", "kind": "code", "expect": [{"source_id": "src_tx", "chunk_index": 2}]},
+    {"query": "读已提交", "kind": "table", "expect": [{"source_id": "src_tx", "chunk_index": 2}]},
+    {"query": "不可重复读", "kind": "table", "expect": [{"source_id": "src_tx", "chunk_index": 2}]},
+    {"query": "postgres", "kind": "latin", "expect": [{"source_id": "src_index", "chunk_index": 2}]},
+    {"query": "b-tree", "kind": "latin", "expect": [{"source_id": "src_index", "chunk_index": 2}]},
+    {"query": "ＰＯＳＴＧＲＥＳ", "kind": "normalization", "expect": [{"source_id": "src_index", "chunk_index": 2}]},
+    {"query": "事务 回滚", "kind": "multi_term", "expect": [{"source_id": "src_tx", "chunk_index": 2}]},
+    {"query": "索引结构", "kind": "paragraph", "expect": [{"source_id": "src_index", "chunk_index": 2}]},
+    {"query": "量子纠缠", "kind": "no_hit", "expect": []},
+    {"query": "咖啡机维修", "kind": "no_hit", "expect": []},
+    {"query": "zzzzqqqq", "kind": "no_hit", "expect": []}
+  ],
+  "baseline": {
+    "recall_at_5": 1.0,
+    "mrr": 1.0,
+    "hit_case_count": 22,
+    "no_hit_case_count": 3
+  }
+}

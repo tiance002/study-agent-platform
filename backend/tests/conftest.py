@@ -4,13 +4,20 @@
 - 每个测试使用独立临时目录与全新平台实例，互不干扰。
 - 身份通过 `auth_headers` **走完整认证路径**生成（签发 → 序列化 → Bearer 头）。
   不允许为了方便在测试里绕过认证 —— 那会让"客户端自报身份"以另一种形式复活。
+- `cookie_project` 是 **cookie 主路径**的共享起点：签发邀请 → 兑换会话 → 建项目。
+  摄取与检索两处都要用它。每个文件各抄一份登录舞蹈，正是某一天两份会分叉的地方
+  （比如一处忘了断言兑换状态码），而分叉的结果是"有一个文件的身份根本不是真的"。
 """
 
 from __future__ import annotations
 
+import hashlib
 import sys
+import uuid
+from datetime import timedelta
 
 import pytest
+from app.identity.ports import SystemContext
 from app.main import (
     DEMO_PRINCIPAL,
     DEMO_PROJECT,
@@ -57,6 +64,31 @@ def platform(tmp_path):
 @pytest.fixture
 def client(platform):
     return TestClient(create_app(platform=platform))
+
+
+@pytest.fixture
+def cookie_project(client, platform):
+    """已登录的 cookie 会话 + 一个刚创建的项目，返回 `(client, project_id)`。"""
+    token = "cookie-" + uuid.uuid4().hex
+    now = platform.clock.now()
+    platform.invitations.issue(
+        SystemContext(DEMO_TENANT, "cookie 会话夹具"),
+        invitation_id="inv_" + uuid.uuid4().hex[:8],
+        token_hash="sha256:" + hashlib.sha256(token.encode()).hexdigest(),
+        issued_by=DEMO_PRINCIPAL,
+        invitee_principal_id=DEMO_PRINCIPAL,
+        issued_at=now,
+        expires_at=now + timedelta(days=1),
+    )
+    exchanged = client.post("/auth/invitations/exchange", json={"token": token})
+    assert exchanged.status_code == 200, "夹具必须走完整认证路径"
+    created = client.post(
+        "/projects",
+        json={"name": "夹具项目"},
+        headers={"Origin": "http://testserver", "Idempotency-Key": "fix-" + uuid.uuid4().hex},
+    )
+    assert created.status_code == 201, created.text
+    return client, created.json()["project_id"]
 
 
 @pytest.fixture
