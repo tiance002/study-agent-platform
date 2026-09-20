@@ -33,13 +33,14 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Literal
 
 from app.core.clock import Clock, SystemClock
 from app.core.errors import ErrorCode, PlatformError
 from app.identity.models import Principal
 from app.knowledge.store import KnowledgeRepository
 from app.product.ports import ProductRepository
-from app.teaching.context import TeachingContext, build_context
+from app.teaching.context import RetrievalSnapshot, TeachingContext, build_context
 from app.teaching.models import (
     MaterialSnippet,
     ProviderRequest,
@@ -48,13 +49,16 @@ from app.teaching.models import (
     RawCitation,
     TokenUsage,
 )
-from app.teaching.ports import TeachingProvider
+from app.teaching.ports import TeachingProvider, TeachingRunRepository
 from app.teaching.runs import RunClaim
 from app.teaching.validation import validate_citations
 
 #: provider 调用的默认截止时间（秒）。单一 provider 单次调用，
 #: P99 远小于 60 秒；超时即转对账，不自动重试。
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 60
+
+#: 执行结果的类别。worker 的返回值是它加上 "idle" / "stale"。
+Outcome = Literal["succeeded", "failed", "reconciliation_required"]
 
 #: 可以归为"确定性失败"的错误码集合：写终态是安全的，
 #: 因为同一个输入跑一百次也是同一个结果。
@@ -65,7 +69,7 @@ _DETERMINISTIC_CODES = frozenset({ErrorCode.PARAMS_INVALID})
 class TeachingService:
     """认领后的执行逻辑。依赖全部来自装配层，本类不读环境。"""
 
-    teaching: object  # TeachingRunRepository
+    teaching: TeachingRunRepository
     knowledge: KnowledgeRepository
     products: ProductRepository
     provider: TeachingProvider | None
@@ -82,7 +86,7 @@ class TeachingService:
 
     # ------------------------------------------------------------ 执行
 
-    def execute(self, claim: RunClaim) -> str:
+    def execute(self, claim: RunClaim) -> Outcome:
         """执行一次认领。返回结果类别（测试与 worker 日志用）。"""
         run = claim.run
         if self.provider is None:
@@ -195,7 +199,7 @@ class TeachingService:
         )
         return "failed"
 
-    def replay(self, claim: RunClaim) -> str:
+    def replay(self, claim: RunClaim) -> Outcome:
         """从已持久化的结果存证落库（final commit 失败后的恢复路径）。
 
         **绝不重新调用 provider** —— 存证里的答案、引用、快照就是
@@ -308,7 +312,7 @@ class TeachingService:
             ],
         }
 
-    def _deserialize_snapshot(self, items: list) -> "object":
+    def _deserialize_snapshot(self, items: list) -> RetrievalSnapshot:
         from app.teaching.context import RetrievalSnapshot
 
         return RetrievalSnapshot(

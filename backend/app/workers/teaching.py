@@ -46,14 +46,14 @@ _STALE_CODES = frozenset(
     {ErrorCode.ILLEGAL_STATE_TRANSITION, ErrorCode.CROSS_TENANT_DENIED}
 )
 
-Outcome = Literal[
-    "idle", "succeeded", "failed", "reconciliation_required", "stale"
+WorkerOutcome = Literal[
+    "idle", "stale", "succeeded", "failed", "reconciliation_required"
 ]
 
 
 def run_once(
     platform: "PlatformState", *, worker_id: str, lease_seconds: int = DEFAULT_LEASE_SECONDS
-) -> Outcome:
+) -> WorkerOutcome:
     """认领并执行一个教学运行。没有可做的运行时返回 `idle`。"""
     claim = platform.teaching.claim_run(worker_id=worker_id, lease_seconds=lease_seconds)
     if claim is None:
