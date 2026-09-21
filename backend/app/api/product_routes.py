@@ -16,7 +16,7 @@ from hashlib import sha256
 from typing import Literal
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.hashing import canonical_json
@@ -306,7 +306,7 @@ def current_plan(request: Request, project_id: str):
     bundle = state.products.current_plan(_actor(request), project_id)
     if bundle is None:
         # 没有计划不是错误 —— 204 说明"还没有"，与"找不到"（404）分开。
-        return JSONResponse(status_code=204, content=None)
+        return Response(status_code=204)
     return {
         "plan": bundle.plan.to_dict(),
         "milestones": [m.to_dict() for m in bundle.milestones],
@@ -418,6 +418,13 @@ def get_ingestion_job(request: Request, project_id: str, job_id: str) -> dict:
     state = _state(request)
     job = state.ingestion.get_job(_actor(request), project_id, job_id)
     return job.to_dict()
+
+
+@router.get("/projects/{project_id}/ingestion-jobs")
+def list_ingestion_jobs(request: Request, project_id: str) -> dict:
+    state = _state(request)
+    jobs = state.ingestion.list_jobs(_actor(request), project_id)
+    return {"jobs": [job.to_dict() for job in jobs]}
 
 
 # ------------------------------------------------------------- 检索与引用
@@ -637,7 +644,7 @@ def create_diagnosis(
 def latest_diagnosis(request: Request, project_id: str):
     row = _state(request).learning_loop.latest_diagnosis(_actor(request), project_id)
     if row is None:
-        return JSONResponse(status_code=204, content=None)
+        return Response(status_code=204)
     return row.to_dict()
 
 

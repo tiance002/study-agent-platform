@@ -1,0 +1,10 @@
+[Unit]
+Description=Create a daily Study Plan database backup
+
+[Timer]
+OnCalendar=*-*-* 03:31:00
+RandomizedDelaySec=20m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

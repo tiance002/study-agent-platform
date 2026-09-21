@@ -6,6 +6,9 @@ python -m app.workers.ingestion --once
 
 # 处理到队列为空再退出
 python -m app.workers.ingestion
+
+# 生产常驻：队列为空时等待后继续检查
+python -m app.workers.ingestion --daemon
 ```
 
 ## 为什么摄取必须是独立进程
@@ -236,12 +239,16 @@ def main(argv: list[str] | None = None, *, platform_factory=None) -> int:
                 file=sys.stderr,
             )
             return 1
-        print(f"[ingestion-worker {worker_id}] {outcome.describe()}")
-        if args.once or outcome.kind == "idle":
+        if not (args.daemon and outcome.kind == "idle"):
+            print(f"[ingestion-worker {worker_id}] {outcome.describe()}")
+        if args.once:
             # `--once`：认领一个就退出（包括没认领到）。
-            # 默认模式：队列空了也退出循环 —— 让监管进程（cron / systemd）重新调用，
-            # 比在进程里长时间空转更容易被观察到"worker 还活着吗"。
             return 0
+        if outcome.kind == "idle":
+            if not args.daemon:
+                return 0
+            time.sleep(args.idle_sleep)
+            continue
         time.sleep(args.idle_sleep)
 
 
@@ -254,6 +261,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--once",
         action="store_true",
         help="认领并处理最多一个任务后退出（默认行为是处理到队列为空）",
+    )
+    parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="队列为空时继续等待，供 systemd 等监管进程运行常驻 worker",
     )
     parser.add_argument("--worker-id", default="", help="租约持有者标识；缺省时自动生成")
     parser.add_argument(
@@ -273,6 +285,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--lease-seconds 必须为正整数")
     if args.idle_sleep < 0:
         parser.error("--idle-sleep 不能为负")
+    if args.once and args.daemon:
+        parser.error("--once 与 --daemon 不能同时使用")
     return args
 
 

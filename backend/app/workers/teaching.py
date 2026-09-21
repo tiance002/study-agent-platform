@@ -6,6 +6,9 @@ python -m app.workers.teaching --once
 
 # 处理到队列为空再退出
 python -m app.workers.teaching
+
+# 生产常驻：队列为空时等待后继续检查
+python -m app.workers.teaching --daemon
 ```
 
 ## 失败分两类（与摄取 worker 相同的取舍）
@@ -127,10 +130,22 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="教学运行 worker")
     parser.add_argument("--once", action="store_true", help="处理一个运行就退出")
     parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="队列为空时继续等待，供 systemd 等监管进程运行常驻 worker",
+    )
+    parser.add_argument(
         "--worker-id", default=f"teaching-worker-{time.time_ns() % 1_000_000}"
     )
     parser.add_argument("--lease-seconds", type=int, default=DEFAULT_LEASE_SECONDS)
+    parser.add_argument("--idle-sleep", type=float, default=DEFAULT_IDLE_SLEEP_SECONDS)
     args = parser.parse_args(argv)
+    if args.lease_seconds <= 0:
+        parser.error("--lease-seconds 必须为正整数")
+    if args.idle_sleep < 0:
+        parser.error("--idle-sleep 不能为负")
+    if args.once and args.daemon:
+        parser.error("--once 与 --daemon 不能同时使用")
 
     from app.main import build_platform
 
@@ -146,11 +161,14 @@ def main(argv: list[str] | None = None) -> int:
             platform, worker_id=args.worker_id, lease_seconds=args.lease_seconds
         )
         if outcome == "idle":
-            return 0
+            if not args.daemon:
+                return 0
+            time.sleep(args.idle_sleep)
+            continue
         print(f"处理完成：{outcome}", file=sys.stderr)
         if args.once:
             return 0
-        time.sleep(DEFAULT_IDLE_SLEEP_SECONDS)
+        time.sleep(args.idle_sleep)
 
 
 if __name__ == "__main__":  # pragma: no cover

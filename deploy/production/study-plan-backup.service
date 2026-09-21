@@ -1,0 +1,13 @@
+[Unit]
+Description=Back up the Study Plan PostgreSQL database
+After=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/study-plan/current/deploy/production/backup.sh
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/backups/study-plan
+

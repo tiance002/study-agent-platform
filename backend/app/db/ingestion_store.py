@@ -328,6 +328,19 @@ class PostgresIngestionRepository:
             )
         return _job_from_row(row)
 
+    def list_jobs(self, actor: Principal, project_id: str) -> tuple[IngestionJob, ...]:
+        self.membership.get(actor, project_id)
+        with tenant_transaction(
+            tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
+        ) as conn:
+            rows = conn.execute(
+                "SELECT " + _JOB_COLUMNS
+                + " FROM ingestion_jobs WHERE project_id = %s"
+                " ORDER BY created_at DESC, job_id DESC",
+                (project_id,),
+            ).fetchall()
+        return tuple(_job_from_row(row) for row in rows)
+
     def load_document(self, job: IngestionJob) -> SourceDocument:
         with worker_transaction(
             tenant_id=job.tenant_id, project_id=job.project_id, dsn=self._worker_dsn

@@ -512,3 +512,57 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - 新增 `backend/tests/test_frontend_assets.py`，守住同源资源与“前端不携带 Authorization”约束。
 - 浏览器验收脚本 `tools/check_round7_browser.py` 已通过：桌面流程完成 Cookie 登录、创建项目、会话、资料、计划和教学关闭态；390px 视口无横向溢出。
 - 最终门禁：全量 `761 passed, 1 skipped`；PostgreSQL 子集 `124 passed`；Ruff、mypy、迁移链、Node 语法检查通过。真实 provider 云端联调和部署发布门仍是上线前阻塞项。
+
+## 2026-09-20 · 第八轮实现与门禁复验
+
+第七轮复审发现的工作台正确性问题已完成本轮代码修复，但没有把未验证的发布条件冒充完成。主要改动如下：
+
+- 空计划/空诊断响应改为真正的 `204` 空 body；新增项目级摄取任务元数据列表，内存与 PostgreSQL 都按租户、项目和成员权限过滤，列表不返回原文。
+- 计划已有时改为只读展示；无计划时的动作明确为“创建计划”，避免把整版 PUT 误当成安全编辑。
+- 前端异步读取按用户、项目、会话和 epoch 校验；项目/会话切换、登出和引用回读不会把旧响应写进新作用域。教学运行恢复指针按同一作用域隔离，临时 GET 错误不再被当成 404。
+- 写命令在当前页面生命周期内保留不可变 payload 和 `Idempotency-Key`，未知结果可用同一请求重试；请求键限制为 ASCII，长中文名称不会导致浏览器 Fetch 在发出请求前失败。
+- 资料列表区分已登记与排队/处理中/已处理/失败；引用展示资料名、版本/坐标和 hash，并可按 `document_id + span + content_hash` 读取历史原文。`inference_only` 不再显示“来源已核验”。
+- 新增 `test_round8_http.py`、摄取列表契约测试、Round 8 浏览器预览/门禁脚本；契约文档已重新生成并通过一致性检查。
+
+### 证据与边界
+
+- 旧实现反例：HTTP 回归先观测到空响应 body 为 `b'null'` 且项目级摄取列表为 404；移动端旧实现隐藏新项目表单；浏览器还暴露过中文 `Idempotency-Key` 触发 Fetch 编码异常。本轮定向修复后相关测试与浏览器断言通过。
+- 最终门禁 `tools/run_round8_gate.py` 通过：全量 **765 passed, 1 skipped**（共 766 个收集用例）；唯一 skip 是 `test_concurrent_reservation_on_last_slot_has_one_winner[memory]`，因为该并发语义只适用于 PG 双连接，说明在 JUnit 中保留。PostgreSQL 子集 **125 passed, 641 deselected, 0 skipped**；Ruff、mypy（104 个源文件）、Node 语法检查和浏览器验收均通过。
+- 浏览器证据来自全新邀请和实际预览 worker/provider：`var/round8-gate-final-11`，完成 Cookie 登录、390px/桌面工作区、项目、会话、资料处理、提问、引用原文、初始计划和响应丢失后的同 key/body 重试。
+- R8-H 的“重启 web/worker 后不清库刷新恢复”完整真实 PG HTTP 场景，以及 R8-I 的中断网络恢复场景，尚未由本轮脚本单独证明；真实云 provider、生产配置、部署、备份恢复和运维发布门仍未完成。因此第八轮不标为首版发布完成。
+- 本轮未能创建 `codex/round-8` 分支、commit 或推送 GitHub：当前工作区的 `.git` 目录对本任务只读，创建分支时报 `unable to create directory for .git/refs/heads/codex/round-8`。代码、测试和记录均保留在工作区，不能声称已上传。
+
+## 2026-09-21 · 首版 ECS 部署准备完成
+
+- 已在阿里云 ECS `123.56.129.138` 部署 `/opt/study-plan/current`，运行 Ubuntu 24.04、PostgreSQL 16、systemd 和 nginx；数据库迁移版本为 `0011`。
+- 已启用 HTTPS（Let's Encrypt IP 证书）、HSTS、同源 Cookie、Web 服务和持久摄取 worker；HTTP 自动跳转到 HTTPS，健康页可由 Python TLS 客户端验证。
+- 已启用每日备份与证书续期 timer；新备份已恢复到临时 PostgreSQL 数据库并验证迁移版本，临时库随后删除。备份文件权限为 `root:postgres 0640`。
+- 摄取与教学 worker 均支持 `--daemon` 常驻模式；教学服务在 provider 未配置前保持禁用，避免生产环境在缺少凭据时误发模型请求。
+- DeepSeek 生产配置位置固定为服务器 `/etc/study-plan/provider.env`，当前 API key 为空。待用户填写后，设置 `STUDY_PLATFORM_TEACHING_PROVIDER=openai`、`STUDY_PLATFORM_TEACHING_MODEL=deepseek-flash` 并启用教学 worker。
+- 本地验证：非 PostgreSQL 测试 `634 passed, 7 skipped`；Ruff、mypy、Python 编译检查、Node 语法检查和 `git diff --check` 通过。完整 PostgreSQL 门禁的既有证据为第八轮 `765 passed, 1 skipped`、PG 子集 `125 passed`；本机当前未运行 PostgreSQL，未对生产库运行测试。
+- 部署资产、API key 填写步骤、邀请生成、运维和回滚记录见 `deploy/production/README.md`。当前 `.git` 对本任务只读，仍不能声称已 commit 或上传 GitHub。
+
+## 2026-09-21 · 切换新 ECS `39.105.45.212`
+
+- 新实例确认是全新 Ubuntu 24.04，已安装 nginx、PostgreSQL 16、Python venv 和 certbot；发布包重新上传到 `/opt/study-plan/releases/20260921-first`，并创建了独立的数据库角色、数据库和随机密钥。
+- 已执行 Alembic 到 `0011`，web 与持久摄取 worker 启动正常；新 IP 的 Let's Encrypt short-lived IP 证书已成功签发，有效期至 `2026-09-27`；外部 HTTPS 曾验证为 `200`、HSTS 正常、页面内容正常。
+- 已启用备份和证书续期 timer，首个备份文件权限为 `root:postgres 0640`。教学 provider 仍保持 disabled，API Key 不从旧实例复制。
+- 换机过程中发现并修复首装缺陷：`bootstrap_server.sh` 现在会自举创建 `/etc/study-plan`；生产 nginx、信任来源和证书路径已改为新 IP `39.105.45.212`。
+- 当前阻塞：新实例随后出现持续的网络不可达，22/80/443 连续多次探测均失败，因此尚未完成新实例上的备份恢复临时库验证、最终 systemd 状态复核和真实浏览器验收。恢复 SSH 后这些步骤可幂等继续，不能把本次换机标记为最终发布完成。
+
+## 2026-09-21 · 重配新 ECS `120.55.115.162`
+
+- 用户确认新实例之前未绑定密钥对；使用 `C:\Users\22088\Downloads\study-plan-dev.pem` 绑定后，SSH 已以 `root` 登录成功。Downloads 原文件权限过宽，未修改原文件；复制到受限缓存路径后使用。
+- 新实例为干净 Ubuntu 24.04。重新上传当前工作区发布包并安装 nginx、PostgreSQL 16、Python venv、certbot；重新生成数据库角色、数据库和随机生产密钥。教学 provider 没有从旧实例复制，仍为 `disabled`，API key 为空。
+- Alembic 已迁移到 `0011`；`study-plan-web.service`、`study-plan-ingestion.service`、nginx、`study-plan-backup.timer`、`study-plan-cert-renew.timer` 均 active/enabled；`study-plan-teaching.service` 保持 disabled。
+- 新 IP 的 Let's Encrypt short-lived IP 证书签发成功，证书路径为 `/etc/letsencrypt/live/120.55.115.162/`，有效期至 `2026-09-27`；nginx 已监听 80/443，HTTP challenge 曾被 CA 成功读取，HTTPS 本地 TLS、HSTS 和反向代理已验证。
+- 首次备份因 Windows 归档解包导致 `backup.sh` 权限为 `0666`，systemd 报 `203/EXEC`；已将发布代码改为 root 只读、脚本设为 `0755`，备份成功生成 `/var/backups/study-plan/study-platform-20260921T072814Z.dump`，权限 `root:postgres 0640`。
+- 备份恢复演练已完成：恢复到临时库读到迁移版本 `0011`，随后删除临时库；当前 PostgreSQL 只保留 `study_platform` 与模板库。生产库未被覆盖。
+- 新实例网络存在偶发 SSH/外部 HTTP 超时，但 22/443 可恢复，服务端监听和 CA 验证正常。真实教学 provider 联调、生产浏览器核心闭环仍等待用户填写 `/etc/study-plan/provider.env` 中的 API key，当前不标记首版最终验收完成。
+
+## 2026-09-21 · 生产邀请码脚本 DSN 修复
+
+- 生产生成邀请码时报 `psycopg.ProgrammingError`：`STUDY_PLATFORM_MIGRATION_DSN` 使用的是 SQLAlchemy 的 `postgresql+psycopg://` scheme，但 `tools/issue_invitation.py` 直接交给 `psycopg.connect()`，后者只接受 libpq scheme。
+- 新增 `_psycopg_dsn()` 适配器和两个回归测试，先观察到缺少函数的收集失败，再实现最小修复；定向测试 `2 passed`，`git diff --check` 通过。
+- 修复后的邀请码脚本已部署到 `/opt/study-plan/current/tools/issue_invitation.py`；生产实际生成了一枚 24 小时、单次使用的邀请码，原始 token 未写入仓库或进度文件。
+- 用户已填入 DeepSeek API key，并将 provider 改为 `openai`；远端检查显示 API key 存在，web 与 teaching worker 均 active。注册/密码登录仍未实现，当前邀请码入口继续保留为临时认证入口。

@@ -1,0 +1,25 @@
+[Unit]
+Description=Study Plan teaching worker
+After=network-online.target postgresql.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=studyplan
+Group=studyplan
+WorkingDirectory=/opt/study-plan/current
+EnvironmentFile=/etc/study-plan/study-plan.env
+EnvironmentFile=-/etc/study-plan/provider.env
+Environment=PYTHONPATH=/opt/study-plan/current/backend
+ExecStart=/opt/study-plan/venv/bin/python -m app.workers.teaching --daemon --idle-sleep 2
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/study-plan
+
+[Install]
+WantedBy=multi-user.target

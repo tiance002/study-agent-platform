@@ -140,6 +140,16 @@ class InMemoryIngestionRepository:
             )
         return job
 
+    def list_jobs(self, actor: Principal, project_id: str) -> tuple[IngestionJob, ...]:
+        self.membership.get(actor, project_id)
+        with self._lock:
+            rows = [
+                job
+                for job in self._jobs.values()
+                if job.project_id == project_id and job.tenant_id == actor.tenant_id
+            ]
+        return tuple(sorted(rows, key=lambda job: (job.created_at, job.job_id), reverse=True))
+
     def load_document(self, job: IngestionJob) -> SourceDocument:
         with self._lock:
             document = self._documents.get(job.document_id)

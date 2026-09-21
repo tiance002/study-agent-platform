@@ -1,0 +1,10 @@
+[Unit]
+Description=Check the Study Plan IP TLS certificate twice daily
+
+[Timer]
+OnCalendar=*-*-* 00,12:17:00
+RandomizedDelaySec=45m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

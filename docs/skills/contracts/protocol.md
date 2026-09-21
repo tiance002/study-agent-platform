@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:b8b72a066ee56020d913847e75ddc18cae064b9b66144287aae6d9083db2496c, generated_at=2026-09-20T08:54:02Z -->
-> 生成时间：2026-09-20T08:54:02Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:23065f436b97fc0d6d378546a0ae488054ada9736dd5a3253d181250ae7e076c, generated_at=2026-09-20T14:49:45Z -->
+> 生成时间：2026-09-20T14:49:45Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -34,6 +34,7 @@
 | `/projects/{project_id}/conversations/{conversation_id}/teaching-runs` | POST | Create Teaching Run |
 | `/projects/{project_id}/diagnosis` | GET | Latest Diagnosis |
 | `/projects/{project_id}/diagnosis` | POST | Create Diagnosis |
+| `/projects/{project_id}/ingestion-jobs` | GET | List Ingestion Jobs |
 | `/projects/{project_id}/ingestion-jobs/{job_id}` | GET | Get Ingestion Job |
 | `/projects/{project_id}/interactions` | POST | Interact |
 | `/projects/{project_id}/knowledge/search` | POST | Search Knowledge |

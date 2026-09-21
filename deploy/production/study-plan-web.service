@@ -1,0 +1,24 @@
+[Unit]
+Description=Study Plan web application
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=studyplan
+Group=studyplan
+WorkingDirectory=/opt/study-plan/current
+EnvironmentFile=/etc/study-plan/study-plan.env
+EnvironmentFile=-/etc/study-plan/provider.env
+ExecStart=/opt/study-plan/venv/bin/uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/study-plan
+
+[Install]
+WantedBy=multi-user.target

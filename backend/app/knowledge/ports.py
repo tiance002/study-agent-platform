@@ -67,6 +67,10 @@ class IngestionRepository(Protocol):
         """按 id 取任务状态。不可见（未授予/跨租户）与不存在**同码同话术**。"""
         ...
 
+    def list_jobs(self, actor: Principal, project_id: str) -> tuple[IngestionJob, ...]:
+        """列出项目的摄取状态元数据，不包含原文。"""
+        ...
+
     def stored_chunks(
         self, actor: Principal, project_id: str, *, latest_only: bool = True
     ) -> tuple[StoredChunk, ...]:

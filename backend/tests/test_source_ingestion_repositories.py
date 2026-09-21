@@ -242,6 +242,23 @@ def test_enqueue_writes_document_and_queued_job(env):
 
 
 @pytest.mark.invariant
+def test_list_jobs_returns_project_scoped_status_metadata(env):
+    project_id = _project(env)
+    source = _register(env, project_id)
+    first = _enqueue(env, project_id, source.source_id)
+    second = _enqueue(env, project_id, source.source_id, content="# 新版本")
+    other_project = _project(env)
+    other_source = _register(env, other_project)
+    other = _enqueue(env, other_project, other_source.source_id)
+
+    rows = env.ingestion.list_jobs(_alice(), project_id)
+
+    assert {row.job_id for row in rows} == {first[1].job_id, second[1].job_id}
+    assert other[1].job_id not in {row.job_id for row in rows}
+    assert all("content" not in row.to_dict() for row in rows)
+
+
+@pytest.mark.invariant
 def test_reupload_allocates_next_version_instead_of_overwriting(env):
     """同一份资料的第二次上传是**新版本**，不是改旧行。
 
