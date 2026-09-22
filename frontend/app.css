@@ -93,6 +93,13 @@ input::placeholder, textarea::placeholder { color: #9fb3c8; }
 .plan-form, .source-form { display: grid; }
 .plan-form .primary-button, .source-form .primary-button { justify-self: start; margin-top: 18px; }
 .plan-summary, .source-list { margin-top: 36px; border-top: 1px solid var(--line); }
+.candidate-form { margin-top: 4px; }
+.candidate-list { margin-top: 24px; }
+.candidate-row { align-items: flex-start; }
+.candidate-row a { color: var(--blue); font-size: 12px; overflow-wrap: anywhere; }
+.candidate-actions { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+.source-divider { height: 1px; margin: 38px 0 26px; background: var(--line); }
+.subsection-title { margin: 0 0 4px; font-size: 18px; }
 .read-only-note { margin: 18px 0 0; padding: 10px 12px; border-left: 3px solid var(--gold); color: var(--ink-soft); background: #fffaf0; font-size: 13px; }
 .milestone-row, .task-row, .source-row { display: flex; align-items: center; gap: 11px; padding: 13px 0; border-bottom: 1px solid var(--line); }
 .milestone-row { font-weight: 700; }

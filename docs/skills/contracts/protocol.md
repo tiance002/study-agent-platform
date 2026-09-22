@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:ae7cdb6544d3f70951290c1990389e422f1a0659943e0c40baefe08f6f5038ab, generated_at=2026-09-22T10:29:30Z -->
-> 生成时间：2026-09-22T10:29:30Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:c0422bb87e76f57f70276475a813879bc17195d52094dd058036623f31579ff0, generated_at=2026-09-22T14:37:00Z -->
+> 生成时间：2026-09-22T14:37:00Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -26,6 +26,7 @@
 | `/projects` | POST | Create Project |
 | `/projects/{project_id}` | GET | Get Project |
 | `/projects/{project_id}` | PATCH | Update Project |
+| `/projects/{project_id}/acquisition-jobs/{acquisition_id}` | GET | Get Acquisition Job |
 | `/projects/{project_id}/audit` | GET | Audit View |
 | `/projects/{project_id}/budget` | GET | Budget View |
 | `/projects/{project_id}/confirmations` | POST | Create Confirmation |
@@ -46,6 +47,9 @@
 | `/projects/{project_id}/plan/generate` | POST | Generate Plan |
 | `/projects/{project_id}/plan/history` | GET | Plan History |
 | `/projects/{project_id}/retrieval/chunks` | POST | Ingest |
+| `/projects/{project_id}/source-candidates` | GET | List Source Candidates |
+| `/projects/{project_id}/source-candidates` | POST | Create Source Candidate |
+| `/projects/{project_id}/source-candidates/{candidate_id}/select` | POST | Select Source Candidate |
 | `/projects/{project_id}/sources` | GET | List Sources |
 | `/projects/{project_id}/sources` | POST | Register Source |
 | `/projects/{project_id}/sources/{source_id}/content` | POST | Upload Source Content |

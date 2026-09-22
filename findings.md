@@ -371,3 +371,11 @@ R4-05 之后写入的片段都经过"与持久化原文比对"，但**在此之�
 - `Content-Length` 只是在读取前的快速拒绝，不能替代流式计数；无该头、头部造假或 chunked 响应都必须受同一个 max-bytes 上限约束。
 - “不设置月度金额上限”与“无界外部抓取”不是同一件事。获取器仍保留连接、读取、总 deadline、redirect、bytes 和 retryable 边界；本轮尚未把网络错误写入 acquisition 状态，避免在 durable 状态机未冻结前产生第二套失败语义。
 - 候选状态与下载状态必须分开：候选的 `selected` 只表示用户授权下载，不表示内容可信或已经落库；下载 `unknown` 表示外部副作用是否发生无法判定，不能被普通失败重试路径吞掉。
+
+## 第九轮 durable acquisition 发现（2026-09-22）
+
+- `SELECT ... FOR UPDATE` 不等于普通 `SELECT`：PostgreSQL 会要求调用者具备 `UPDATE` 权限。acquisition job 对 `study_app` 刻意撤销 `UPDATE` 后，幂等读取仍使用 `FOR UPDATE` 会直接得到 `permission denied`。修复是普通读取 + 锁定候选行后再次普通读取幂等键；唯一约束负责并发兜底，不能为了方便扩大应用权限。
+- “读取列清单”不能复用为“插入列清单”：`acquisition_jobs` 的完整 20 列返回集合与 queued 初始值只有 13 个，真实 PG 才暴露了 `INSERT has more target columns than expressions`。现在写入列与回读列分开命名。
+- acquisition 成功与摄取入队跨两个仓储事务，worker 可能在摄取提交后、acquisition settle 前崩溃。用 acquisition 派生的稳定 `document_id/job_id`，并让内存/PG 摄取路径能识别同一稳定写入，才能在重试时回读既有结果而不是生成第二版原文；这仍需要后续增加更完整的对账状态观察。
+- API 只允许无 DNS 的候选 URL 语法/私网字面量检查，worker 在真正连接前再次解析并校验 DNS/IP；否则 web 请求为了验证候选而访问外网，会把安全副作用放回请求线程。
+- 全量测试第一次只报生成协议哈希漂移，说明路由新增后生成契约文件也是退出门的一部分；更新 `protocol.md` 后契约检查通过。浏览器验收未完成是本机 Playwright Chromium 未安装且下载无响应，不应把它记为应用通过。

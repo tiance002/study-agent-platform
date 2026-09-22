@@ -701,3 +701,12 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - 同步冻结了 `SourceCandidate`、`AcquisitionRequest`、`AcquisitionJob`、候选/下载状态集合及状态转移；`unknown`、`failed`、`succeeded` 均不会被隐式重排回队列，租约只能通过显式 claim 产生。
 - 本地提交 `803d49f`（安全获取内核）与 `a89c0d2`（候选/下载协议）已推送到 GitHub 分支 `codex/round8-residual-20260922`；当前 PR #2 继续作为审查入口。未部署 ECS，因 durable acquisition job 尚未完成。
 - 最终复核收集到 869 项测试，执行结果为 **868 passed, 1 skipped**；Ruff 全仓通过，mypy 已覆盖 `116 source files`，工作区保持干净。
+
+## 2026-09-22 · 第九轮 durable acquisition 纵切（未部署）
+
+- 新增 `0014` 迁移：`source_candidates` 与 `acquisition_jobs`，均为 tenant/project RLS；应用角色可创建候选、读取/选择任务但没有 acquisition job `UPDATE`，worker 角色才可跨项目认领与落定。
+- 新增内存/PG acquisition 仓储、候选创建/列表、显式选择、幂等下载任务与 claim token 围栏；HTTP 路径为 `source-candidates` 与 `acquisition-jobs`，请求线程不访问外网。
+- 新增独立 `app.workers.acquisition`：复用有界 fetcher，确定性响应拒绝写 `failed`，不可判定网络错误写 `unknown`；成功正文以 `web_fetch` 与 `TaintSource.WEB` 写入既有摄取队列，并用 acquisition 派生的稳定文档/任务 ID支持 worker 崩溃后的恢复。
+- 资料页新增候选 URL 登记、显式“确认下载”、状态展示和有限轮询；原有本地资料上传保持不变。当前是手工 URL 纵切，云端搜索 provider、HTML 解析、混合检索与模型路由尚未完成。
+- 真实 PG 临时库已验证应用角色创建候选、worker 认领/结算，以及 web 正文进入摄取队列；针对本轮的内存/PG/API/worker 回归通过。`node --check frontend/app.js`、Ruff、mypy（120 个源文件）、迁移检查和生成契约检查通过。
+- 未切换 ECS：`0014` 尚未发布，且搜索/解析/路由任务仍未达到第九轮退出门。GitHub 上传要等本轮代码门禁完成后统一提交并推送。

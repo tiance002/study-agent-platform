@@ -81,6 +81,7 @@ CHUNK_PARSER_VERSION = "structure/v1"
 #: 一个是"由谁派生"。合并成一列会让"用户上传的原文"和"由原文派生的摘要"
 #: 看起来是同一件事。
 ACQUISITION_METHOD_UPLOAD = "upload"
+ACQUISITION_METHOD_WEB = "web_fetch"
 
 #: BCP-47 的宽松子集：`zh` / `en` / `zh-Hans` / `pt-BR` 都合法。
 _LANGUAGE_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]+)*$")

@@ -36,6 +36,7 @@ from app.knowledge.models import (
     assert_chunks_belong_to_job,
     assert_chunks_match_document,
 )
+from app.policy.taint import TaintSource
 from app.product.ports import ProductRepository
 
 
@@ -78,6 +79,8 @@ class InMemoryIngestionRepository:
         content: str,
         media_type: str,
         language: str,
+        acquisition_method: str = ACQUISITION_METHOD_UPLOAD,
+        taint_sources: tuple = (),
     ) -> tuple[SourceDocument, IngestionJob]:
         # 资料必须存在且属于该项目 —— 内存版没有组合外键兜底，
         # 这一句就是"不能给别的项目的资料挂原文"的唯一防线。
@@ -95,9 +98,26 @@ class InMemoryIngestionRepository:
             language=language,
             observed_at=now,
             parser_version=DOCUMENT_PARSER_VERSION,
-            acquisition_method=ACQUISITION_METHOD_UPLOAD,
+            acquisition_method=acquisition_method,
+            taint_sources=taint_sources or (TaintSource.UPLOADED_SOURCE,),
         )
         with self._lock:
+            existing = self._documents.get(document_id)
+            if existing is not None:
+                existing_job = self._jobs.get(job_id)
+                if (
+                    existing_job is None
+                    or existing.tenant_id != actor.tenant_id
+                    or existing.project_id != project_id
+                    or existing.source_id != source_id
+                    or existing.content_hash != document.content_hash
+                    or existing.document_title != title
+                    or existing.media_type != media_type
+                    or existing.language != language
+                    or existing.acquisition_method != acquisition_method
+                ):
+                    raise deny(ErrorCode.VERSION_CONFLICT, "同一下载任务的原文标识已被占用")
+                return existing, existing_job
             version = (
                 max(
                     (

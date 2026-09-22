@@ -90,6 +90,8 @@
     const [plan, setPlan] = useState(null);
     const [sources, setSources] = useState([]);
     const [ingestionJobs, setIngestionJobs] = useState([]);
+    const [candidates, setCandidates] = useState([]);
+    const [acquisitionJobs, setAcquisitionJobs] = useState([]);
     const [citationReading, setCitationReading] = useState(null);
     const [activeRun, setActiveRun] = useState(null);
     const [view, setView] = useState("conversation");
@@ -111,6 +113,7 @@
       content: "",
       mediaType: "text/markdown",
     });
+    const [candidateForm, setCandidateForm] = useState({ url: "", title: "", snippet: "" });
 
     const principalId = user?.principal_id || "";
     const scopeKey = `${principalId}|${projectId}|${conversationId}`;
@@ -197,15 +200,18 @@
         setPlan(null);
         setSources([]);
         setIngestionJobs([]);
+        setCandidates([]);
+        setAcquisitionJobs([]);
         return;
       }
       const scope = { principalId, projectId: selectedId, epoch: scopeRef.current.epoch };
-      const [projectData, conversationData, planData, sourceData, jobData] = await Promise.all([
+      const [projectData, conversationData, planData, sourceData, jobData, candidateData] = await Promise.all([
         api("GET", `/projects/${selectedId}`, undefined, { signal }),
         api("GET", `/projects/${selectedId}/conversations`, undefined, { signal }),
         api("GET", `/projects/${selectedId}/plan`, undefined, { signal }),
         api("GET", `/projects/${selectedId}/sources`, undefined, { signal }),
         api("GET", `/projects/${selectedId}/ingestion-jobs`, undefined, { signal }),
+        api("GET", `/projects/${selectedId}/source-candidates`, undefined, { signal }),
       ]);
       if (!currentProject(scope)) return;
       const nextConversations = conversationData.conversations || [];
@@ -214,6 +220,7 @@
       setPlan(planData);
       setSources(sourceData.sources || []);
       setIngestionJobs(jobData.jobs || []);
+      setCandidates(candidateData.candidates || []);
       setConversationId((previous) =>
         nextConversations.some((item) => item.conversation_id === previous)
           ? previous
@@ -259,11 +266,14 @@
       setPlan(null);
       setSources([]);
       setIngestionJobs([]);
+      setCandidates([]);
+      setAcquisitionJobs([]);
       setActiveRun(null);
       setCitationReading(null);
       setQuestion("");
       setNewConversation("");
       setSourceForm({ displayName: "", title: "", content: "", mediaType: "text/markdown" });
+      setCandidateForm({ url: "", title: "", snippet: "" });
       setPlanForm({ goal: "", milestone: "" });
     }, [principalId, projectId]);
 
@@ -598,6 +608,18 @@
       return null;
     }
 
+    async function pollAcquisitionJob(selectedProjectId, acquisitionId) {
+      const scope = { principalId, projectId: selectedProjectId, epoch: scopeRef.current.epoch };
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        const current = await api("GET", `/projects/${selectedProjectId}/acquisition-jobs/${acquisitionId}`);
+        if (!currentProject(scope)) return;
+        setAcquisitionJobs((previous) => [current, ...previous.filter((item) => item.acquisition_id !== acquisitionId)]);
+        if (["succeeded", "failed", "unknown"].includes(current.status)) return current;
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      return null;
+    }
+
     async function readCitation(citation) {
       if (!projectId || !citation?.document_id) return;
       const scope = {
@@ -658,6 +680,58 @@
                 pollIngestionJob(projectId, uploaded.job.job_id).catch((caught) => setError(errorText(caught)));
               }
             );
+          }
+        );
+      } catch (caught) {
+        setError(errorText(caught));
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    async function saveCandidate(event) {
+      event.preventDefault();
+      if (!projectId || !candidateForm.url.trim() || !candidateForm.title.trim()) return;
+      setLoading(true);
+      try {
+        await executeCommand(
+          `create-candidate:${projectId}:${candidateForm.url.trim()}`,
+          "登记候选资料",
+          "POST",
+          `/projects/${projectId}/source-candidates`,
+          {
+            url: candidateForm.url.trim(),
+            title: candidateForm.title.trim(),
+            snippet: candidateForm.snippet.trim(),
+          },
+          async (candidate) => {
+            setCandidates((previous) => [candidate, ...previous.filter((item) => item.candidate_id !== candidate.candidate_id)]);
+            setCandidateForm({ url: "", title: "", snippet: "" });
+            setNotice("候选资料已登记，请确认后下载");
+          }
+        );
+      } catch (caught) {
+        setError(errorText(caught));
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    async function selectCandidate(candidate) {
+      if (!projectId || candidate.status !== "discovered") return;
+      setLoading(true);
+      try {
+        await executeCommand(
+          `select-candidate:${projectId}:${candidate.candidate_id}`,
+          "开始下载资料",
+          "POST",
+          `/projects/${projectId}/source-candidates/${candidate.candidate_id}/select`,
+          { display_name: candidate.title, media_type: "text/markdown", language: "zh" },
+          async (result) => {
+            setAcquisitionJobs((previous) => [result.acquisition, ...previous.filter((item) => item.acquisition_id !== result.acquisition.acquisition_id)]);
+            await refreshProjectData(projectId);
+            setNotice("资料已加入下载队列");
+            pollAcquisitionJob(projectId, result.acquisition.acquisition_id).catch((caught) => setError(errorText(caught)));
           }
         );
       } catch (caught) {
@@ -736,7 +810,7 @@
             project && h("form", { className: "new-conversation", onSubmit: createConversation }, h("input", { value: newConversation, onChange: (event) => setNewConversation(event.target.value), placeholder: "新会话名称", "aria-label": "新会话名称" }), h("button", { className: "primary-button compact", disabled: loading }, "+ 新会话"))
           ),
           project && h(WorkspaceTabs, { view, setView }),
-          project ? h(MainView, { view, projectId, conversations, conversationId, setConversationId, currentConversation, messages, question, setQuestion, askQuestion, loading, activeRun, plan, planForm, setPlanForm, savePlan, sources, ingestionJobs, sourceForm, setSourceForm, saveSource }) : h(EmptyProject, { onFocus: () => document.querySelector(".project-form input")?.focus() })
+          project ? h(MainView, { view, projectId, conversations, conversationId, setConversationId, currentConversation, messages, question, setQuestion, askQuestion, loading, activeRun, plan, planForm, setPlanForm, savePlan, sources, ingestionJobs, candidates, acquisitionJobs, sourceForm, setSourceForm, saveSource, candidateForm, setCandidateForm, saveCandidate, selectCandidate }) : h(EmptyProject, { onFocus: () => document.querySelector(".project-form input")?.focus() })
         ),
         project && h(EvidenceRail, { activeRun, sources, projectId, plan, view, onReadCitation: readCitation, citationReading })
       )
@@ -849,17 +923,48 @@
     );
   }
 
-  function SourcesView({ sources, ingestionJobs, sourceForm, setSourceForm, saveSource, loading }) {
+  function SourcesView({ sources, ingestionJobs, candidates, acquisitionJobs, sourceForm, setSourceForm, saveSource, candidateForm, setCandidateForm, saveCandidate, selectCandidate, loading }) {
     const labels = { queued: "排队中", processing: "处理中", succeeded: "已处理", failed: "处理失败" };
+    const acquisitionLabels = { queued: "等待下载", running: "下载中", succeeded: "已下载", failed: "下载失败", unknown: "待确认" };
     const latestJobs = new Map();
     (ingestionJobs || []).forEach((job) => {
       if (!latestJobs.has(job.source_id)) latestJobs.set(job.source_id, job);
     });
-    return h("section", { className: "content-section form-section" }, h("div", { className: "section-title" }, h("div", null, h("p", { className: "eyebrow" }, "项目资料"), h("h2", null, `${sources.length} 份资料`))), h("form", { className: "source-form", onSubmit: saveSource }, h("label", { htmlFor: "source-display" }, "资料名称"), h("input", { id: "source-display", value: sourceForm.displayName, onChange: (event) => setSourceForm({ ...sourceForm, displayName: event.target.value }), placeholder: "例如：Agent 设计笔记" }), h("label", { htmlFor: "source-title" }, "文档标题"), h("input", { id: "source-title", value: sourceForm.title, onChange: (event) => setSourceForm({ ...sourceForm, title: event.target.value }), placeholder: "例如：工具调用边界" }), h("label", { htmlFor: "source-content" }, "正文"), h("textarea", { id: "source-content", value: sourceForm.content, onChange: (event) => setSourceForm({ ...sourceForm, content: event.target.value }), rows: 8, placeholder: "粘贴 Markdown 或纯文本" }), h("button", { className: "primary-button", disabled: loading || !sourceForm.content.trim() }, loading ? "登记中…" : "登记资料")), h("div", { className: "source-list" }, sources.length ? sources.map((source) => {
+    return h("section", { className: "content-section form-section" },
+      h("div", { className: "section-title" }, h("div", null, h("p", { className: "eyebrow" }, "项目资料"), h("h2", null, `${sources.length} 份资料`))),
+      h("form", { className: "source-form candidate-form", onSubmit: saveCandidate },
+        h("label", { htmlFor: "candidate-url" }, "资料网址"),
+        h("input", { id: "candidate-url", type: "url", value: candidateForm.url, onChange: (event) => setCandidateForm({ ...candidateForm, url: event.target.value }), placeholder: "https://example.com/guide", required: true }),
+        h("label", { htmlFor: "candidate-title" }, "候选标题"),
+        h("input", { id: "candidate-title", value: candidateForm.title, onChange: (event) => setCandidateForm({ ...candidateForm, title: event.target.value }), placeholder: "例如：事务入门指南", required: true }),
+        h("label", { htmlFor: "candidate-snippet" }, "摘要（可选）"),
+        h("textarea", { id: "candidate-snippet", value: candidateForm.snippet, onChange: (event) => setCandidateForm({ ...candidateForm, snippet: event.target.value }), rows: 3, placeholder: "帮助你确认来源，不会代替正文" }),
+        h("button", { className: "primary-button", disabled: loading || !candidateForm.url.trim() || !candidateForm.title.trim() }, loading ? "登记中…" : "登记候选资料")
+      ),
+      h("div", { className: "source-list candidate-list" }, candidates?.length ? candidates.map((candidate) => {
+        const acquisition = (acquisitionJobs || []).find((job) => job.candidate_id === candidate.candidate_id);
+        const status = acquisition ? acquisitionLabels[acquisition.status] || acquisition.status : candidate.status === "selected" ? "已授权" : "待确认";
+        return h("div", { className: "source-row candidate-row", key: candidate.candidate_id },
+          h("div", null,
+            h("strong", null, candidate.title),
+            h("a", { href: candidate.url, target: "_blank", rel: "noreferrer" }, candidate.source_domain),
+            candidate.snippet && h("span", null, candidate.snippet)
+          ),
+          h("div", { className: "candidate-actions" },
+            h("span", { className: `source-status ${acquisition?.status || candidate.status}` }, status),
+            candidate.status === "discovered" && h("button", { className: "secondary-button compact", type: "button", onClick: () => selectCandidate(candidate), disabled: loading }, "确认下载")
+          )
+        );
+      }) : h("div", { className: "empty-state compact-empty" }, h("h2", null, "还没有候选资料"), h("p", null, "粘贴一个公开网址，确认后才会进入下载队列。"))),
+      h("div", { className: "source-divider", "aria-hidden": true }),
+      h("h2", { className: "subsection-title" }, "上传本地资料"),
+      h("form", { className: "source-form", onSubmit: saveSource }, h("label", { htmlFor: "source-display" }, "资料名称"), h("input", { id: "source-display", value: sourceForm.displayName, onChange: (event) => setSourceForm({ ...sourceForm, displayName: event.target.value }), placeholder: "例如：Agent 设计笔记" }), h("label", { htmlFor: "source-title" }, "文档标题"), h("input", { id: "source-title", value: sourceForm.title, onChange: (event) => setSourceForm({ ...sourceForm, title: event.target.value }), placeholder: "例如：工具调用边界" }), h("label", { htmlFor: "source-content" }, "正文"), h("textarea", { id: "source-content", value: sourceForm.content, onChange: (event) => setSourceForm({ ...sourceForm, content: event.target.value }), rows: 8, placeholder: "粘贴 Markdown 或纯文本" }), h("button", { className: "primary-button", disabled: loading || !sourceForm.content.trim() }, loading ? "登记中…" : "登记资料")),
+      h("div", { className: "source-list" }, sources.length ? sources.map((source) => {
       const job = latestJobs.get(source.source_id);
       const status = job ? labels[job.status] || job.status : "已登记";
       return h("div", { className: "source-row", key: source.source_id }, h("div", null, h("strong", null, source.display_name), h("span", null, source.media_type || "未标注类型"), job && h("span", null, `版本 ${job.document_id}`)), h("span", { className: `source-status ${job?.status || "registered"}` }, status));
-    }) : h("div", { className: "empty-state compact-empty" }, h("h2", null, "还没有资料"), h("p", null, "登记资料后，回答可以带上原文引用。"))));
+      }) : h("div", { className: "empty-state compact-empty" }, h("h2", null, "还没有资料"), h("p", null, "登记资料后，回答可以带上原文引用。")))
+    );
   }
 
   function EvidenceRail({ activeRun, sources, plan, view, onReadCitation, citationReading }) {

@@ -51,6 +51,8 @@ class IngestionRepository(Protocol):
         content: str,
         media_type: str,
         language: str,
+        acquisition_method: str = "upload",
+        taint_sources: tuple = (),
     ) -> tuple[SourceDocument, IngestionJob]:
         """登记一版新原文并入队一个摄取任务 —— **一次原子写入**。
 

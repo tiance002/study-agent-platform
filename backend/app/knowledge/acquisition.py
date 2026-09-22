@@ -91,6 +91,19 @@ class SourceCandidate:
             raise ValueError("expires_at 必须晚于 discovered_at")
         _require_status(self.status, CandidateStatus, "status")
 
+    def to_dict(self) -> dict:
+        """Public candidate view; tenant identity stays in the authenticated route."""
+        return {
+            "candidate_id": self.candidate_id,
+            "url": self.url,
+            "title": self.title,
+            "snippet": self.snippet,
+            "source_domain": self.source_domain,
+            "status": str(self.status),
+            "discovered_at": self.discovered_at.isoformat(),
+            "expires_at": self.expires_at.isoformat(),
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class AcquisitionJob:
@@ -101,10 +114,12 @@ class AcquisitionJob:
     project_id: str
     source_id: str
     candidate_id: str
+    requested_by: str
     url: str
     title: str
     media_type: str
     language: str
+    idempotency_key: str
     status: DownloadStatus
     attempt_count: int
     created_at: datetime
@@ -122,6 +137,8 @@ class AcquisitionJob:
             "project_id",
             "source_id",
             "candidate_id",
+            "requested_by",
+            "idempotency_key",
         ):
             require_id(getattr(self, name), name)
         _require_source_url(self.url)
@@ -137,6 +154,8 @@ class AcquisitionJob:
             raise ValueError("updated_at 不能早于 created_at")
         require_text(self.lease_owner, "lease_owner", allow_empty=True)
         require_text(self.claim_token, "claim_token", allow_empty=True)
+        if self.lease_until is not None:
+            require_aware(self.lease_until, "lease_until")
         require_text(self.error_code, "error_code", allow_empty=True)
         require_text(self.error_detail, "error_detail", allow_empty=True)
         has_lease = bool(self.lease_owner and self.claim_token and self.lease_until)
@@ -148,6 +167,24 @@ class AcquisitionJob:
             raise ValueError("非 running acquisition job 不得携带 lease")
         if self.status in {DownloadStatus.FAILED, DownloadStatus.UNKNOWN} and not self.error_code:
             raise ValueError("失败或未知 acquisition job 必须有 error_code")
+
+    def to_dict(self) -> dict:
+        """Public status view; leases and idempotency internals stay server-side."""
+        return {
+            "acquisition_id": self.acquisition_id,
+            "source_id": self.source_id,
+            "candidate_id": self.candidate_id,
+            "url": self.url,
+            "title": self.title,
+            "media_type": self.media_type,
+            "language": self.language,
+            "status": str(self.status),
+            "attempt_count": self.attempt_count,
+            "error_code": self.error_code,
+            "error_detail": self.error_detail,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,10 +229,12 @@ class AcquisitionRequest:
             project_id=self.project_id,
             source_id=self.source_id,
             candidate_id=self.candidate_id,
+            requested_by=self.requested_by,
             url=self.url,
             title=self.title,
             media_type=self.media_type,
             language=self.language,
+            idempotency_key=self.idempotency_key,
             status=DownloadStatus.QUEUED,
             attempt_count=0,
             created_at=self.requested_at,

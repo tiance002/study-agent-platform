@@ -75,6 +75,8 @@ from app.identity.ports import (
 )
 from app.identity.rate_limit import InMemoryRateLimiter, RateLimiter
 from app.identity.session import SessionIssuer
+from app.knowledge.acquisition_ports import AcquisitionRepository
+from app.knowledge.memory_acquisition_store import InMemoryAcquisitionRepository
 from app.knowledge.memory_store import InMemoryIngestionRepository
 from app.knowledge.ports import IngestionRepository
 from app.knowledge.retrieval import ChunkIndex
@@ -110,7 +112,7 @@ DEMO_PROJECT = "proj_demo"
 DEFAULT_SESSION_TTL = timedelta(hours=8)
 
 #: 代码预期的数据库迁移版本。启动自检核对它；新增迁移必须同步更新。
-EXPECTED_SCHEMA_VERSION = "0013"
+EXPECTED_SCHEMA_VERSION = "0014"
 
 
 @dataclass
@@ -156,6 +158,8 @@ class PlatformState:
     # 两个分支里构造出来的其实是同一个类 —— 这一点写在装配处，免得
     # 后来的人以为"少装配了一个 PG 版"。
     knowledge: KnowledgeRepository
+    # 显式候选与下载任务：web 只登记/授权，外网访问留给独立 worker。
+    acquisition: AcquisitionRepository
     # 教学运行仓储（第五轮）。必填同理：教学端点不能等第一个请求才暴露装配缺失。
     teaching: TeachingRunRepository
     # 教学 provider。None = 功能显式关闭（无凭据/未配置）——
@@ -273,12 +277,14 @@ def build_platform(
     learning_loop: LearningLoopRepository
     ingestion: IngestionRepository
     knowledge: KnowledgeRepository
+    acquisition: AcquisitionRepository
     teaching: TeachingRunRepository
     audit_outbox: AuditOutbox
     accounts: AccountRepository
 
     if loaded.use_postgres:
         from app.db.account_store import PostgresAccountRepository
+        from app.db.acquisition_store import PostgresAcquisitionRepository
         from app.db.audit_store import PostgresAuditOutbox
         from app.db.confirmation_store import PostgresConfirmationStore
         from app.db.evidence_store import PostgresEvidenceRepository
@@ -316,6 +322,13 @@ def build_platform(
         )
         confirmations = PostgresConfirmationStore(dsn)
         products = PostgresProductRepository(membership=membership, clock=clock, dsn=dsn)
+        acquisition = PostgresAcquisitionRepository(
+            membership=membership,
+            products=products,
+            dsn=dsn,
+            worker_dsn=loaded.worker_dsn or worker_role_dsn(),
+            clock=clock,
+        )
         http_idempotency = PostgresHttpIdempotencyStore(dsn)
         evidence = PostgresEvidenceRepository(clock, dsn)
         learning_loop = PostgresLearningLoopRepository(
@@ -381,6 +394,7 @@ def build_platform(
             learning_loop=learning_loop,
             ingestion=ingestion,
             knowledge=knowledge,
+            acquisition=acquisition,
             teaching=teaching,
             teaching_provider=teaching_provider,
             accounts=accounts,
@@ -442,6 +456,9 @@ def build_platform(
         membership=membership, products=products, clock=clock
     )
     knowledge = KnowledgeRepository(ingestion=ingestion)
+    acquisition = InMemoryAcquisitionRepository(
+        membership=membership, products=products, clock=clock
+    )
     teaching = InMemoryTeachingRepository(
         membership=membership, products=memory_products, clock=clock
     )
@@ -489,6 +506,7 @@ def build_platform(
         learning_loop=learning_loop,
         ingestion=ingestion,
         knowledge=knowledge,
+        acquisition=acquisition,
         teaching=teaching,
         teaching_provider=teaching_provider,
         accounts=accounts,

@@ -217,6 +217,8 @@ class PostgresIngestionRepository:
         content: str,
         media_type: str,
         language: str,
+        acquisition_method: str = ACQUISITION_METHOD_UPLOAD,
+        taint_sources: tuple = (),
     ) -> tuple[SourceDocument, IngestionJob]:
         self.membership.get(actor, project_id)
         now = self._clock.now()
@@ -232,7 +234,8 @@ class PostgresIngestionRepository:
             language=language,
             observed_at=now,
             parser_version=DOCUMENT_PARSER_VERSION,
-            acquisition_method=ACQUISITION_METHOD_UPLOAD,
+            acquisition_method=acquisition_method,
+            taint_sources=taint_sources or (TaintSource.UPLOADED_SOURCE,),
         )
         try:
             with tenant_transaction(

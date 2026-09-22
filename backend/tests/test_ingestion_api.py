@@ -545,7 +545,7 @@ def _route_pairs(app) -> set[tuple[str, str]]:
 
 @pytest.mark.invariant
 def test_claim_next_has_no_http_path_to_it():
-    """`claim_next` 是唯一没有身份参数的仓储方法，因此必须不可从 HTTP 到达。
+    """无身份参数的系统级 `claim_next` 只能在 worker 面内部被调用。
 
     用"出现位置的闭集"守，而不是靠 review：新增一个调用点会让测试失败，
     于是"再加一个入口"必须是一次有意识的决定。
@@ -554,7 +554,11 @@ def test_claim_next_has_no_http_path_to_it():
         "knowledge/ports.py",         # 协议声明
         "knowledge/memory_store.py",  # 内存实现（开发适配器）
         "db/ingestion_store.py",      # PostgreSQL 实现
-        "workers/ingestion.py",       # 唯一的生产调用点
+        "workers/ingestion.py",       # 摄取生产调用点
+        "knowledge/acquisition_ports.py",
+        "knowledge/memory_acquisition_store.py",
+        "db/acquisition_store.py",
+        "workers/acquisition.py",     # 外部资料生产调用点
     }
 
 

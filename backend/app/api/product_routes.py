@@ -12,8 +12,10 @@ milestone_id / source_id 全部由服务端生成并随响应返回——客户�
 
 from __future__ import annotations
 
+from datetime import timedelta
 from hashlib import sha256
 from typing import Literal
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
@@ -22,6 +24,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.core.hashing import canonical_json
 from app.core.ids import new_id
 from app.identity.models import Principal
+from app.knowledge.acquisition import AcquisitionRequest, SourceCandidate
+from app.knowledge.fetch_policy import FetchPolicyError, validate_fetch_target
 from app.knowledge.models import MAX_DOCUMENT_BYTES, require_document_content
 from app.knowledge.retrieval import RANKING_VERSION
 from app.learning.evidence import Direction, EvidenceKind, Validity
@@ -130,6 +134,36 @@ class SourceContentBody(BaseModel):
     @classmethod
     def _validate_content(cls, value: str) -> str:
         return require_document_content(value)
+
+
+class CandidateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=1, max_length=2048)
+    title: str = Field(min_length=1, max_length=300)
+    snippet: str = Field(default="", max_length=2000)
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, value: str) -> str:
+        try:
+            # Candidate creation is intentionally DNS-free: the worker repeats
+            # real DNS and public-address checks immediately before connecting.
+            target = validate_fetch_target(
+                value,
+                resolver=lambda _hostname, _port: ("8.8.8.8",),
+            )
+        except FetchPolicyError as exc:
+            raise ValueError("资料来源 URL 不符合安全策略") from exc
+        return target.url
+
+
+class AcquisitionSelectBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str = Field(min_length=1, max_length=200)
+    media_type: Literal["text/plain", "text/markdown"]
+    language: str = Field(default="zh", pattern=r"^[a-z]{2,3}(-[A-Za-z0-9]+)*$")
 
 
 class DiagnosisBody(BaseModel):
@@ -329,6 +363,124 @@ def _identity_hash(acquisition: dict) -> str:
     不算数，规范化 JSON 的哈希才算——同一 acquisition 必得同一哈希。"""
     digest = sha256(canonical_json(acquisition).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
+
+
+def _candidate_domain(url: str) -> str:
+    hostname = urlsplit(url).hostname
+    if hostname is None:  # CandidateBody has already validated this.
+        raise ValueError("资料来源 URL 缺少主机名")
+    return hostname.rstrip(".").encode("idna").decode("ascii").lower()
+
+
+@router.post("/projects/{project_id}/source-candidates", status_code=201, response_model=None)
+def create_source_candidate(
+    request: Request, project_id: str, body: CandidateBody
+) -> dict | JSONResponse:
+    """登记一个待用户确认的 URL 候选；这里不访问外网。"""
+    from app.api.http_idempotency import idempotent_write
+
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+        state = _state(request)
+        now = state.clock.now()
+        candidate = SourceCandidate(
+            candidate_id=new_id("cand"),
+            tenant_id=guard.principal.tenant_id,
+            project_id=project_id,
+            url=body.url,
+            title=body.title,
+            snippet=body.snippet,
+            source_domain=_candidate_domain(body.url),
+            discovered_at=now,
+            expires_at=now + timedelta(days=7),
+        )
+        stored = state.acquisition.create_candidate(guard.principal, project_id, candidate)
+        result = stored.to_dict()
+        guard.complete(201, result)
+        return result
+
+
+@router.get("/projects/{project_id}/source-candidates")
+def list_source_candidates(request: Request, project_id: str) -> dict:
+    state = _state(request)
+    rows = state.acquisition.list_candidates(_actor(request), project_id)
+    return {"candidates": [row.to_dict() for row in rows]}
+
+
+@router.post(
+    "/projects/{project_id}/source-candidates/{candidate_id}/select",
+    status_code=202,
+    response_model=None,
+)
+def select_source_candidate(
+    request: Request,
+    project_id: str,
+    candidate_id: str,
+    body: AcquisitionSelectBody,
+) -> dict | JSONResponse:
+    """显式授权候选后创建 durable 下载任务；HTTP 请求不执行网络访问。"""
+    from app.api.http_idempotency import idempotent_write
+
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+        state = _state(request)
+        candidate = state.acquisition.get_candidate(
+            guard.principal, project_id, candidate_id
+        )
+        source = state.products.register_source(
+            guard.principal,
+            project_id,
+            source_id=new_id("src"),
+            display_name=body.display_name,
+            media_type=body.media_type,
+            identity_hash=_identity_hash({"kind": "web", "url": candidate.url}),
+            acquisition={"kind": "web", "url": candidate.url},
+        )
+        key = request.headers.get("Idempotency-Key", "").strip() or new_id("acq-key")
+        queued = state.acquisition.select(
+            guard.principal,
+            project_id,
+            AcquisitionRequest(
+                acquisition_id=new_id("acq"),
+                tenant_id=guard.principal.tenant_id,
+                project_id=project_id,
+                source_id=source.source_id,
+                candidate_id=candidate.candidate_id,
+                requested_by=guard.principal.principal_id,
+                url=candidate.url,
+                title=candidate.title,
+                media_type=body.media_type,
+                language=body.language,
+                idempotency_key=key,
+                requested_at=state.clock.now(),
+            ),
+        )
+        result = {
+            "candidate": state.acquisition.get_candidate(
+                guard.principal, project_id, candidate_id
+            ).to_dict(),
+            "source": source.to_dict(),
+            "acquisition": queued.to_dict(),
+        }
+        guard.complete(202, result)
+        return result
+
+
+@router.get("/projects/{project_id}/acquisition-jobs/{acquisition_id}")
+def get_acquisition_job(request: Request, project_id: str, acquisition_id: str) -> dict:
+    state = _state(request)
+    job = state.acquisition.get_job(_actor(request), project_id, acquisition_id)
+    return job.to_dict()
 
 
 @router.post("/projects/{project_id}/sources", status_code=201, response_model=None)
