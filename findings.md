@@ -363,3 +363,10 @@ R4-05 之后写入的片段都经过"与持久化原文比对"，但**在此之�
 - **当前仍有明确证据缺口**：Playwright 已覆盖注册、项目/教学 503 重试、资料/计划/引用、键盘和 768px；但还没有确定性 C1/C2/C3 逆序矩阵，也没有用真实 uvicorn 子进程完成重启后 HTTP 读回和中断网络恢复。不能把 TestClient 的适配器重建误报成完整进程退出门。
 - **发布记录也必须区分本地提交与远端上传**：本轮本地 commit 已生成并部署到 ECS，但常规 push 与 Git Data API 都因 GitHub 443 网络不可达中断；服务器部署成功不等于 GitHub 已上传，记录中必须保留这个差异。
 - **门禁临时目录不能复用失效权限目录**：第一次统一门禁的业务测试并未失败，244 个错误来自 pytest 在历史 `TEMP` 根目录创建 fixture 时的 `PermissionError`。门禁必须使用仓库内按进程隔离的可写临时根，且在 JUnit 前区分环境错误与业务失败。
+
+## 第九轮安全获取内核发现（2026-09-22）
+
+- 外部资料获取不能直接使用按 hostname 的普通 HTTP 客户端：策略层解析出的公网 IP 必须传给直连 transport，同时保留 hostname 作为 Host/TLS SNI；否则校验和真正连接之间仍有 DNS rebinding 窗口。
+- 重定向不是“同一个请求的附属字段”，每一跳都必须重新执行 scheme、端口、allowlist、DNS 和公网地址检查；HTTPS 来源降级到 HTTP 会被拒绝。
+- `Content-Length` 只是在读取前的快速拒绝，不能替代流式计数；无该头、头部造假或 chunked 响应都必须受同一个 max-bytes 上限约束。
+- “不设置月度金额上限”与“无界外部抓取”不是同一件事。获取器仍保留连接、读取、总 deadline、redirect、bytes 和 retryable 边界；本轮尚未把网络错误写入 acquisition 状态，避免在 durable 状态机未冻结前产生第二套失败语义。

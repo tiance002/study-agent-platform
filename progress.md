@@ -690,3 +690,11 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - 使用浏览器只读检查真实线上首屏：用户名/密码字段可见，密码登录选中，注册账号标签可见；未提交表单、未创建线上验收账号、未触发真实模型调用。
 - 常规 `git push` 和既有 GitHub Data API 推送均因当前环境无法连接 GitHub 443 而未完成；未 force-push。GitHub 上传状态必须保留为“待网络恢复后推送”，不能写成已上传。
 - 修复统一门禁第一次失败的基础设施问题：历史 `TEMP` 目录权限失效会让 pytest fixture 批量 `PermissionError`；`run_round8_gate.py` 现默认使用 `var/round8-gate/tmp-<pid>`，允许环境变量显式覆盖。修复后统一门禁真实结果为全量 `841 passed, 1 skipped`，PG `135 passed, 707 deselected, 0 skipped`，最终输出 `ROUND8_GATE_PASSED`。
+
+## 2026-09-22 · 第九轮安全获取内核（未接入生产）
+
+- 按冻结计划先实现外部资料获取的纯策略层与有界 HTTP 适配器：URL 规范化、HTTP(S) 与端口闭集、凭据/localhost/私网/保留地址拒绝、DNS 每个结果复核、精确 host allowlist、重定向逐跳复核、HTTPS 降级拒绝。
+- 默认传输连接到已通过 DNS 检查的具体 IP，并以原主机名做 Host/TLS SNI，避免校验后再次按域名解析形成 DNS rebinding 窗口；响应同时检查 `Content-Length` 与流式字节上限。
+- 独立保留连接、读取、总 deadline、最大重定向数和最大响应字节；错误只返回稳定安全码与可重试标记，不把 URL 凭据、路径或底层异常写入用户状态。
+- 新增 22 项无网络测试，覆盖 SSRF、DNS 失败、重定向越界、降级、超大响应、慢流、HTTP 5xx 和传输超时；全量回归 `841 passed, 1 skipped`，Ruff 全仓通过，mypy `115 source files` 通过。
+- 这只是第九轮任务 1 的安全内核，尚未接入 web 路由、durable acquisition job、解析/对象存储或生产 ECS；因此没有切换现网 release，也没有声称普通用户已经能搜索下载资料。
