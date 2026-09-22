@@ -168,6 +168,6 @@
 - [x] 教学 provider 只从 `DeploymentSettings` 读取配置，不再二次读取进程环境。
 - [x] 修正文档中的历史状态，并完成全量、PG 和静态检查。
 - [x] ECS 以独立 release 发布并完成备份、启动自检、HTTPS 和服务日志冒烟。
-- [ ] GitHub 推送（当前工作区还包含此前开放注册与真实 provider 的未提交实现，需整体提交以保持生产可追踪）。
+- [x] GitHub 分支推送；提交覆盖当前生产源码与本轮架构收口，避免只上传局部修复。
 
 实施细节：`docs/superpowers/plans/2026-09-22-architecture-cleanup.md`。

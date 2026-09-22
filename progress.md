@@ -669,3 +669,4 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - 发布包 SHA-256 为 `0CE2473555C9984C543B6E246B86B1625F13BB455DFDACF3B333EE24C77E9DBF`，上传后校验一致；排除了 Git、虚拟环境、缓存、运行数据和密钥。
 - 当前软链接指向 `/opt/study-plan/releases/20260922-architecture-boundaries-v1`；迁移仍为 `0013 (head)`。
 - web、ingestion、teaching 均 active；公网 HTTPS `/healthz` 返回 200，生产 `/registry` 返回 404，最近十分钟三项服务无 warning 日志。
+- 当前生产源码已提交为 `6369137` 并推送到 GitHub 分支 `codex/architecture-boundaries-20260922`；未包含 PEM、环境文件、运行数据或 API key。
