@@ -27,6 +27,9 @@
 6. **资料外发范围**：只有 `display_policy=full` 的片段进入 provider 上下文；
    `summary` / `citation_only` 的正文不出服务端。用户上传到项目内的资料
    即视为同意在**本项目内**用于检索与教学回答；不外发到项目之外。
+7. **无资料自然语言降级**：兼容 provider 在没有资料快照时若仍返回普通文本，
+   可落定为 `inference_only`；只要请求带有资料快照，非严格 JSON 仍为
+   `MALFORMED`，不得绕过引用校验。
 
 ## 后果
 

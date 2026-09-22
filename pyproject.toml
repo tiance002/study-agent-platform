@@ -8,6 +8,7 @@ dependencies = [
     "uvicorn>=0.32",
     "pydantic>=2.9",
     "PyYAML>=6.0",
+    "argon2-cffi>=23.1",
 ]
 
 [project.optional-dependencies]

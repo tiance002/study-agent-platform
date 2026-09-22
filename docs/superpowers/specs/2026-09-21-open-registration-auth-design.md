@@ -3,13 +3,13 @@
 ## 状态
 
 已获用户确认的产品方向：用户名 + 密码、开放注册、注册后自动创建个人学习空间。
-本文是实现前规格；当前线上仍保留邀请码兑换，未认证用户默认界面尚未切换。
+本文是实现前规格；当前线上仍保留邀请码兑换，未认证用户默认界面尚未切换。已冻结为 `0012` 开工基线。
 
 ## 目标与非目标
 
 ### 目标
 
-- 未注册用户可通过用户名、密码和显示名称注册。
+- 未注册用户可通过用户名和密码注册；首版不单独收集显示名称，服务端将原始用户名复制到 `principals.display_name`。
 - 注册事务自动创建一个个人租户和一个主体；不要求邀请码、邮箱或管理员介入。
 - 用户可使用用户名和密码登录，服务端创建可撤销的数据库会话并签发 HttpOnly Cookie。
 - 登录、注册、邀请码兑换共用严格来源校验、未认证限流和认证审计。
@@ -18,9 +18,10 @@
 
 ### 非目标
 
-- 本轮不实现邮箱验证、密码重置、社交登录、二次认证或管理员后台。
+- 本轮不实现邮箱验证、自助密码重置、社交登录、二次认证或管理员后台；运维处置流程另行交付，不得临时手工改库冒充恢复。
+- 账号生命周期基线：密码遗失时首版不恢复、不手工改 `password_hash`；禁用、数据导出、删除请求由受理人、核验材料、处置结果和审计事件组成独立运维流程。若日后增加管理员重置，必须使用一次性恢复凭证、递增 `security_generation`、撤销旧会话并保留审计，不能只凭用户名操作。
 - 本轮不允许客户端提交 `tenant_id`、`principal_id` 或项目归属字段。
-- 本轮不自动创建示例项目；个人空间创建后由用户在工作台创建第一个学习项目。
+- 注册会创建一个空的个人默认学习空间及授权，不灌入示例资料、对话或计划；用户可在工作台继续创建更多学习项目。
 - 本轮不移除邀请码兑换端点；它保留给内测、管理员邀请和兼容旧用户。
 
 ## 用户流程
@@ -28,7 +29,7 @@
 ### 注册
 
 1. 浏览器打开同源认证页，默认显示“注册”与“登录”切换。
-2. 用户提交 `username`、`password`、`password_confirmation`、`display_name`。
+2. 用户提交 `username`、`password`。
 3. 服务端做长度、规范化和密码强度校验；请求来源必须是可信同源。
 4. 服务端在一个事务中创建个人租户、主体和密码凭据。
 5. 服务端创建 `user_sessions` 行并签发 `study_session` HttpOnly Cookie。
@@ -55,8 +56,8 @@
 - `credential_id text primary key`
 - `tenant_id text not null`
 - `principal_id text not null`
-- `username text not null`：保留用户输入的规范化用户名用于展示和回填
-- `username_normalized text not null unique`：NFKC 后再 `casefold()`，作为唯一查找键
+- `username text not null`：保留用户输入的原始用户名用于展示和回填
+- `username_normalized text not null unique`：NFKC 后再 `casefold()`，作为唯一查找键；唯一索引使用 `COLLATE "C"`
 - `password_hash text not null`：Argon2id PHC 字符串；只存哈希，不存密码
 - `created_at timestamptz not null`
 - `updated_at timestamptz not null`
@@ -79,28 +80,33 @@
 新增：
 
 - `POST /auth/register`
-  - 请求：`username`、`password`、`password_confirmation`、`display_name`
-  - 成功：创建会话 Cookie，返回 `principal_id`、`expires_at`
+  - 请求：`username`、`password`
+  - 成功：HTTP `201`，创建会话 Cookie，返回 `principal_id`、`expires_at` 及默认项目标识
   - 失败：稳定的校验错误、用户名占用、限流或统一认证错误；不回显密码
 - `POST /auth/login`
   - 请求：`username`、`password`
-  - 成功：创建会话 Cookie，返回 `principal_id`、`expires_at`
+  - 成功：HTTP `200`，创建会话 Cookie，返回 `principal_id`、`expires_at`
   - 失败：统一 `AUTH_REQUIRED` 语义，不区分用户名不存在和密码错误
 
 现有 `/auth/logout`、`/auth/logout/all`、所有产品端点和 Cookie 属性保持不变。
 
 ### 输入约束
 
-- `username`：1–16 个 Unicode 码点，原始输入与 NFKC + `casefold()` 后的唯一键都必须满足长度限制；不静默截断或去除空白。首字符必须是 Unicode `XID_Start`，其余字符必须是 `XID_Continue` 或 `.`、`-`、`_`，另行拒绝默认不可见字符、空白、控制字符、表情符号和双向控制字符；中文用户名允许，例如 `张`、`张三`、`张三_01`。前端按码点计数，后端为最终权威；密码不进行这些规范化操作。
-- `display_name`：1–80 个 Unicode 字符，去除首尾空白后不能为空。
+- `username`：首版仅允许基本汉字 `U+4E00–U+9FFF`、CJK 扩展 A `U+3400–U+4DBF`、ASCII 英文字母/数字及 `_`、`.`、`-`；仅额外接受全角 ASCII 英文字母作为兼容原文输入。原文先按允许集合、首字符和 1–16 码点检查，再计算 `NFKC + casefold()`，规范化结果再次按同一集合、首字符和长度检查。字符范围、规范化实现和 Unicode 数据版本由固定测试向量锁定，禁止依赖 `isalpha()` 或静默改变既有唯一性规则。密码不进行这些规范化操作。
 - `password`：12–128 个 Unicode 字符；不强制字符类别组合，避免只制造可预测规则。
 - 所有请求模型 `extra="forbid"`；客户端不能带身份、租户、角色、项目或凭据状态字段。
 
 ### 来源与限流
 
-- 注册和登录都必须通过可信 `Origin`，无 `Origin` 时必须通过可信 `Referer`；两者缺失或不可信均拒绝。
+- 注册和登录都必须通过可信 `Origin`，无 `Origin` 时必须通过可信 `Referer`；两者缺失或不可信均拒绝。注册、登录和认证错误响应统一 `Cache-Control: no-store`。
 - 注册按客户端键限流；登录按客户端键与规范化用户名组合限流，并设置独立配置上限，不能复用邀请码兑换的单一桶语义。
 - 用户名占用错误可以返回 409 供正常用户修正，但登录失败必须统一，不得成为账号探测接口。
+
+### 运行与发布开关
+
+- `registration_enabled` 与 `password_login_enabled` 是两个独立的、默认关闭的开关；缺失或读取失败均关闭。开关由唯一事实源提供，并在多实例启动/健康检查中核对一致性。
+- 有效 Cookie 调用注册/登录返回 `409 already_authenticated`；失效 Cookie 视为未登录。普通 logout 可清除失效 Cookie，但不得声称撤销了有效服务端会话；`logout/all` 仅允许当前会话仍有效时执行。
+- Argon2 计算池覆盖注册、真实登录、dummy 验证和重哈希；初始每进程并发 2，注册低优先级、登录优先，策略限流返回 429，计算池饱和返回 503 + `Retry-After`。
 
 ## 后端组件
 
@@ -134,6 +140,7 @@
 - `0002 → 0012 → 0011 → 0012` 可逆迁移验证。
 - 未认证应用角色不能直接读取 `account_credentials`，只能执行明确的 definer 函数。
 - 跨租户组合外键、RLS、用户名唯一约束和并发注册只允许一个成功。
+- `user_sessions` 增加 `auth_method`、可空 `credential_id`、`security_generation`；密码会话必须关联同主体凭据，邀请会话不得关联凭据。Argon2 参数版本独立于安全代际。既有会话仅在核验全部为邀请认证后回填为 `invitation`，发现未知来源即中止迁移。
 
 ### 浏览器
 

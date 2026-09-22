@@ -1,5 +1,36 @@
 # 进度日志
 
+## 2026-09-21 · 最终实现核验
+
+- 按冻结方案完成开放注册、中文用户名规范化、Argon2id 登录、会话来源/代际约束、双开关、无邮箱账号处置说明、平台级预算预留与 worker 派发接入。
+- 最终非 PostgreSQL 全量回归 `100%` 通过；认证/预算定向测试通过；Ruff、mypy、compileall、Node 语法、合同生成/行尾、许可证扫描和 `git diff --check` 通过。
+- 修正内存限流器在端点覆盖限额时的 `Retry-After` 计算，将注册成功响应固定为计划约定的 `201`，并让普通 logout 在失效 Cookie 下只清理本地引用、不伪称撤销服务端会话。
+- 本机 PostgreSQL 不可达，故未把最新 `0012` SQL 的临时库往返/权限/并发门禁记为通过；浏览器和生产发布同样留作发布前门槛。
+
+## 2026-09-21 · 开放注册实现收口
+
+- 任务 1：用户名/密码契约已落地：两阶段 NFKC+casefold 校验、固定 Unicode 15.0.0、Argon2id、dummy 验证、rehash 与脱敏诊断；34 项定向测试通过，Ruff 与许可证扫描通过。
+- 任务 2：`0012` 已加入凭据表、双重会话元数据、来源核验回填、默认项目/授权的原子注册函数、登录完成函数、RLS/权限/组合约束；同时落平台 UTC 月度预算配置与预留生命周期表。PG 专项在本机当前因 PostgreSQL 不可达而跳过，曾由临时库验证过迁移专项。
+- 后端：内存/PG 账号仓储、独立注册/密码登录端点、双开关、有效 Cookie 的 `409 already_authenticated`、Argon2 有界且登录优先的计算池、实际请求体大小闸、认证响应 `no-store`、会话字段读写已接入。
+- 费用与治理：新增平台总额度状态机（跨 provider、价格版本、UTC 周期、in_flight 不自动释放）、限流桶容量/TTL、发布与账号生命周期运维手册；前端增加邀请码/登录/注册入口，并明确无邮箱找回提示。
+- 费用派发已接入教学 worker：真实 `openai` provider 在网络调用前占用平台预留，成功按权威 usage 结算，明确未送达释放，超时/未知用量保留 `in_flight`；PostgreSQL 通过 0012 的受限 definer 函数持久化状态，内存模式保留同一状态机。
+- 新增定向测试：密码认证 API、平台付费额度、Argon2 池、会话元数据；本地内存/静态门禁通过。全量测试中仅发现既有契约/PG 环境问题：契约已重新生成，PG 不可达的数据库测试不作为通过结论。
+- 收口验证：非 PostgreSQL 全量回归 `100%` 通过；Ruff、mypy、compileall、生成契约、行尾、许可证扫描与 `git diff --check` 通过。PG 0012 往返/权限专项仍待本机 PostgreSQL 可达后重跑。
+
+## 2026-09-21 · 开放注册修订方案缺口审查
+
+- 已读取用户提供的完整修订方案，并恢复现有 `task_plan.md`、`findings.md`、`progress.md` 上下文。
+- 本轮仅做方案与当前仓库的证据化对照，不执行代码、数据库或生产变更。
+- 已完成代码对照：确认方案修正的会话存活、平台费用闸、R8-H/R8-I 和回滚兼容问题均真实存在。
+- 另识别 9 组需补充的实施契约，核心是密码会话 schema/版本语义、双功能开关、Unicode 稳定性、公开端点资源闸、平台预算生命周期和账号切换服务端语义。
+- 本轮未修改业务代码、迁移或生产配置；仅更新审查记录。
+
+## 2026-09-21 · 开放注册实现启动
+
+- 已将最终冻结决定同步到 `docs/superpowers/specs/2026-09-21-open-registration-auth-design.md` 与对应实施计划：固定用户名字符集、原始用户名显示、会话代际/哈希版本分离、双功能开关、失效 Cookie 语义、Argon2 优先级及预算周期。
+- 按边界任务启动任务 1（密码/用户名契约）和任务 2 的迁移子任务；两者均要求先写失败测试并只改声明范围。
+- 全量基线尝试因系统临时目录 `C:\Users\22088\AppData\Local\Temp\pytest-of-22088` 权限错误产生大量 fixture setup errors，未作为代码回归结论；改用仓库内临时目录后，`test_product_models.py` 与 `test_auth_hardening.py` 定向基线通过（53 passed）。
+
 ## 2026-09-20 · 第 1-2 轮复审与持续交付
 
 - 建立持续目标：逐轮审查、修复、测试、记录、提交并推送，直至普通用户可用首版。
@@ -566,3 +597,77 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - 新增 `_psycopg_dsn()` 适配器和两个回归测试，先观察到缺少函数的收集失败，再实现最小修复；定向测试 `2 passed`，`git diff --check` 通过。
 - 修复后的邀请码脚本已部署到 `/opt/study-plan/current/tools/issue_invitation.py`；生产实际生成了一枚 24 小时、单次使用的邀请码，原始 token 未写入仓库或进度文件。
 - 用户已填入 DeepSeek API key，并将 provider 改为 `openai`；远端检查显示 API key 存在，web 与 teaching worker 均 active。注册/密码登录仍未实现，当前邀请码入口继续保留为临时认证入口。
+
+## 2026-09-22 · 开放注册与平台预算审查收口
+
+- 恢复了本机 PostgreSQL，并在独立测试数据库完成 `0012` 升级/降级往返；修复了误把平台预算函数授权给 `study_app`、降级误删旧约束索引、凭据表缺少显式 RLS 策略等迁移问题。
+- 数据库预算函数现在只允许 `study_worker` 调用，并强制请求周期等于数据库 UTC 当前月份；内存与 PostgreSQL 适配器都支持同一预留的幂等 reserve、mark、release 和 settle。
+- 付费预留 ID 现在由 teaching `run_id` 稳定派生，worker 重启后可以重建关联；成功、失败和重放路径均先结算或释放平台预留，再提交教学运行终态，避免崩溃留下无法关联的 `in_flight` 费用。
+- 注册和密码登录成功审计统一由事务 outbox 写入并投影，移除了 API 层的重复直写；请求体限制改为流式计数，超限内容不会先完整缓存在内存；前端切换认证模式及成功提交后会立即清理密码和旧输入。
+- 完整后端测试运行到 100%，仅保留 1 个既有的 memory-only 并发语义 skip；完整 PostgreSQL 标记子集运行到 100% 且无 skip。Ruff、mypy（111 个源文件）、Python 编译、Node 语法和 `git diff --check` 全部通过。
+- 当前本地 PostgreSQL 正在运行，但本轮没有把 `0012` 发布到 ECS，也没有执行生产数据库迁移或生产冒烟。工作区 `.git` 仍只读，因此本轮不能提交或推送 GitHub。
+
+## 2026-09-22 · ECS `120.55.115.162` 发布 `0012`
+
+- 本地发布前门禁重新通过：完整后端测试 `100%`，仅 1 个既有 memory-only 并发测试 skip；Ruff、mypy、Python 编译、Node 语法、契约一致性和 `git diff --check` 均通过。
+- release 包上传前排除了 `.git`、虚拟环境、缓存、运行数据和所有密钥文件；本地与 ECS 临时包 SHA-256 均为 `4B3733B5A401F13A8B3D6ECDA396FBBCB3CA42910334617AF1B242E46A932CF9`。
+- ECS 已先生成备份 `study-platform-20260922T012911Z.dump`，随后从 `0011` 升级到 `0012 (head)`；旧 release `20260921-first` 保留，可通过 current 软链接回滚。
+- 部署过程中发现并修正两项环境缺口：旧 venv 缺少锁定的 `argon2-cffi==25.1.0`，新 release 缺少 `var -> /var/lib/study-plan` 运行时链接。依赖已安装，链接已恢复；部署脚本和发布说明已补上这两个步骤。
+- 当前 `current` 指向 `/opt/study-plan/releases/20260922-open-registration-0012`；web、摄取、教学服务均 active；ECS 本机 HTTP 与 nginx HTTPS `/healthz` 均返回 200，迁移版本为 `0012`，审计 outbox pending 为 0。
+- 按既有“注册对所有人开放”要求，已备份并启用 `STUDY_PLATFORM_REGISTRATION_ENABLED=true` 与 `STUDY_PLATFORM_PASSWORD_LOGIN_ENABLED=true`；无效注册探针返回参数校验 422，而非功能关闭 403，未创建测试账号。教学 provider 非密钥配置仍为 `openai/deepseek-flash`。
+
+## 2026-09-22 · UI 默认入口修复
+
+- 用户反馈首屏仍显示邀请码；定位为前端 `App` 将 `authMode` 硬编码为 `invite`，与后端开关无关。
+- 已将默认入口改为 `login`，邀请码仍保留为兼容标签；创建独立 release `20260922-auth-ui-login`，未覆盖旧 release。
+- 新 release 的前端文件 SHA-256 为 `1d53b79dfc6e8d6a8a63ebf5d830c1a1b7db48eb84b0ad2a0143d7f1e3b689f8`，与本地一致；当前 `current` 已切换到该 release。
+- 使用 Chrome Playwright 对真实 ECS HTTPS 页面完成浏览器断言：首屏用户名/密码框可见且“密码登录”选中，点击“注册账号”后注册表单和无邮箱说明可见。
+
+## 2026-09-22 · 首版生产核心闭环冒烟
+
+- 使用真实 ECS HTTPS 页面完成一次注册、登出、密码登录；未使用邀请码。冒烟账号为临时验收账号，密码未写入仓库、日志或记录。
+- 该用户完成创建项目、创建会话、追加用户消息、保存计划、登记资料和上传资料正文；摄取 worker 将资料任务处理为 `succeeded`。
+- 随后重启 web、摄取和教学 worker；服务全部恢复为 `active`，迁移仍为 `0012`，HTTPS `/healthz` 返回 200，项目、消息和摄取成功状态均可从 PostgreSQL 读回。
+- 本阶段没有调用真实 DeepSeek 接口，避免在未单独确认费用边界前产生模型费用。剩余发布门是一次最小真实 provider 联调、备份恢复复演和最终首版验收记录。
+
+## 2026-09-22 · 真实 provider 联调闸门
+
+- 使用真实 ECS 配置发起了一次最小教学联调；注册、建项目、建会话成功，但创建教学运行后由平台预算层返回 `PLATFORM_BUDGET_EXCEEDED`。
+- 查询确认 PostgreSQL 的 `platform_budget_config` 仍是默认关闭/零额度，因此请求在 provider 派发前被拒绝，没有产生 DeepSeek 费用，也没有 usage 结算。
+- 这证明预算止损门工作正常；下一步不能猜测货币或额度，需先由用户明确 `monthly_cap_micro` 和允许真实调用的范围，再通过受限运维变更启用。
+
+## 2026-09-22 · 本机 PostgreSQL 永久修复
+
+- 根因确认：本机没有 PostgreSQL Windows 服务、没有 `postgres.exe` 和 `5432` 监听；`E:\pgsql` 的安装和 `data` 目录存在，但遗留 `postmaster.pid` 指向的 PID 已不存在。
+- 已注册 `study-plan-postgresql` Windows 服务，启动类型 `Automatic`，服务账号为 `NT AUTHORITY\NetworkService`；data 目录权限收紧到 NetworkService、SYSTEM、Administrators 和当前用户。
+- 已验证 `pg_isready` 接受连接、服务重启后仍能恢复、项目数据库迁移版本为 `0013`。
+- 本机 PG 专项门禁通过；完整套件最终为 **765 passed, 1 skipped**。
+- 门禁同时发现并修复一处真实缺陷：`backend/app/main.py` 的 `EXPECTED_SCHEMA_VERSION` 仍为 `0012`，导致应用在迁移到 `0013` 后拒绝启动；现已更新为 `0013`。
+- （当时记录）本机修复尚未等同于 ECS 发布；随后已完成 ECS `0013` 发布、预算启用和真实 DeepSeek 联调，详见本文件后续收口记录。
+
+## 2026-09-22 · 本机与 ECS PostgreSQL / DeepSeek 实联调收口
+
+- 本机 PostgreSQL 已固定为 `E:\pgsql` 下的 `study-plan-postgresql` Windows 自动服务，运行身份为 `NT AUTHORITY\NetworkService`，服务重启和 `pg_isready` 均通过；这不是额外注册网站账号，也不要求用户手工创建服务账号。
+- 本机当前数据库 head 为 `0013`，完整后端回归为 **765 passed, 1 skipped**；真实 PG 专项无 skip。期间发现并修复 `main.py` 仍期望 `0012` 的启动自检缺陷。
+- ECS `120.55.115.162` 已切换到 `/opt/study-plan/releases/20260922-provider-parser-v3`，web、ingestion、teaching 三个服务均 active，healthz 200，迁移版本 `0013`。
+- 平台配置已明确为 `monthly_cap_micro = NULL`、`paid_dispatch_enabled = true`。NULL 只表示不按月度金额拒绝，不取消超时、worker 租约、未知结果和账务结算边界。
+- 已完成最小真实 DeepSeek 联调。前两次发现 provider 返回纯文本时的严格 JSON 解析问题；第三次验证了无资料时的 `inference_only` 降级，但暴露模型前置推理文本污染答案；随后增加尾部 JSON 提取，最终运行 `run_zj_ZR1pfWRgyjYrwgHhJlg` 成功，usage 为 `338 input / 172 output`，成本记录为 `682 micro`，答案已干净持久化。
+- 最终生产备份 `/var/backups/study-plan/study-platform-20260922T092745Z.dump` 已恢复到临时数据库，读回 `0013`、平台配置、最新成功 run 和 provider attempt 后删除临时库；备份权限为 `root:postgres 0640`。
+- 当前仍不能声称已提交或推送 GitHub：本工作区 `.git` 对本任务只读；代码、发布记录和验证证据均已写入工作区。
+## 2026-09-22 · 架构精简与边界收口完成
+
+- 将旧 registry、旧检索写入、确认、interaction、audit 和 budget 路由隔离为仅开发挂载；生产保留 health、me 和 mastery。
+- PostgreSQL 适配器改由组合根按需导入，幂等与审计通过数据库命名空间注入连接；新增“阻断 psycopg 仍可导入内存应用”的回归测试。
+- `AuthMethod`、`Invitation`、`UserSession` 归位 identity，并保留 product 兼容导入；学习校验与 verdict 规则抽到 `learning.rules`。
+- Provider key 与 base URL 由 `DeploymentSettings` 单次解析并注入，secret 不进入 repr；README 与当前注册、数据库、React 和真实 provider 状态对齐。
+- 完整后端回归运行到 100%，共收集 841 个测试，仅 1 个既有 memory-only 并发语义 skip；PostgreSQL 标记子集 134 个全部通过、无 skip。Ruff、mypy（113 个源文件）、compileall、Node 语法、三份生成契约和 `git diff --check` 均通过。
+- 本轮本地门禁完成后已继续部署 ECS；GitHub 尚待提交。当前工作区包含此前开放注册与真实 provider 的未提交实现，因此提交必须覆盖当前生产源码，不能只上传本轮文件造成源码与生产漂移。
+
+### ECS 发布补充
+
+- 发布前生成 `/var/backups/study-plan/study-platform-20260922T104150Z.dump`，权限 `root:postgres 0640`。
+- 发布包 SHA-256 为 `0CE2473555C9984C543B6E246B86B1625F13BB455DFDACF3B333EE24C77E9DBF`，上传后校验一致；排除了 Git、虚拟环境、缓存、运行数据和密钥。
+- 当前软链接指向 `/opt/study-plan/releases/20260922-architecture-boundaries-v1`；迁移仍为 `0013 (head)`。
+- web、ingestion、teaching 均 active；公网 HTTPS `/healthz` 返回 200，生产 `/registry` 返回 404，最近十分钟三项服务无 warning 日志。
+- 当前生产源码已提交为 `6369137` 并推送到 GitHub 分支 `codex/architecture-boundaries-20260922`；未包含 PEM、环境文件、运行数据或 API key。
+- GitHub PR 为 `#1`。远端默认 `main` 与当前项目上传历史没有共同祖先，因此 PR 安全地以实际祖先分支 `codex/upload-current-project-20260921` 为 base；未 force-push、未改写远端历史。

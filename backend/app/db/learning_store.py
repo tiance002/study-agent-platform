@@ -9,8 +9,12 @@ from app.db.evidence_store import PostgresEvidenceRepository
 from app.db.product_store import PostgresProductRepository
 from app.db.session import full_transaction
 from app.identity.models import Principal
-from app.learning.loop_store import _self_report_verdict, _validate_submission_content
 from app.learning.ports import Diagnosis, TaskAssessment, TaskSubmission
+from app.learning.rules import (
+    self_report_verdict,
+    validate_assessments,
+    validate_submission_content,
+)
 from app.product.models import PlanBundle, TaskStatus
 
 
@@ -33,10 +37,8 @@ class PostgresLearningLoopRepository:
         bundle: PlanBundle,
         assessments: tuple[TaskAssessment, ...],
     ) -> PlanBundle:
-        from app.learning.loop_store import InMemoryLearningLoopRepository
-
         self.products.membership.get(actor, project_id)
-        InMemoryLearningLoopRepository._validate_assessments(bundle, assessments)
+        validate_assessments(bundle, assessments)
         with full_transaction(
             tenant_id=actor.tenant_id,
             project_id=project_id,
@@ -114,7 +116,7 @@ class PostgresLearningLoopRepository:
         submission_id: str,
         content: str,
     ):
-        _validate_submission_content(content)
+        validate_submission_content(content)
         self.products.membership.get(actor, project_id)
         with full_transaction(
             tenant_id=actor.tenant_id, project_id=project_id,
@@ -160,7 +162,7 @@ class PostgresLearningLoopRepository:
                 task_id=task_id,
                 contract_id=assessment[1],
                 mapping_version=assessment[2],
-                verdicts=(_self_report_verdict(assessment[0], submission_id),),
+                verdicts=(self_report_verdict(assessment[0], submission_id),),
             )
         return submission, event
 

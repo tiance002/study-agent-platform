@@ -126,6 +126,26 @@ def test_missing_usage_is_explicit_none_not_zero():
     assert result.usage is None
 
 
+def test_json_answer_inside_provider_markdown_fence_is_accepted():
+    result = parse_answer_payload(
+        "att_1",
+        '```json\n{"answer_markdown":"答案","citations":[]}\n```',
+    )
+
+    assert result.status is ProviderStatus.COMPLETED
+    assert result.answer_text == "答案"
+
+
+def test_json_answer_after_provider_preamble_is_extracted_without_preamble():
+    result = parse_answer_payload(
+        "att_1",
+        '先说明一下输出格式。最终结果：{"answer_markdown":"答案","citations":[]}',
+    )
+
+    assert result.status is ProviderStatus.COMPLETED
+    assert result.answer_text == "答案"
+
+
 # ------------------------------------------------------------- 模拟器
 
 

@@ -42,12 +42,9 @@ import time
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from psycopg import errors as pg_errors
-
 from app.core.errors import ErrorCode, PlatformError, deny
 from app.core.hashing import content_hash
 from app.core.ids import new_id
-from app.db.session import connect
 from app.identity.models import Principal
 
 #: client_key 的长度上限（0007 规格冻结）。超限直接拒绝：
@@ -359,8 +356,11 @@ class PostgresHttpIdempotencyStore:
     未经对账直接接管会重复副作用。
     """
 
-    def __init__(self, dsn: str | None = None) -> None:
+    def __init__(self, dsn: str | None = None, *, connect_factory=None) -> None:
         self._dsn = dsn
+        if connect_factory is None:
+            raise TypeError("PostgreSQL 适配器必须由 app.db.idempotency_store 装配")
+        self._connect = connect_factory
 
     @staticmethod
     def _set_rls_context(conn, tenant_id: str, principal_id: str) -> None:
@@ -383,7 +383,7 @@ class PostgresHttpIdempotencyStore:
         fingerprint: str,
     ) -> ClaimOutcome:
         owner_token = new_id("idm")
-        with connect(self._dsn) as conn:
+        with self._connect(self._dsn) as conn:
             self._set_rls_context(conn, tenant_id, principal_id)
             inserted = conn.execute(
                 "INSERT INTO http_idempotency"
@@ -470,7 +470,7 @@ class PostgresHttpIdempotencyStore:
         client_key: str, status_code: int, response_body: dict,
         owner_token: str | None = None,
     ) -> None:
-        with connect(self._dsn) as conn:
+        with self._connect(self._dsn) as conn:
             self._set_rls_context(conn, tenant_id, principal_id)
             # owner_token 校验：占用不属于当前持有者或已经进入不确定态时，
             # 迟到的 complete 不得改写结果。
@@ -493,7 +493,7 @@ class PostgresHttpIdempotencyStore:
         self, *, tenant_id: str, principal_id: str, command_scope: str,
         client_key: str, owner_token: str | None = None,
     ) -> None:
-        with connect(self._dsn) as conn:
+        with self._connect(self._dsn) as conn:
             self._set_rls_context(conn, tenant_id, principal_id)
             conn.execute(
                 "UPDATE http_idempotency SET state = 'released'"
@@ -513,10 +513,6 @@ def raise_violation() -> None:
         "幂等键必须唯一标识一次请求，不得复用于不同参数",
     )
 
-
-def unexpected_pg_error(exc: pg_errors.Error) -> Exception:
-    """PG 适配器的意外错误出口（保持堆栈与类型，不吞异常）。"""
-    return exc
 
 # ---------------------------------------------------------------- 守卫层
 

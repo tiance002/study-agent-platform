@@ -38,8 +38,6 @@ import threading
 from dataclasses import dataclass
 from typing import Protocol
 
-from psycopg.types.json import Json
-
 from app.audit.sink import AuditSink, RiskLevel
 from app.core.ids import new_id
 from app.core.request_context import current_request_id
@@ -64,6 +62,20 @@ class AuditOutbox(Protocol):
     def pending_count(self) -> int: ...
 
     def flush_pending(self, tenant_id: str | None = None) -> int: ...
+
+
+class TransactionalAuditOutbox(AuditOutbox, Protocol):
+    def stage_in_transaction(
+        self,
+        conn,
+        *,
+        event_type: str,
+        payload: dict,
+        risk: RiskLevel = RiskLevel.HIGH,
+        tenant_id: str | None = None,
+        project_id: str | None = None,
+        request_id: str | None = None,
+    ) -> str: ...
 
 
 class InMemoryAuditOutbox:
@@ -146,9 +158,20 @@ class PostgresAuditOutbox:
     # fork the hash chain, so projection has one database-wide writer.
     _PROJECTOR_LOCK_ID = 0x5354554459415544
 
-    def __init__(self, sink: AuditSink, dsn: str | None = None) -> None:
+    def __init__(
+        self,
+        sink: AuditSink,
+        dsn: str | None = None,
+        *,
+        connect_factory=None,
+        json_factory=None,
+    ) -> None:
         self._sink = sink
         self._dsn = dsn
+        if connect_factory is None or json_factory is None:
+            raise TypeError("PostgreSQL 适配器必须由 app.db.audit_store 装配")
+        self._connect = connect_factory
+        self._json = json_factory
 
     def stage_in_transaction(
         self,
@@ -174,7 +197,7 @@ class PostgresAuditOutbox:
             (
                 event_id,
                 event_type,
-                Json(payload),
+                self._json(payload),
                 str(risk),
                 tenant_id,
                 project_id,
@@ -184,20 +207,16 @@ class PostgresAuditOutbox:
         return event_id
 
     def pending_count(self) -> int:
-        from app.db.session import connect
-
-        with connect(self._dsn) as conn:
+        with self._connect(self._dsn) as conn:
             row = conn.execute("SELECT public.auth_audit_pending_count()").fetchone()
         return int(row[0]) if row else 0
 
     def flush_pending(self, tenant_id: str | None = None) -> int:
-        from app.db.session import connect
-
         if tenant_id is None:
             return 0
         projected = 0
         while True:
-            with connect(self._dsn) as conn:
+            with self._connect(self._dsn) as conn:
                 conn.execute(
                     "SELECT set_config('app.tenant_id', %s, true)",
                     (tenant_id,),

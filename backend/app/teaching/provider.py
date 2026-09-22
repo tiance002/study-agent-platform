@@ -107,12 +107,9 @@ def parse_answer_payload(attempt_id: str, raw_text: str) -> ProviderResult:
     模拟器用它从脚本里的 JSON 字符串走**与真实适配器相同**的解析代码，
     这样"畸形 JSON → MALFORMED"测的就不是模拟器自己的 if 分支。
     """
-    try:
-        payload = json.loads(raw_text)
-    except ValueError:
+    payload = _load_answer_object(raw_text)
+    if payload is None:
         return malformed_result(attempt_id=attempt_id, detail="响应不是合法 JSON")
-    if not isinstance(payload, dict):
-        return malformed_result(attempt_id=attempt_id, detail="响应顶层不是对象")
     answer = payload.get("answer_markdown")
     if not isinstance(answer, str) or not answer.strip():
         return malformed_result(attempt_id=attempt_id, detail="缺少 answer_markdown")
@@ -140,6 +137,43 @@ def parse_answer_payload(attempt_id: str, raw_text: str) -> ProviderResult:
         answer=answer,
         citations=citations,
     )
+
+
+def _load_answer_object(raw_text: str) -> dict | None:
+    """Load strict JSON, tolerating one Markdown JSON fence from a provider.
+
+    The fence is presentation noise, not a license to recover arbitrary prose:
+    the candidate must still decode as a top-level JSON object.  This keeps the
+    answer contract strict while handling a common provider formatting quirk.
+    """
+
+    candidate = raw_text.strip()
+    if candidate.startswith("```") and candidate.endswith("```"):
+        lines = candidate.splitlines()
+        if len(lines) >= 3 and lines[0].strip().lower() in {"```", "```json"}:
+            candidate = "\n".join(lines[1:-1]).strip()
+    try:
+        payload = json.loads(candidate)
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        return payload
+
+    # Some providers place reasoning or a short preamble before the final
+    # structured object.  Recover only a valid object that has the answer key;
+    # never treat arbitrary braces or an inner citation object as the answer.
+    decoder = json.JSONDecoder()
+    candidates: list[dict] = []
+    for index, char in enumerate(candidate):
+        if char != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(candidate[index:])
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and "answer_markdown" in parsed:
+            candidates.append(parsed)
+    return candidates[-1] if candidates else None
 
 
 class ScriptedProvider:

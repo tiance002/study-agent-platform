@@ -29,23 +29,34 @@ class PostgresRateLimiter:
         self._window = window_seconds
         self._dsn = dsn
 
-    def register(self, key: str, *, now: datetime) -> RateLimitDecision:
+    def register(
+        self,
+        key: str,
+        *,
+        now: datetime,
+        limit: int | None = None,
+        window_seconds: int | None = None,
+    ) -> RateLimitDecision:
         # 无租户上下文：函数是 SECURITY DEFINER，自己完成 upsert。
+        effective_limit = self._limit if limit is None else limit
+        effective_window = self._window if window_seconds is None else window_seconds
+        if effective_limit <= 0 or effective_window <= 0:
+            raise ValueError("限流次数与窗口秒数都必须为正")
         with connect(self._dsn) as conn:
             row = conn.execute(
                 "SELECT register_auth_attempt(%s, %s)",
-                (key, self._window),
+                (key, effective_window),
             ).fetchone()
             conn.commit()
         attempts = int(row[0]) if row is not None else 0
         retry_after = 0
-        if attempts > self._limit:
-            start = window_start_epoch(now, self._window)
-            retry_after = self._window - (int(now.timestamp()) - start)
+        if attempts > effective_limit:
+            start = window_start_epoch(now, effective_window)
+            retry_after = effective_window - (int(now.timestamp()) - start)
         return RateLimitDecision(
-            allowed=attempts <= self._limit,
+            allowed=attempts <= effective_limit,
             attempts=attempts,
-            limit=self._limit,
-            window_seconds=self._window,
+            limit=effective_limit,
+            window_seconds=effective_window,
             retry_after_seconds=max(retry_after, 0),
         )

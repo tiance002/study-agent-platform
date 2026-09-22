@@ -72,6 +72,8 @@ def run_once(
         max_input_tokens=_max_input_tokens(platform),
         max_output_tokens=_max_output_tokens(platform),
         clock=platform.clock,
+        platform_budget=_platform_budget_for_worker(platform),
+        platform_provider=_provider_name(platform),
     )
     try:
         # attempt 是 durable 派发事实：没有结果不等于没有派发。
@@ -123,6 +125,27 @@ def _max_output_tokens(platform: "PlatformState") -> int:
     from app.deployment import DEFAULT_TEACHING_MAX_OUTPUT_TOKENS
 
     return DEFAULT_TEACHING_MAX_OUTPUT_TOKENS
+
+
+def _provider_name(platform: "PlatformState") -> str:
+    """Provider identity is server configuration, never request input."""
+    settings = platform.settings
+    provider = getattr(settings, "teaching_provider", "") if settings is not None else ""
+    if provider:
+        return provider
+    return "unknown"
+
+
+def _platform_budget_for_worker(platform: "PlatformState"):
+    """Apply the platform paid cap only to real paid-provider dispatches.
+
+    Scripted providers are deterministic local/test adapters and do not create
+    an external bill.  They must remain usable with the default zero paid cap;
+    the cap is a guard on actual provider spend, not on the teaching workflow.
+    """
+    if _provider_name(platform) != "openai":
+        return None
+    return getattr(platform, "platform_paid_budget", None)
 
 
 def main(argv: list[str] | None = None) -> int:

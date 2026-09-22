@@ -6,6 +6,13 @@ root=/opt/study-plan/current
 secret_state=/etc/study-plan/bootstrap-secrets.env
 
 install -d -o root -g root -m 750 /etc/study-plan
+install -d -o studyplan -g studyplan -m 750 /var/lib/study-plan
+
+if [[ -e "$root/var" && ! -L "$root/var" ]]; then
+  echo "$root/var exists but is not the required runtime symlink" >&2
+  exit 1
+fi
+ln -sfn /var/lib/study-plan "$root/var"
 
 if [[ ! -f "$secret_state" ]]; then
   app_db_password=$(openssl rand -hex 32)

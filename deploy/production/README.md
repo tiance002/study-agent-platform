@@ -8,14 +8,14 @@ instance running Ubuntu 24.04, PostgreSQL, systemd, and nginx.
 - URL: `https://120.55.115.162`
 - Application root: `/opt/study-plan/current`
 - Environment files: `/etc/study-plan/`
-- Database migrations: `0011`
+- Database migrations: `0013`
 - Web service: `study-plan-web.service`
 - Ingestion worker: `study-plan-ingestion.service`
 - Teaching worker: `study-plan-teaching.service`
 
-The application and ingestion worker are enabled. The teaching provider is
-deliberately disabled until a real API key is supplied. This preserves the
-production fail-closed behavior and prevents accidental paid model calls.
+The application, ingestion worker, and teaching worker are enabled. The
+teaching provider is configured through the root-owned provider file; a missing
+key still fails production startup rather than silently falling back.
 
 ## Fill the DeepSeek key
 
@@ -35,9 +35,14 @@ STUDY_PLATFORM_TEACHING_BASE_URL=https://api.deepseek.com
 STUDY_PLATFORM_TEACHING_API_KEY=PASTE_THE_REAL_KEY_HERE
 ```
 
-The provider adapter uses the OpenAI-compatible DeepSeek Responses API. The
-current DeepSeek model identifier is `deepseek-flash`; the old
-`deepseek-v4-flash` name is not used in production configuration.
+The provider adapter uses DeepSeek's OpenAI-compatible Responses API. The
+current production model identifier is `deepseek-flash`; the provider's
+supported model list must be checked before changing it.
+
+Platform-wide monthly monetary rejection is disabled for this product mode by
+setting `platform_budget_config.monthly_cap_micro` to `NULL`. Usage is still
+reserved, settled, and auditable. Per-request token limits, the provider
+deadline, durable attempt state, and reconciliation rules remain enforced.
 
 After saving the file:
 
@@ -86,6 +91,15 @@ symlink. A rollback is a symlink switch followed by service restarts:
 ```sh
 sudo ln -sfn /opt/study-plan/releases/<known-good-release> /opt/study-plan/current
 sudo systemctl restart study-plan-web.service study-plan-ingestion.service study-plan-teaching.service
+```
+
+For every new release, install the locked runtime dependencies and create the
+runtime data link before starting services:
+
+```sh
+/opt/study-plan/venv/bin/pip install -r /opt/study-plan/releases/<release>/requirements.lock.txt
+install -d -o studyplan -g studyplan -m 750 /var/lib/study-plan
+ln -sfn /var/lib/study-plan /opt/study-plan/releases/<release>/var
 ```
 
 Run the migration and browser smoke checks before switching a release. Keep

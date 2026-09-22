@@ -32,6 +32,11 @@ class ErrorCode(StrEnum):
     # 未认证引导端点（邀请兑换）触发限流：这是**可重试**拒绝，
     # 响应带 Retry-After；与"邀请无效"是两回事，不能合并。
     RATE_LIMITED = "RATE_LIMITED"
+    ACCOUNT_ALREADY_AUTHENTICATED = "already_authenticated"
+    USERNAME_TAKEN = "USERNAME_TAKEN"
+    PASSWORD_LOGIN_DISABLED = "PASSWORD_LOGIN_DISABLED"
+    REGISTRATION_DISABLED = "REGISTRATION_DISABLED"
+    AUTH_POOL_SATURATED = "AUTH_POOL_SATURATED"
 
     # ---- 策略（L2 边界层）----
     POLICY_DENIED = "POLICY_DENIED"

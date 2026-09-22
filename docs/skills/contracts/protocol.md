@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:23065f436b97fc0d6d378546a0ae488054ada9736dd5a3253d181250ae7e076c, generated_at=2026-09-20T14:49:45Z -->
-> 生成时间：2026-09-20T14:49:45Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:ae7cdb6544d3f70951290c1990389e422f1a0659943e0c40baefe08f6f5038ab, generated_at=2026-09-22T10:29:30Z -->
+> 生成时间：2026-09-22T10:29:30Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -16,8 +16,10 @@
 | 路径 | 方法 | 说明 |
 |---|---|---|
 | `/auth/invitations/exchange` | POST | Exchange Invitation |
+| `/auth/login` | POST | Password Login |
 | `/auth/logout` | POST | Logout |
 | `/auth/logout/all` | POST | Logout All |
+| `/auth/register` | POST | Register Account |
 | `/healthz` | GET | Healthz |
 | `/me` | GET | Me |
 | `/projects` | GET | List Projects |
@@ -58,12 +60,13 @@
 
 ### 稳定错误码
 
-共 41 个，一经发布不得改变语义，只能追加。
+共 46 个，一经发布不得改变语义，只能追加。
 
 | 错误码 |
 |---|
 | `AUDIT_LOG_CORRUPTED` |
 | `AUDIT_SINK_UNAVAILABLE` |
+| `AUTH_POOL_SATURATED` |
 | `AUTH_REQUIRED` |
 | `BUDGET_EXCEEDED` |
 | `BUDGET_RESERVATION_FAILED` |
@@ -90,11 +93,13 @@
 | `NODE_NOT_REGISTERED` |
 | `OBLIGATION_UNSUPPORTED` |
 | `PARAMS_INVALID` |
+| `PASSWORD_LOGIN_DISABLED` |
 | `POLICY_DENIED` |
 | `POLICY_GATEWAY_UNAVAILABLE` |
 | `PROJECTION_WRITE_DENIED` |
 | `RATE_LIMITED` |
 | `RECONCILIATION_REQUIRED` |
+| `REGISTRATION_DISABLED` |
 | `TAINT_REQUIRES_ENDORSEMENT` |
 | `TEACHING_PROVIDER_DISABLED` |
 | `TENANT_CONTEXT_MISSING` |
@@ -102,7 +107,9 @@
 | `TOOL_INTENT_CONFLICT` |
 | `TOOL_NOT_ALLOWED_FOR_NODE` |
 | `TOOL_NOT_REGISTERED` |
+| `USERNAME_TAKEN` |
 | `VERSION_CONFLICT` |
+| `already_authenticated` |
 
 ### typed node 输入输出 schema
 

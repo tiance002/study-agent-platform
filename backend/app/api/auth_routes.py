@@ -33,6 +33,7 @@ POST /auth/logout/all   → 集中失效本主体全部会话（退出所有设�
 
 from __future__ import annotations
 
+import hmac
 from hashlib import sha256
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -46,6 +47,13 @@ from app.core.errors import ErrorCode, PlatformError, deny
 from app.core.ids import new_id
 from app.identity.cookie_auth import SESSION_COOKIE_NAME
 from app.identity.models import Principal
+from app.identity.passwords import (
+    DUMMY_PASSWORD_HASH,
+    hash_password,
+    needs_rehash,
+    normalize_username,
+    verify_password_diagnostic,
+)
 
 if TYPE_CHECKING:  # 类型标注用，运行时不导入（避免与 main 循环依赖）
     from app.main import PlatformState
@@ -54,6 +62,11 @@ router = APIRouter()
 
 #: 邀请令牌的长度上限。原始令牌是高熵随机串；超长输入不是用户，是探测。
 TOKEN_MAX_CHARS = 4096
+REGISTER_LIMIT = 5
+REGISTER_WINDOW_SECONDS = 3600
+LOGIN_CLIENT_LIMIT = 30
+LOGIN_ACCOUNT_LIMIT = 10
+LOGIN_WINDOW_SECONDS = 600
 
 #: 不依赖环境凭证的"安全方法"：即使带 cookie 也不做 CSRF 判定。
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
@@ -65,6 +78,13 @@ class ExchangeBody(BaseModel):
     token: str = Field(min_length=1, max_length=TOKEN_MAX_CHARS)
 
 
+class PasswordAuthBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=1, max_length=16)
+    password: str = Field(min_length=1, max_length=128)
+
+
 def _state(request: Request):
     return request.app.state.platform
 
@@ -73,6 +93,88 @@ def _token_hash(raw_token: str) -> str:
     """原始令牌 → 固定长度哈希。**只存哈希**：库与日志里永远没有原始令牌。"""
     digest = sha256(raw_token.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
+
+
+def _username_digest(request: Request, username: str) -> str:
+    configured = getattr(getattr(_state(request), "settings", None), "cookie_secret", "audit-key")
+    return hmac.new(configured.encode("utf-8"), username.encode("utf-8"), sha256).hexdigest()
+
+
+def _auth_response(request: Request, payload: dict, *, status_code: int = 200) -> JSONResponse:
+    response = JSONResponse(payload, status_code=status_code)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _set_session_cookie(request: Request, response: JSONResponse, session) -> JSONResponse:
+    state = _state(request)
+    cookie_value = state.cookie_auth.issue(session)
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        cookie_value,
+        httponly=True,
+        samesite="lax",
+        secure=state.cookie_secure,
+        max_age=int(state.session_ttl.total_seconds()),
+        path="/",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _live_cookie_session(request: Request, state):
+    """Return a live cookie session; bad/expired/revoked cookies are anonymous."""
+    raw = request.cookies.get(SESSION_COOKIE_NAME)
+    if not raw:
+        return None
+    try:
+        claims = state.cookie_auth.verify(raw, now=state.clock.now())
+        return state.session_store.get_live(claims.to_principal(), claims.session_id)
+    except Exception:
+        return None
+
+
+def _reject_if_authenticated(request: Request, state) -> None:
+    session = _live_cookie_session(request, state)
+    if session is None:
+        return
+    raise deny(ErrorCode.ACCOUNT_ALREADY_AUTHENTICATED, "当前浏览器已有有效会话，请先退出")
+
+
+def _require_password_origin(request: Request, state) -> None:
+    try:
+        _require_same_origin(request, state)
+    except PlatformError as exc:
+        if exc.code is ErrorCode.CSRF_DENIED:
+            _audit_auth_failure(request, state, exc)
+        raise
+
+
+def _argon2(state):
+    from app.identity.argon2_pool import Argon2WorkPool
+
+    pool = state.argon2_pool
+    if pool is None:
+        pool = Argon2WorkPool(
+            state.auth_argon2_max_concurrency,
+            state.auth_argon2_queue_limit,
+            state.auth_argon2_wait_seconds,
+        )
+        state.argon2_pool = pool
+    return pool
+
+
+def _check_json_body(request: Request) -> None:
+    content_type = request.headers.get("content-type", "")
+    if not content_type.lower().startswith("application/json"):
+        raise deny(ErrorCode.PARAMS_INVALID, "请求必须使用 application/json")
+    length = request.headers.get("content-length")
+    if length is not None:
+        try:
+            if int(length) > 64 * 1024:
+                raise deny(ErrorCode.PARAMS_INVALID, "请求体过大")
+        except ValueError as exc:
+            raise deny(ErrorCode.PARAMS_INVALID, "请求体长度无效") from exc
 
 
 # ------------------------------------------------------------ CSRF / 客户端键
@@ -283,6 +385,7 @@ def exchange_invitation(request: Request, body: ExchangeBody) -> JSONResponse:
     也不做 CSRF 来源检查（没有环境凭证可被利用），但必须限流。
     """
     state = _state(request)
+    _check_json_body(request)
     now = state.clock.now()
     client_key = _client_key(request, state)
 
@@ -330,7 +433,8 @@ def exchange_invitation(request: Request, body: ExchangeBody) -> JSONResponse:
         state.audit_outbox.flush_pending(session.tenant_id)
 
     cookie_value = state.cookie_auth.issue(session)
-    response = JSONResponse(
+    response = _auth_response(
+        request,
         {
             "principal_id": session.principal_id,
             "expires_at": session.expires_at.isoformat(),
@@ -357,11 +461,157 @@ def _require_cookie_session(request: Request):
             raise deny(ErrorCode.AUTH_REQUIRED, "未认证或凭据无效")
         claims = state.cookie_auth.verify(raw, now=state.clock.now())
         _require_same_origin(request, state)
+        if state.session_store.get_live(claims.to_principal(), claims.session_id) is None:
+            raise deny(ErrorCode.AUTH_REQUIRED, "未认证或凭据无效")
         return claims
     except PlatformError as exc:
         if exc.code in (ErrorCode.AUTH_REQUIRED, ErrorCode.CSRF_DENIED):
             _audit_auth_failure(request, state, exc)
         raise
+
+
+def _raise_auth_limit(
+    request: Request,
+    *,
+    bucket: str,
+    scope: str | None = None,
+    limit: int | None = None,
+    window_seconds: int | None = None,
+) -> None:
+    state = _state(request)
+    decision = state.rate_limiter.register(
+        f"{bucket}:{scope or _client_key(request, state)}",
+        now=state.clock.now(),
+        limit=limit,
+        window_seconds=window_seconds,
+    )
+    if not decision.allowed:
+        state.audit.append(
+            "auth_rate_limited",
+            {"client_key": _client_key(request, state), "bucket": bucket},
+            risk=RiskLevel.LOW,
+        )
+        raise PlatformError(
+            code=ErrorCode.RATE_LIMITED,
+            message="尝试过于频繁，请稍后再试",
+            retryable=True,
+            details={"retry_after_seconds": decision.retry_after_seconds},
+        )
+
+
+@router.post("/auth/register")
+def register_account(request: Request, body: PasswordAuthBody) -> JSONResponse:
+    """Create a password account and its first password session atomically."""
+    state = _state(request)
+    _check_json_body(request)
+    _reject_if_authenticated(request, state)
+    if not state.registration_enabled:
+        raise deny(ErrorCode.REGISTRATION_DISABLED, "注册暂未开放")
+    if state.accounts is None:
+        raise deny(ErrorCode.REGISTRATION_DISABLED, "注册暂未配置")
+    _require_password_origin(request, state)
+    _raise_auth_limit(
+        request,
+        bucket="register",
+        limit=REGISTER_LIMIT,
+        window_seconds=REGISTER_WINDOW_SECONDS,
+    )
+    try:
+        username = normalize_username(body.username)
+    except (TypeError, ValueError) as exc:
+        raise deny(ErrorCode.PARAMS_INVALID, "用户名格式不符合要求") from exc
+    try:
+        password_hash = _argon2(state).run(
+            lambda: hash_password(body.password), priority="registration"
+        )
+    except ValueError as exc:
+        raise deny(ErrorCode.PARAMS_INVALID, "密码长度不符合要求") from exc
+    result = state.accounts.register(
+        username_original=username.original,
+        username_normalized=username.normalized,
+        password_hash=password_hash,
+        hash_version=1,
+        session_expires_at=state.clock.now() + state.session_ttl,
+    )
+    if state.audit_outbox is not None:
+        state.audit_outbox.flush_pending(result.lookup.tenant_id)
+    response = _auth_response(
+        request,
+        {
+            "principal_id": result.session.principal_id,
+            "expires_at": result.session.expires_at.isoformat(),
+            "default_project_id": result.default_project_id,
+            "default_project_name": result.default_project_name,
+        },
+        status_code=201,
+    )
+    return _set_session_cookie(request, response, result.session)
+
+
+@router.post("/auth/login")
+def password_login(request: Request, body: PasswordAuthBody) -> JSONResponse:
+    state = _state(request)
+    _check_json_body(request)
+    _reject_if_authenticated(request, state)
+    if not state.password_login_enabled:
+        raise deny(ErrorCode.PASSWORD_LOGIN_DISABLED, "密码登录暂未启用")
+    if state.accounts is None:
+        raise deny(ErrorCode.PASSWORD_LOGIN_DISABLED, "密码登录暂未配置")
+    try:
+        username = normalize_username(body.username)
+    except (TypeError, ValueError):
+        # Keep malformed usernames on the same public failure path as unknown users.
+        username = None
+    _require_password_origin(request, state)
+    _raise_auth_limit(
+        request,
+        bucket="login_client",
+        limit=LOGIN_CLIENT_LIMIT,
+        window_seconds=LOGIN_WINDOW_SECONDS,
+    )
+    account_scope = _username_digest(
+        request, username.normalized if username is not None else body.username
+    )
+    _raise_auth_limit(
+        request,
+        bucket="login_account",
+        scope=account_scope,
+        limit=LOGIN_ACCOUNT_LIMIT,
+        window_seconds=LOGIN_WINDOW_SECONDS,
+    )
+    lookup = state.accounts.lookup(username.normalized) if username is not None else None
+    encoded = lookup.password_hash if lookup is not None else DUMMY_PASSWORD_HASH
+    ok, _reason = _argon2(state).run(
+        lambda: verify_password_diagnostic(body.password, encoded), priority="login"
+    )
+    if not ok or lookup is None or lookup.disabled_at is not None:
+        state.audit.append(
+            "password_login_failed",
+            {
+                "username_digest": _username_digest(request, username.normalized if username else body.username),
+                "client_key": _client_key(request, state),
+            },
+            risk=RiskLevel.HIGH,
+        )
+        raise deny(ErrorCode.AUTH_REQUIRED, "用户名或密码错误")
+    new_hash = None
+    if needs_rehash(lookup.password_hash):
+        new_hash = _argon2(state).run(lambda: hash_password(body.password), priority="login")
+    session = state.accounts.complete_login(
+        lookup=lookup,
+        session_expires_at=state.clock.now() + state.session_ttl,
+        new_password_hash=new_hash,
+        new_hash_version=1 if new_hash else None,
+    )
+    if session is None:
+        raise deny(ErrorCode.AUTH_REQUIRED, "用户名或密码错误")
+    if state.audit_outbox is not None:
+        state.audit_outbox.flush_pending(lookup.tenant_id)
+    response = _auth_response(
+        request,
+        {"principal_id": session.principal_id, "expires_at": session.expires_at.isoformat()},
+    )
+    return _set_session_cookie(request, response, session)
 
 
 @router.post("/auth/logout")
@@ -372,18 +622,38 @@ def logout(request: Request) -> JSONResponse:
     那份 cookie 若被复制过（日志、代理、他人屏幕）就还能用。
     """
     state = _state(request)
-    claims = _require_cookie_session(request)
+    try:
+        claims = _require_cookie_session(request)
+    except PlatformError as exc:
+        # A normal logout is idempotent for an expired/revoked/malformed cookie:
+        # clear the browser reference, but never claim that a server session was
+        # revoked.  Keep the same-origin check so a cross-site request cannot
+        # drive even this local cleanup path.  logout/all intentionally keeps the
+        # stricter _require_cookie_session-only behavior below.
+        if exc.code is not ErrorCode.AUTH_REQUIRED:
+            raise
+        _require_same_origin(request, state)
+        response = _auth_response(
+            request,
+            {
+                "revoked": False,
+                "cookie_cleared": request.cookies.get(SESSION_COOKIE_NAME) is not None,
+            },
+        )
+        response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+        return response
     now = state.clock.now()
 
     revoked = state.session_store.revoke(claims.to_principal(), claims.session_id, at=now)
     if revoked:
         state.audit.append(
             "session_revoked",
-            {"session_id": claims.session_id},
+            {"principal_id": claims.principal_id},
             risk=RiskLevel.LOW,
             tenant_id=claims.tenant_id,
         )
     response = JSONResponse({"revoked": revoked})
+    response.headers["Cache-Control"] = "no-store"
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
     return response
 
@@ -401,10 +671,11 @@ def logout_all(request: Request) -> JSONResponse:
     revoked_count = state.session_store.revoke_all_for(claims.to_principal(), at=now)
     state.audit.append(
         "sessions_revoked_all",
-        {"session_id": claims.session_id, "revoked_count": revoked_count},
+        {"principal_id": claims.principal_id, "revoked_count": revoked_count},
         risk=RiskLevel.LOW,
         tenant_id=claims.tenant_id,
     )
     response = JSONResponse({"revoked": revoked_count})
+    response.headers["Cache-Control"] = "no-store"
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
     return response

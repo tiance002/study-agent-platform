@@ -65,13 +65,21 @@
     if (code === "RECONCILIATION_REQUIRED") return "这次请求的结果待对账，暂时不能自动重试";
     if (code === "BUDGET_EXCEEDED") return "项目预算不足，请减少资料或稍后再试";
     if (code === "CSRF_DENIED") return "页面来源校验失败，请刷新后重试";
-    if (error.status === 401) return "会话已失效，请重新兑换邀请";
+    if (code === "already_authenticated") return "当前浏览器已有会话，请先退出后再切换账号";
+    if (code === "USERNAME_TAKEN") return "用户名已注册，请换一个用户名";
+    if (code === "REGISTRATION_DISABLED") return "注册暂未开放";
+    if (code === "PASSWORD_LOGIN_DISABLED") return "密码登录暂未启用";
+    if (error.status === 401) return "用户名或密码错误，或会话已失效";
     return (error.payload && error.payload.message) || `请求失败（${error.status}）`;
   }
 
   function App() {
     const [user, setUser] = useState(null);
     const [authToken, setAuthToken] = useState("");
+    // Open-registration deployments should lead with the account workflow;
+    // invitation exchange remains available as a compatibility tab.
+    const [authMode, setAuthMode] = useState("login");
+    const [authCredentials, setAuthCredentials] = useState({ username: "", password: "" });
     const [authBusy, setAuthBusy] = useState(true);
     const [projects, setProjects] = useState([]);
     const [projectId, setProjectId] = useState("");
@@ -360,6 +368,26 @@
         setUser(me);
         setAuthToken("");
         await refreshProjects(me.principal_id);
+      } catch (caught) {
+        setError(errorText(caught));
+      } finally {
+        setAuthBusy(false);
+      }
+    }
+
+    async function passwordAuth(event) {
+      event.preventDefault();
+      if (!authCredentials.username.trim() || !authCredentials.password) return;
+      setAuthBusy(true);
+      setError("");
+      const path = authMode === "register" ? "/auth/register" : "/auth/login";
+      try {
+        const result = await api("POST", path, authCredentials, { idempotent: false });
+        setAuthCredentials({ username: "", password: "" });
+        const me = await api("GET", "/me");
+        setUser(me);
+        await refreshProjects(me.principal_id);
+        if (authMode === "register" && result?.default_project_id) setProjectId(result.default_project_id);
       } catch (caught) {
         setError(errorText(caught));
       } finally {
@@ -667,7 +695,18 @@
     }
 
     if (authBusy && !user) return h(LoadingScreen);
-    if (!user) return h(AuthScreen, { token: authToken, setToken: setAuthToken, onSubmit: exchangeInvite, busy: authBusy, error });
+    if (!user) return h(AuthScreen, {
+      mode: authMode,
+      setMode: setAuthMode,
+      token: authToken,
+      setToken: setAuthToken,
+      credentials: authCredentials,
+      setCredentials: setAuthCredentials,
+      onInvite: exchangeInvite,
+      onPassword: passwordAuth,
+      busy: authBusy,
+      error,
+    });
 
     return h(
       "div",
@@ -708,16 +747,30 @@
     return h("div", { className: "center-screen" }, h("div", { className: "loading-mark", "aria-label": "正在加载" }, "学"), h("p", null, "正在打开学习空间"));
   }
 
-  function AuthScreen({ token, setToken, onSubmit, busy, error }) {
+  function AuthScreen({ mode, setMode, token, setToken, credentials, setCredentials, onInvite, onPassword, busy, error }) {
     return h("main", { className: "auth-screen" }, h("section", { className: "auth-panel" },
       h("div", { className: "brand large" }, h("span", { className: "brand-mark", "aria-hidden": true }, "学"), h("span", null, "学习工作台")),
       h("h1", null, "把下一步学什么，变成今天能完成的事"),
-      h("p", { className: "auth-copy" }, "用邀请访问码进入你的学习空间。"),
+      h("p", { className: "auth-copy" }, mode === "invite" ? "用邀请访问码进入你的学习空间。" : "使用用户名和密码进入学习空间。"),
+      h("div", { className: "auth-switch", role: "tablist", "aria-label": "认证方式" }, [
+        ["invite", "邀请码"], ["login", "密码登录"], ["register", "注册账号"],
+      ].map(([value, label]) => h("button", { key: value, type: "button", role: "tab", "aria-selected": mode === value, className: mode === value ? "active" : "", onClick: () => {
+        setCredentials({ username: "", password: "" });
+        setToken("");
+        setMode(value);
+      } }, label))),
       error && h("div", { className: "alert alert-error", role: "alert" }, error),
-      h("form", { onSubmit, className: "auth-form" },
+      mode === "invite" ? h("form", { onSubmit: onInvite, className: "auth-form" },
         h("label", { htmlFor: "invite-token" }, "邀请访问码"),
         h("input", { id: "invite-token", value: token, onChange: (event) => setToken(event.target.value), autoComplete: "one-time-code", placeholder: "粘贴访问码", disabled: busy }),
         h("button", { className: "primary-button", disabled: busy || !token.trim() }, busy ? "正在进入…" : "进入学习空间")
+      ) : h("form", { onSubmit: onPassword, className: "auth-form" },
+        h("label", { htmlFor: "auth-username" }, "用户名"),
+        h("input", { id: "auth-username", value: credentials.username, onChange: (event) => setCredentials({ ...credentials, username: event.target.value }), autoComplete: "username", minLength: 1, maxLength: 16, placeholder: "1–16 个字符", disabled: busy }),
+        h("label", { htmlFor: "auth-password" }, "密码"),
+        h("input", { id: "auth-password", type: "password", value: credentials.password, onChange: (event) => setCredentials({ ...credentials, password: event.target.value }), autoComplete: mode === "register" ? "new-password" : "current-password", minLength: 12, maxLength: 128, placeholder: "至少 12 个字符", disabled: busy }),
+        mode === "register" && h("p", { className: "field-hint" }, "首版不提供邮箱找回；请妥善保存密码。"),
+        h("button", { className: "primary-button", disabled: busy || !credentials.username.trim() || !credentials.password }, busy ? "处理中…" : mode === "register" ? "创建账号" : "登录")
       )
     ));
   }

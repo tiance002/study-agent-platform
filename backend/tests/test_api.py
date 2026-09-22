@@ -13,7 +13,10 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from app.deployment import DeploymentSettings
 from app.identity.ports import SystemContext
+from app.main import create_app
+from fastapi.testclient import TestClient
 
 PROJECT = "proj_demo"
 
@@ -23,6 +26,25 @@ PROJECT = "proj_demo"
 
 def _idem_key() -> str:
     return "key-" + uuid.uuid4().hex
+
+
+def test_production_surface_does_not_mount_legacy_development_routes(platform):
+    platform.settings = DeploymentSettings.load({"STUDY_PLATFORM_ENV": "production"})
+    client = TestClient(create_app(platform=platform))
+
+    assert client.get("/healthz").status_code == 200
+    assert client.get("/me").status_code == 401
+    assert client.get("/projects/proj_missing/mastery").status_code == 401
+
+    for method, path in (
+        ("get", "/registry"),
+        ("post", "/projects/proj_missing/retrieval/chunks"),
+        ("post", "/projects/proj_missing/confirmations"),
+        ("post", "/projects/proj_missing/interactions"),
+        ("get", "/projects/proj_missing/audit"),
+        ("get", "/projects/proj_missing/budget"),
+    ):
+        assert getattr(client, method)(path).status_code == 404
 
 # 执行 validate_and_record 时提交的参数。
 # **创建确认时提交同一份参数** —— 确认绑定的是「你提交的那次请求的参数」，
@@ -93,6 +115,11 @@ def test_healthz_declares_stub_components(client):
     assert body["components"]["auth"] == "cookie_session_bearer_compat"
     assert body["components"]["rls"] == "not_implemented"
     assert body["components"]["sandbox"] == "not_implemented"
+    assert body["features"] == {
+        "registration_enabled": False,
+        "password_login_enabled": False,
+        "paid_dispatch_config_source": "environment",
+    }
 
 
 def test_requests_without_token_are_rejected(client):
