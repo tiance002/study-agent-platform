@@ -156,7 +156,7 @@
       try {
         result = await api(method, path, command.body, { key: command.key });
       } catch (caught) {
-        if (!(caught instanceof ApiError)) {
+        if (!(caught instanceof ApiError) || caught.status >= 500) {
           command.state = "unknown";
           if (currentView(scope)) setPendingCommand({ ...command, retrying: false });
         } else {
@@ -178,7 +178,7 @@
     const refreshProjects = useCallback(async (owner = scopeRef.current.principalId) => {
       const epoch = scopeRef.current.epoch;
       const result = await api("GET", "/projects");
-      if (scopeRef.current.principalId !== owner && scopeRef.current.epoch !== epoch) return [];
+      if (scopeRef.current.principalId !== owner || scopeRef.current.epoch !== epoch) return [];
       const next = result.projects || [];
       setProjects(next);
       setProjectId((previous) => {

@@ -671,3 +671,12 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - web、ingestion、teaching 均 active；公网 HTTPS `/healthz` 返回 200，生产 `/registry` 返回 404，最近十分钟三项服务无 warning 日志。
 - 当前生产源码已提交为 `6369137` 并推送到 GitHub 分支 `codex/architecture-boundaries-20260922`；未包含 PEM、环境文件、运行数据或 API key。
 - GitHub PR 为 `#1`。远端默认 `main` 与当前项目上传历史没有共同祖先，因此 PR 安全地以实际祖先分支 `codex/upload-current-project-20260921` 为 base；未 force-push、未改写远端历史。
+
+## 2026-09-22 · 第八轮残余正确性验证
+
+- 先让旧前端在真实浏览器故障注入下失败：服务端已写入项目后把响应改为 503，旧逻辑提示普通失败并丢弃命令；修复后显示“结果未知”，重试请求的 key/body 与第一次完全一致。
+- 同一场景扩展到 teaching run：第一次 POST 响应改为 503，第二次使用原请求重试；Playwright 断言答案出现且只观察到两次相同 key/body，浏览器脚本输出 `ROUND8_BROWSER_PASSED`。
+- 修复异步项目刷新作用域判断：旧实现用 `principalId != owner && epoch != epoch`，只要两个条件之一相同就可能让旧响应写回；现改为任一维度不匹配即丢弃。
+- 新增 `backend/tests/test_round8_postgres_http.py`：以独立 PG 临时库完成注册、项目/会话/计划/资料 HTTP 写入，摄取 worker 成功；重建第二个 web/worker 平台后读回 Cookie、计划、资料状态和消息，教学 worker 成功并在第二次调用时 idle；断言 teaching/platform reservation 都是 settled 且 usage 大于 0。
+- 全量门禁：后端测试 100% 通过，仅保留原有 1 个 memory-only 并发语义 skip；新增 PG 测试单独通过且无 skip；Ruff、mypy（113 个源文件）、compileall、Node 语法、三份生成契约、`git diff --check` 均通过。
+- 浏览器补充 768px 横向溢出与键盘注册路径，已通过；预览服务已停止。当前仍未把真实 uvicorn 重启和中断网络故障矩阵伪称完成，下一步应单独补这两项再更新第八轮退出门。

@@ -60,7 +60,9 @@ def main() -> int:
         ],
         [python, "-m", "ruff", "check", "backend", "tools"],
         [python, "-m", "mypy", "backend/app"],
+        [python, "-m", "compileall", "-q", "backend", "tools", "alembic"],
         ["node", "--check", "frontend/app.js"],
+        [python, "tools/skills/gen_contracts.py", "--all", "--check"],
         [python, "tools/check_round8_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts, "--invite", args.invite],
     ]
     for command in commands:
@@ -71,6 +73,12 @@ def main() -> int:
     postgres_stats = read_junit_stats(postgres_xml)
     if postgres_stats.tests <= 0 or postgres_stats.failures or postgres_stats.errors or postgres_stats.skipped:
         print(f"ROUND8_GATE_FAILED: invalid PostgreSQL evidence {postgres_stats}")
+        return 1
+    diff_check = subprocess.run(
+        ["git", "diff", "--check"], check=False, cwd=repo_root, env=environment
+    )
+    if diff_check.returncode != 0:
+        print("ROUND8_GATE_FAILED: git diff --check")
         return 1
     print(f"ROUND8_GATE_PASSED: PostgreSQL evidence {postgres_stats}; browser and static checks passed.")
     return 0

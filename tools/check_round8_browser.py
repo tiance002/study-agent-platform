@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import uuid
 from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
@@ -32,11 +33,30 @@ def main() -> int:
         page.on("response", lambda response: responses.append(f"{response.status} {response.request.method} {response.url}"))
         page.goto(args.base_url, wait_until="networkidle")
         page.screenshot(path=str(artifact_dir / "before-login.png"), full_page=True)
-        if not page.get_by_label("邀请访问码").is_visible():
+        if not page.get_by_label("用户名").is_visible():
             raise AssertionError({"page_errors": errors, "console": console_messages, "url": page.url})
-        page.get_by_label("邀请访问码").fill(args.invite)
-        page.get_by_role("button", name="进入学习空间").click()
-        expect(page.get_by_role("heading", name="选择一个项目", exact=True)).to_be_visible()
+
+        keyboard_page = browser.new_page(viewport={"width": 768, "height": 900})
+        keyboard_page.goto(args.base_url, wait_until="networkidle")
+        keyboard_page.get_by_role("tab", name="注册账号").focus()
+        keyboard_page.keyboard.press("Enter")
+        expect(keyboard_page.get_by_role("tab", name="注册账号")).to_have_attribute(
+            "aria-selected", "true"
+        )
+        keyboard_page.get_by_label("用户名").focus()
+        keyboard_page.keyboard.type("r8key" + uuid.uuid4().hex[:7])
+        keyboard_page.keyboard.press("Tab")
+        keyboard_page.keyboard.type("round8-keyboard-password")
+        keyboard_page.keyboard.press("Tab")
+        keyboard_page.keyboard.press("Enter")
+        expect(keyboard_page.locator(".project-form")).to_be_visible()
+        assert keyboard_page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+        keyboard_page.close()
+
+        page.get_by_role("tab", name="注册账号").click()
+        page.get_by_label("用户名").fill("r8user" + uuid.uuid4().hex[:6])
+        page.get_by_label("密码").fill("round8-password-123")
+        page.get_by_role("button", name="创建账号").click()
         expect(page.locator(".project-form")).to_be_visible()
         project_requests: list[tuple[str, str]] = []
 
@@ -45,8 +65,8 @@ def main() -> int:
             if request.method == "POST" and request.url.endswith("/projects"):
                 project_requests.append((request.headers.get("idempotency-key", ""), request.post_data or ""))
                 if len(project_requests) == 1:
-                    route.fetch()
-                    route.abort()
+                    response = route.fetch()
+                    route.fulfill(response=response, status=503)
                     return
             route.continue_()
 
@@ -83,15 +103,37 @@ def main() -> int:
         expect(page.get_by_role("button", name="创建计划", exact=True)).to_have_count(0)
 
         page.get_by_role("button", name="会话", exact=True).click()
+        teaching_requests: list[tuple[str, str]] = []
+
+        def degrade_first_teaching_response(route) -> None:
+            request = route.request
+            if request.method == "POST":
+                teaching_requests.append(
+                    (request.headers.get("idempotency-key", ""), request.post_data or "")
+                )
+                if len(teaching_requests) == 1:
+                    response = route.fetch()
+                    route.fulfill(response=response, status=503)
+                    return
+            route.continue_()
+
+        page.route("**/teaching-runs", degrade_first_teaching_response)
         page.get_by_label("输入问题").fill("项目为什么需要隔离？")
         page.get_by_role("button", name="发送问题", exact=True).click()
+        expect(page.get_by_text("发送问题结果未知，请确认后重试。", exact=True)).to_be_visible()
+        page.get_by_role("button", name="用同一请求重试", exact=True).click()
         expect(page.get_by_text("回答已准备好", exact=True)).to_be_visible(timeout=15000)
         expect(page.get_by_text("阅读资料后给出可执行的学习解释。", exact=True)).to_be_visible(timeout=15000)
+        assert len(teaching_requests) == 2
+        assert teaching_requests[0] == teaching_requests[1]
         page.get_by_role("button", name="读取原文", exact=True).click()
         expect(page.get_by_text("每个项目都必须隔离。", exact=True)).to_be_visible(timeout=10000)
 
+        page.set_viewport_size({"width": 768, "height": 900})
+        page.screenshot(path=str(artifact_dir / "workbench-tablet.png"), full_page=True)
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
         page.set_viewport_size({"width": 1440, "height": 900})
-        page.screenshot(path=str(artifact_dir / "workbench-mobile-and-plan.png"), full_page=True)
+        page.screenshot(path=str(artifact_dir / "workbench-desktop.png"), full_page=True)
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
         assert not errors, errors
         browser.close()
