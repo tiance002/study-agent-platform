@@ -362,3 +362,4 @@ R4-05 之后写入的片段都经过"与持久化原文比对"，但**在此之�
 - **测试 provider 的配置身份必须仍是已批准的付费 provider**：仅把 `platform.teaching_provider` 替换成 `ScriptedProvider` 会绕开平台预算分支；PG 恢复测试使用 `openai` 的假凭据配置再注入确定性 provider，才能覆盖真实 paid reservation，不产生网络费用。
 - **当前仍有明确证据缺口**：Playwright 已覆盖注册、项目/教学 503 重试、资料/计划/引用、键盘和 768px；但还没有确定性 C1/C2/C3 逆序矩阵，也没有用真实 uvicorn 子进程完成重启后 HTTP 读回和中断网络恢复。不能把 TestClient 的适配器重建误报成完整进程退出门。
 - **发布记录也必须区分本地提交与远端上传**：本轮本地 commit 已生成并部署到 ECS，但常规 push 与 Git Data API 都因 GitHub 443 网络不可达中断；服务器部署成功不等于 GitHub 已上传，记录中必须保留这个差异。
+- **门禁临时目录不能复用失效权限目录**：第一次统一门禁的业务测试并未失败，244 个错误来自 pytest 在历史 `TEMP` 根目录创建 fixture 时的 `PermissionError`。门禁必须使用仓库内按进程隔离的可写临时根，且在 JUnit 前区分环境错误与业务失败。

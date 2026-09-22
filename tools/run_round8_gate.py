@@ -6,7 +6,6 @@ import argparse
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 repo_root = Path(__file__).resolve().parents[1]
@@ -35,7 +34,12 @@ def main() -> int:
 
     gate_dir = repo_root / "var" / "round8-gate"
     gate_dir.mkdir(parents=True, exist_ok=True)
-    temp_root = Path(os.environ.get("ROUND8_GATE_TEMP_ROOT", tempfile.gettempdir())) / "study-plan-round8"
+    configured_temp_root = os.environ.get("ROUND8_GATE_TEMP_ROOT")
+    temp_root = (
+        Path(configured_temp_root)
+        if configured_temp_root
+        else repo_root / "var" / "round8-gate" / f"tmp-{os.getpid()}"
+    )
     temp_root.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
     for variable in ("TEMP", "TMP", "TMPDIR"):

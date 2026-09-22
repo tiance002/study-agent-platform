@@ -689,3 +689,4 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - ECS `120.55.115.162` 上新 release 启动自检通过，迁移保持 `0013`；web、ingestion、teaching 均 active；HTTPS `/healthz` 200，生产 `/registry` 404，前端新文件已在服务器校验。
 - 使用浏览器只读检查真实线上首屏：用户名/密码字段可见，密码登录选中，注册账号标签可见；未提交表单、未创建线上验收账号、未触发真实模型调用。
 - 常规 `git push` 和既有 GitHub Data API 推送均因当前环境无法连接 GitHub 443 而未完成；未 force-push。GitHub 上传状态必须保留为“待网络恢复后推送”，不能写成已上传。
+- 修复统一门禁第一次失败的基础设施问题：历史 `TEMP` 目录权限失效会让 pytest fixture 批量 `PermissionError`；`run_round8_gate.py` 现默认使用 `var/round8-gate/tmp-<pid>`，允许环境变量显式覆盖。修复后统一门禁真实结果为全量 `841 passed, 1 skipped`，PG `135 passed, 707 deselected, 0 skipped`，最终输出 `ROUND8_GATE_PASSED`。
