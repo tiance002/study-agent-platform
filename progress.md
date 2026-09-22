@@ -680,3 +680,12 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - 新增 `backend/tests/test_round8_postgres_http.py`：以独立 PG 临时库完成注册、项目/会话/计划/资料 HTTP 写入，摄取 worker 成功；重建第二个 web/worker 平台后读回 Cookie、计划、资料状态和消息，教学 worker 成功并在第二次调用时 idle；断言 teaching/platform reservation 都是 settled 且 usage 大于 0。
 - 全量门禁：后端测试 100% 通过，仅保留原有 1 个 memory-only 并发语义 skip；新增 PG 测试单独通过且无 skip；Ruff、mypy（113 个源文件）、compileall、Node 语法、三份生成契约、`git diff --check` 均通过。
 - 浏览器补充 768px 横向溢出与键盘注册路径，已通过；预览服务已停止。当前仍未把真实 uvicorn 重启和中断网络故障矩阵伪称完成，下一步应单独补这两项再更新第八轮退出门。
+
+## 2026-09-22 · 第八轮修复发布到 ECS
+
+- 本地 commit：`c27950f`（第八轮修复与证据）和 `2255771`（生产访问说明对齐）；工作区干净。
+- 发布包排除 `.git`、`.venv`、`var`、缓存、环境文件、PEM/密钥；本地与 ECS 临时包 SHA-256 为 `7CCBD6AA66EE358ECE04F9E49EC229DB275E1623D410D03266A656F94582091E`。
+- 切换前备份为 `/var/backups/study-plan/study-platform-20260922T112849Z.dump`；新 release 为 `/opt/study-plan/releases/20260922-round8-residual-v1`，旧 release 保留可回滚。
+- ECS `120.55.115.162` 上新 release 启动自检通过，迁移保持 `0013`；web、ingestion、teaching 均 active；HTTPS `/healthz` 200，生产 `/registry` 404，前端新文件已在服务器校验。
+- 使用浏览器只读检查真实线上首屏：用户名/密码字段可见，密码登录选中，注册账号标签可见；未提交表单、未创建线上验收账号、未触发真实模型调用。
+- 常规 `git push` 和既有 GitHub Data API 推送均因当前环境无法连接 GitHub 443 而未完成；未 force-push。GitHub 上传状态必须保留为“待网络恢复后推送”，不能写成已上传。
