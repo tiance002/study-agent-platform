@@ -698,3 +698,4 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - 独立保留连接、读取、总 deadline、最大重定向数和最大响应字节；错误只返回稳定安全码与可重试标记，不把 URL 凭据、路径或底层异常写入用户状态。
 - 新增 22 项无网络测试，覆盖 SSRF、DNS 失败、重定向越界、降级、超大响应、慢流、HTTP 5xx 和传输超时；全量回归 `841 passed, 1 skipped`，Ruff 全仓通过，mypy `115 source files` 通过。
 - 这只是第九轮任务 1 的安全内核，尚未接入 web 路由、durable acquisition job、解析/对象存储或生产 ECS；因此没有切换现网 release，也没有声称普通用户已经能搜索下载资料。
+- 同步冻结了 `SourceCandidate`、`AcquisitionRequest`、`AcquisitionJob`、候选/下载状态集合及状态转移；`unknown`、`failed`、`succeeded` 均不会被隐式重排回队列，租约只能通过显式 claim 产生。
