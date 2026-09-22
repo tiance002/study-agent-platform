@@ -699,3 +699,4 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - 新增 22 项无网络测试，覆盖 SSRF、DNS 失败、重定向越界、降级、超大响应、慢流、HTTP 5xx 和传输超时；全量回归 `841 passed, 1 skipped`，Ruff 全仓通过，mypy `115 source files` 通过。
 - 这只是第九轮任务 1 的安全内核，尚未接入 web 路由、durable acquisition job、解析/对象存储或生产 ECS；因此没有切换现网 release，也没有声称普通用户已经能搜索下载资料。
 - 同步冻结了 `SourceCandidate`、`AcquisitionRequest`、`AcquisitionJob`、候选/下载状态集合及状态转移；`unknown`、`failed`、`succeeded` 均不会被隐式重排回队列，租约只能通过显式 claim 产生。
+- 本地提交 `803d49f`（安全获取内核）与 `a89c0d2`（候选/下载协议）已推送到 GitHub 分支 `codex/round8-residual-20260922`；当前 PR #2 继续作为审查入口。未部署 ECS，因 durable acquisition job 尚未完成。
