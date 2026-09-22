@@ -670,3 +670,4 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - 当前软链接指向 `/opt/study-plan/releases/20260922-architecture-boundaries-v1`；迁移仍为 `0013 (head)`。
 - web、ingestion、teaching 均 active；公网 HTTPS `/healthz` 返回 200，生产 `/registry` 返回 404，最近十分钟三项服务无 warning 日志。
 - 当前生产源码已提交为 `6369137` 并推送到 GitHub 分支 `codex/architecture-boundaries-20260922`；未包含 PEM、环境文件、运行数据或 API key。
+- GitHub PR 为 `#1`。远端默认 `main` 与当前项目上传历史没有共同祖先，因此 PR 安全地以实际祖先分支 `codex/upload-current-project-20260921` 为 base；未 force-push、未改写远端历史。
