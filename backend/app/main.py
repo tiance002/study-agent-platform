@@ -41,37 +41,24 @@ from app.api.http_idempotency import (
 )
 from app.api.product_routes import router as product_router
 from app.api.projects_routes import router as projects_router
-from app.api.routes import error_response, request_validation_response, router
+from app.api.routes import error_response, legacy_router, request_validation_response, router
 from app.api.teaching_routes import router as teaching_router
 from app.audit.outbox import (
     AuditOutbox,
     InMemoryAuditOutbox,
-    PostgresAuditOutbox,
 )
 from app.audit.sink import AuditSink
 from app.budget.ledger import BudgetLedger
+from app.budget.platform import PlatformPaidBudget, PlatformPaidBudgetPort
 from app.core.clock import SystemClock
-from app.core.errors import PlatformError
+from app.core.errors import PlatformError, public_error_payload
 from app.core.ids import new_request_id
-from app.core.request_context import bind_request_id, reset_request_id
-from app.db.confirmation_store import PostgresConfirmationStore
-from app.db.evidence_store import PostgresEvidenceRepository
-from app.db.idempotency_store import PostgresHttpIdempotencyStore
-from app.db.identity_store import (
-    PostgresInvitationRepository,
-    PostgresMembershipRepository,
-    PostgresSessionRepository,
-)
-from app.db.ingestion_store import PostgresIngestionRepository
-from app.db.learning_store import PostgresLearningLoopRepository
-from app.db.product_store import PostgresProductRepository
-from app.db.rate_limit_store import PostgresRateLimiter
-from app.db.settings import app_dsn
-from app.db.settings import worker_dsn as worker_role_dsn
-from app.db.teaching_store import PostgresTeachingRepository
+from app.core.request_context import bind_request_id, current_request_id, reset_request_id
 from app.deployment import DeploymentSettings
 from app.execution.confirmation import ConfirmationRepository, ConfirmationStore
 from app.execution.state_machine import ActionStateMachine
+from app.identity.account_store import InMemoryAccountRepository
+from app.identity.argon2_pool import Argon2WorkPool
 from app.identity.auth import AuthProvider, BearerSessionAuthProvider
 from app.identity.cookie_auth import CookieAuth
 from app.identity.membership import MembershipStore
@@ -80,6 +67,7 @@ from app.identity.memory_store import (
     InMemorySessionRepository,
 )
 from app.identity.ports import (
+    AccountRepository,
     InvitationRepository,
     MembershipRepository,
     SessionRepository,
@@ -122,7 +110,7 @@ DEMO_PROJECT = "proj_demo"
 DEFAULT_SESSION_TTL = timedelta(hours=8)
 
 #: 代码预期的数据库迁移版本。启动自检核对它；新增迁移必须同步更新。
-EXPECTED_SCHEMA_VERSION = "0011"
+EXPECTED_SCHEMA_VERSION = "0013"
 
 
 @dataclass
@@ -173,6 +161,7 @@ class PlatformState:
     # 教学 provider。None = 功能显式关闭（无凭据/未配置）——
     # 教学端点据此明确报"功能未启用"，绝不静默退回模拟器。
     teaching_provider: TeachingProvider | None
+    accounts: AccountRepository | None = None
     #: 会话 cookie 的有效期（也是兑换出的数据库会话的过期时间）。
     session_ttl: timedelta = DEFAULT_SESSION_TTL
     #: 生产环境置 True（HTTPS-only cookie）。测试与本机开发保持 False：
@@ -191,6 +180,14 @@ class PlatformState:
     persistence_backend: str = "in_memory_adapter"
     rls_label: str = "not_implemented"
     auth_mode_label: str = "cookie_session_bearer_compat"
+    registration_enabled: bool = False
+    password_login_enabled: bool = False
+    paid_dispatch_enabled: bool = False
+    auth_argon2_max_concurrency: int = 2
+    auth_argon2_queue_limit: int = 16
+    auth_argon2_wait_seconds: float = 2.0
+    argon2_pool: Argon2WorkPool | None = None
+    platform_paid_budget: PlatformPaidBudgetPort | None = None
 
 
 def _verify_database_ready(dsn: str, *, expected_version: str) -> None:
@@ -278,8 +275,28 @@ def build_platform(
     knowledge: KnowledgeRepository
     teaching: TeachingRunRepository
     audit_outbox: AuditOutbox
+    accounts: AccountRepository
 
     if loaded.use_postgres:
+        from app.db.account_store import PostgresAccountRepository
+        from app.db.audit_store import PostgresAuditOutbox
+        from app.db.confirmation_store import PostgresConfirmationStore
+        from app.db.evidence_store import PostgresEvidenceRepository
+        from app.db.idempotency_store import PostgresHttpIdempotencyStore
+        from app.db.identity_store import (
+            PostgresInvitationRepository,
+            PostgresMembershipRepository,
+            PostgresSessionRepository,
+        )
+        from app.db.ingestion_store import PostgresIngestionRepository
+        from app.db.learning_store import PostgresLearningLoopRepository
+        from app.db.platform_budget_store import PostgresPlatformPaidBudget
+        from app.db.product_store import PostgresProductRepository
+        from app.db.rate_limit_store import PostgresRateLimiter
+        from app.db.settings import app_dsn
+        from app.db.settings import worker_dsn as worker_role_dsn
+        from app.db.teaching_store import PostgresTeachingRepository
+
         # ⚠️ 回退值必须走 `app_dsn()`（读 `STUDY_PLATFORM_DSN`），不能写死
         # `DEFAULT_APP_DSN`：那样"环境变量说一套、装配连另一套"就成了可能，
         # 而两边看起来都正常 —— 实测后果是测试把数据写进业务库，测试全绿。
@@ -292,6 +309,7 @@ def build_platform(
         membership = PostgresMembershipRepository(clock, dsn)
         pg_sessions = PostgresSessionRepository(clock, dsn)
         session_store = pg_sessions
+        accounts = PostgresAccountRepository(sessions=pg_sessions, dsn=dsn, clock=clock)
         audit_outbox = PostgresAuditOutbox(sink=audit, dsn=dsn)
         invitations = PostgresInvitationRepository(
             clock, dsn, sessions=pg_sessions, outbox=audit_outbox
@@ -365,6 +383,7 @@ def build_platform(
             knowledge=knowledge,
             teaching=teaching,
             teaching_provider=teaching_provider,
+            accounts=accounts,
             session_ttl=loaded.session_ttl,
             cookie_secure=loaded.cookie_secure,
             rate_limiter=rate_limiter,
@@ -380,6 +399,23 @@ def build_platform(
             auth_mode_label=(
                 "cookie_session" if loaded.is_production else "cookie_session_bearer_compat"
             ),
+            registration_enabled=loaded.registration_enabled,
+            password_login_enabled=loaded.password_login_enabled,
+            paid_dispatch_enabled=loaded.paid_dispatch_enabled,
+            auth_argon2_max_concurrency=loaded.auth_argon2_max_concurrency,
+            auth_argon2_queue_limit=loaded.auth_argon2_queue_limit,
+            auth_argon2_wait_seconds=loaded.auth_argon2_wait_seconds,
+            argon2_pool=Argon2WorkPool(
+                loaded.auth_argon2_max_concurrency,
+                loaded.auth_argon2_queue_limit,
+                loaded.auth_argon2_wait_seconds,
+            ),
+            # The paid-provider cap is durable and shared across worker
+            # processes.  Its live switch/cap are held in the migration-0013
+            # singleton and changed through the restricted transition surface.
+            platform_paid_budget=PostgresPlatformPaidBudget(
+                dsn=loaded.worker_dsn or worker_role_dsn(),
+            ),
         )
 
     # ---------------------------------------------------------- 开发内存形态
@@ -389,6 +425,12 @@ def build_platform(
     audit_outbox = InMemoryAuditOutbox(sink=audit)
     invitations = InMemoryInvitationRepository(
         clock=clock, sessions=memory_sessions, outbox=audit_outbox
+    )
+    accounts = InMemoryAccountRepository(
+        membership=membership,
+        sessions=memory_sessions,
+        clock=clock,
+        outbox=audit_outbox,
     )
     confirmations = ConfirmationStore()
     memory_products = InMemoryProductRepository(membership=membership)
@@ -407,6 +449,7 @@ def build_platform(
     rate_limiter = InMemoryRateLimiter(
         limit=loaded.exchange_limit,
         window_seconds=loaded.exchange_window_seconds,
+        capacity=loaded.auth_rate_limit_capacity,
     )
     runtime = _build_runtime(
         registry=registry,
@@ -448,6 +491,7 @@ def build_platform(
         knowledge=knowledge,
         teaching=teaching,
         teaching_provider=teaching_provider,
+        accounts=accounts,
         session_ttl=loaded.session_ttl,
         cookie_secure=loaded.cookie_secure,
         rate_limiter=rate_limiter,
@@ -457,6 +501,21 @@ def build_platform(
         audit_outbox=audit_outbox,
         bearer_enabled=True,
         settings=loaded,
+        registration_enabled=loaded.registration_enabled,
+        password_login_enabled=loaded.password_login_enabled,
+        paid_dispatch_enabled=loaded.paid_dispatch_enabled,
+        auth_argon2_max_concurrency=loaded.auth_argon2_max_concurrency,
+        auth_argon2_queue_limit=loaded.auth_argon2_queue_limit,
+        auth_argon2_wait_seconds=loaded.auth_argon2_wait_seconds,
+        argon2_pool=Argon2WorkPool(
+            loaded.auth_argon2_max_concurrency,
+            loaded.auth_argon2_queue_limit,
+            loaded.auth_argon2_wait_seconds,
+        ),
+        platform_paid_budget=PlatformPaidBudget(
+            monthly_cap_micro=loaded.platform_monthly_cap_micro,
+            paid_dispatch_enabled=loaded.paid_dispatch_enabled,
+        ),
     )
     _seed_demo_membership(membership)
     return state
@@ -517,10 +576,66 @@ def create_app(*, platform: PlatformState | None = None) -> FastAPI:
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIR), name="frontend-assets")
     app.state.platform = platform or build_platform()
     app.include_router(router)
+    if not app.state.platform.settings.is_production:
+        app.include_router(legacy_router)
     app.include_router(auth_router)
     app.include_router(projects_router)
     app.include_router(product_router)
     app.include_router(teaching_router)
+
+    @app.middleware("http")
+    async def _auth_body_guard(request: Request, call_next):
+        """Read and cap unauthenticated JSON bodies before Pydantic parsing."""
+        if request.method == "POST" and request.url.path in {
+            "/auth/invitations/exchange",
+            "/auth/register",
+            "/auth/login",
+        }:
+            content_type = request.headers.get("content-type", "").lower()
+            if not content_type.startswith("application/json"):
+                response = JSONResponse(
+                    status_code=400,
+                    content=public_error_payload("PARAMS_INVALID", "请求必须使用 application/json"),
+                )
+                response.headers["Cache-Control"] = "no-store"
+                return response
+            length = request.headers.get("content-length")
+            try:
+                declared_length = int(length) if length is not None else None
+            except ValueError:
+                declared_length = -1
+            if declared_length is not None and (
+                declared_length < 0 or declared_length > 64 * 1024
+            ):
+                response = JSONResponse(
+                    status_code=413 if declared_length > 64 * 1024 else 400,
+                    content=public_error_payload(
+                        "PARAMS_INVALID",
+                        "请求体过大" if declared_length > 64 * 1024 else "请求体长度无效",
+                        request_id=current_request_id(),
+                    ),
+                )
+                response.headers["Cache-Control"] = "no-store"
+                return response
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > 64 * 1024:
+                    response = JSONResponse(
+                        status_code=413,
+                        content=public_error_payload(
+                            "PARAMS_INVALID", "请求体过大", request_id=current_request_id()
+                        ),
+                    )
+                    response.headers["Cache-Control"] = "no-store"
+                    return response
+                chunks.append(chunk)
+            # Starlette caches request bodies on this attribute; downstream
+            # Pydantic parsing can consume the bounded bytes without rereading
+            # the ASGI receive channel.
+            request._body = b"".join(chunks)
+        return await call_next(request)
 
     @app.middleware("http")
     async def _bind_request_id(request: Request, call_next):
@@ -540,12 +655,15 @@ def create_app(*, platform: PlatformState | None = None) -> FastAPI:
         return response
 
     @app.exception_handler(PlatformError)
-    async def _platform_error(_: Request, exc: PlatformError) -> JSONResponse:
-        return error_response(exc)
+    async def _platform_error(request: Request, exc: PlatformError) -> JSONResponse:
+        response = error_response(exc)
+        if request.url.path.startswith("/auth/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.exception_handler(RequestValidationError)
     async def _request_validation_error(
-        _: Request, exc: RequestValidationError
+        request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         """请求形状错误。
 
@@ -554,7 +672,10 @@ def create_app(*, platform: PlatformState | None = None) -> FastAPI:
         遇到不能编码成 UTF-8 的输入（孤立代理项）时，编码响应本身抛异常，
         422 变成 500。理由详见 `api/routes.py:request_validation_response`。
         """
-        return request_validation_response(exc)
+        response = request_validation_response(exc)
+        if request.url.path.startswith("/auth/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/", include_in_schema=False)
     async def index() -> FileResponse:

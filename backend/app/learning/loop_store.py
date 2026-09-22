@@ -6,16 +6,14 @@ from dataclasses import dataclass, field
 
 from app.core.errors import ErrorCode, deny
 from app.identity.models import Principal
-from app.learning.evidence import (
-    ComponentVerdict,
-    Direction,
-    EvidenceEvent,
-    IndependenceLevel,
-    ObservationStrength,
-    Validity,
-)
+from app.learning.evidence import EvidenceEvent
 from app.learning.memory_store import InMemoryEvidenceRepository
 from app.learning.ports import Diagnosis, TaskAssessment, TaskSubmission
+from app.learning.rules import (
+    self_report_verdict,
+    validate_assessments,
+    validate_submission_content,
+)
 from app.product.memory_store import InMemoryProductRepository
 from app.product.models import PlanBundle, TaskStatus
 
@@ -28,23 +26,6 @@ class InMemoryLearningLoopRepository:
     _submissions: dict[str, list[TaskSubmission]] = field(default_factory=dict)
     _diagnoses: dict[str, list[Diagnosis]] = field(default_factory=dict)
 
-    @staticmethod
-    def _validate_assessments(
-        bundle: PlanBundle, assessments: tuple[TaskAssessment, ...]
-    ) -> None:
-        task_ids = {task.task_id for task in bundle.tasks}
-        mapped_ids = {item.task_id for item in assessments}
-        if task_ids != mapped_ids or len(mapped_ids) != len(assessments):
-            raise deny(
-                ErrorCode.EVIDENCE_UNMAPPED,
-                "生成计划中的每个任务必须恰好冻结一份评估契约",
-            )
-        if any(
-            not item.component_id or not item.contract_id or not item.mapping_version
-            for item in assessments
-        ):
-            raise deny(ErrorCode.EVIDENCE_UNMAPPED, "评估契约字段不能为空")
-
     def install_generated_plan(
         self,
         actor: Principal,
@@ -53,7 +34,7 @@ class InMemoryLearningLoopRepository:
         assessments: tuple[TaskAssessment, ...],
     ) -> PlanBundle:
         self.products.membership.get(actor, project_id)
-        self._validate_assessments(bundle, assessments)
+        validate_assessments(bundle, assessments)
         with self.products._lock:
             if any(item.task_id in self._assessments for item in assessments):
                 raise deny(ErrorCode.EVIDENCE_IMMUTABLE, "任务评估契约已经冻结")
@@ -103,7 +84,7 @@ class InMemoryLearningLoopRepository:
         submission_id: str,
         content: str,
     ) -> tuple[TaskSubmission, EvidenceEvent]:
-        _validate_submission_content(content)
+        validate_submission_content(content)
         self.products.membership.get(actor, project_id)
         with self.products._lock:
             found = self.products._find_task(task_id)
@@ -126,7 +107,7 @@ class InMemoryLearningLoopRepository:
                 content=content,
                 created_at=self.products.clock.now(),
             )
-            verdict = _self_report_verdict(assessment.component_id, submission_id)
+            verdict = self_report_verdict(assessment.component_id, submission_id)
             event = self.evidence.append_learning(
                 actor,
                 project_id=project_id,
@@ -147,23 +128,3 @@ class InMemoryLearningLoopRepository:
                 row for row in self._submissions.get(task_id, ())
                 if row.principal_id == actor.principal_id
             )
-
-
-def _self_report_verdict(component_id: str, submission_id: str) -> ComponentVerdict:
-    return ComponentVerdict(
-        component_id=component_id,
-        assessment_validity=Validity.VALID,
-        observation_strength=ObservationStrength.OBS_1,
-        source_reliability_ok=True,
-        independence_level=IndependenceLevel.INTRODUCED,
-        direction=Direction.POSITIVE,
-        independence_group=submission_id,
-    )
-
-
-def _validate_submission_content(content: str) -> None:
-    if not content or len(content) > 20_000:
-        raise deny(
-            ErrorCode.PARAMS_INVALID,
-            "练习提交内容长度必须在 1 到 20000 个字符之间",
-        )

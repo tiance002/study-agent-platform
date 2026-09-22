@@ -28,8 +28,52 @@ from datetime import datetime
 from typing import Protocol
 
 from app.core.contracts import require_id, require_text
-from app.identity.models import LearningProject, Principal
-from app.product.models import Invitation, UserSession
+from app.identity.models import Invitation, LearningProject, Principal, UserSession
+
+
+@dataclass(frozen=True)
+class AccountLookup:
+    credential_id: str
+    tenant_id: str
+    principal_id: str
+    username: str
+    password_hash: str
+    hash_version: int
+    security_generation: int
+    disabled_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class AccountRegistrationResult:
+    lookup: AccountLookup
+    session: UserSession
+    default_project_id: str
+    default_project_name: str
+
+
+class AccountRepository(Protocol):
+    """Credential lookup and atomic account registration boundary."""
+
+    def lookup(self, username_normalized: str) -> AccountLookup | None: ...
+
+    def register(
+        self,
+        *,
+        username_original: str,
+        username_normalized: str,
+        password_hash: str,
+        hash_version: int,
+        session_expires_at: datetime,
+    ) -> AccountRegistrationResult: ...
+
+    def complete_login(
+        self,
+        *,
+        lookup: AccountLookup,
+        session_expires_at: datetime,
+        new_password_hash: str | None = None,
+        new_hash_version: int | None = None,
+    ) -> UserSession | None: ...
 
 
 @dataclass(frozen=True)

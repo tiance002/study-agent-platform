@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import StrEnum
 from urllib.parse import urlsplit
@@ -84,6 +84,23 @@ def _env_bool(
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_optional_nonnegative_int(
+    name: str, default: int | None, env: Mapping[str, str]
+) -> int | None:
+    """Parse an optional non-negative integer; ``unlimited`` means ``None``."""
+
+    raw = env.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"none", "null", "unlimited", "infinite"}:
+        return None
+    value = int(normalized)
+    if value < 0:
+        raise ValueError(f"{name} 不能为负")
+    return value
+
+
 def _normalize_origin(raw: str) -> str | None:
     """把配置里的 Origin 规范化为 `scheme://host[:port]`（小写、无路径）。
 
@@ -120,6 +137,7 @@ class DeploymentSettings:
     session_ttl: timedelta
     exchange_limit: int
     exchange_window_seconds: int
+    auth_rate_limit_capacity: int = 10_000
     #: DSN 是否由环境**显式**提供（区别于落到本机 trust 默认值）。
     dsn_explicitly_set: bool = False
     #: worker 角色的 DSN（`study_worker`）。默认 `None` = 由 `db.settings` 决定。
@@ -137,8 +155,22 @@ class DeploymentSettings:
     teaching_max_output_tokens: int = DEFAULT_TEACHING_MAX_OUTPUT_TOKENS
     #: 单项目教学预算默认值（微单位）。租户/项目级预算落库后可按项目覆盖。
     teaching_project_budget_micro: int = DEFAULT_TEACHING_PROJECT_BUDGET_MICRO
-    #: provider 凭据是否在环境中存在（**只记有无，不记值** —— 秘密不进配置对象）。
-    teaching_api_key_present: bool = False
+    #: Provider transport settings are parsed once with the rest of deployment
+    #: configuration. The secret is excluded from repr so diagnostics cannot
+    #: accidentally print it.
+    teaching_api_key: str = field(default="", repr=False)
+    teaching_base_url: str = "https://api.openai.com/v1"
+    # Open registration and password login are independent kill switches.
+    # Missing environment variables deliberately resolve to False.
+    registration_enabled: bool = False
+    password_login_enabled: bool = False
+    paid_dispatch_enabled: bool = False
+    auth_argon2_max_concurrency: int = 2
+    auth_argon2_queue_limit: int = 16
+    auth_argon2_wait_seconds: float = 2.0
+    #: ``None`` means no platform-wide monthly monetary rejection.  Accounting
+    #: and per-request token/time limits remain active.
+    platform_monthly_cap_micro: int | None = 0
 
     @property
     def is_production(self) -> bool:
@@ -147,6 +179,10 @@ class DeploymentSettings:
     @property
     def use_postgres(self) -> bool:
         return self.persistence is PersistenceKind.POSTGRES
+
+    @property
+    def teaching_api_key_present(self) -> bool:
+        return bool(self.teaching_api_key)
 
     @classmethod
     def load(cls, environ: dict[str, str] | None = None) -> DeploymentSettings:
@@ -256,9 +292,19 @@ class DeploymentSettings:
                     str(DEFAULT_TEACHING_PROJECT_BUDGET_MICRO),
                 )
             ),
-            # 只记**有没有**，值本身留在适配器从环境读取（秘密不进配置对象、
-            # 不进日志、不进数据库）。
-            teaching_api_key_present=bool(env.get("STUDY_PLATFORM_TEACHING_API_KEY")),
+            teaching_api_key=env.get("STUDY_PLATFORM_TEACHING_API_KEY", ""),
+            teaching_base_url=env.get(
+                "STUDY_PLATFORM_TEACHING_BASE_URL", "https://api.openai.com/v1"
+            ).strip(),
+            registration_enabled=_env_bool("STUDY_PLATFORM_REGISTRATION_ENABLED", env=env),
+            password_login_enabled=_env_bool("STUDY_PLATFORM_PASSWORD_LOGIN_ENABLED", env=env),
+            paid_dispatch_enabled=_env_bool("STUDY_PLATFORM_PAID_DISPATCH_ENABLED", env=env),
+            auth_argon2_max_concurrency=int(env.get("STUDY_PLATFORM_ARGON2_MAX_CONCURRENCY", "2")),
+            auth_argon2_queue_limit=int(env.get("STUDY_PLATFORM_ARGON2_QUEUE_LIMIT", "16")),
+            auth_argon2_wait_seconds=float(env.get("STUDY_PLATFORM_ARGON2_WAIT_SECONDS", "2")),
+            platform_monthly_cap_micro=_env_optional_nonnegative_int(
+                "STUDY_PLATFORM_MONTHLY_CAP_MICRO", 0, env
+            ),
             session_secret=session_secret,
             cookie_secret=cookie_secret,
             cookie_previous_secrets=cookie_previous,
@@ -272,6 +318,7 @@ class DeploymentSettings:
             session_ttl=timedelta(minutes=ttl_minutes),
             exchange_limit=exchange_limit,
             exchange_window_seconds=exchange_window,
+            auth_rate_limit_capacity=int(env.get("STUDY_PLATFORM_AUTH_RATE_LIMIT_CAPACITY", "10000")),
         )
 
     # ------------------------------------------------------------- 启动自检
@@ -297,6 +344,19 @@ class DeploymentSettings:
             problems.append(
                 "邀请兑换限流窗口必须为正秒数（STUDY_PLATFORM_EXCHANGE_WINDOW_SECONDS）"
             )
+        if self.auth_rate_limit_capacity <= 0:
+            problems.append("认证限流桶容量必须为正")
+        if self.auth_argon2_max_concurrency <= 0:
+            problems.append("Argon2 并发上限必须为正")
+        if self.auth_argon2_queue_limit < 0:
+            problems.append("Argon2 队列上限不能为负")
+        if self.auth_argon2_wait_seconds <= 0:
+            problems.append("Argon2 等待时限必须为正")
+        if (
+            self.platform_monthly_cap_micro is not None
+            and self.platform_monthly_cap_micro < 0
+        ):
+            problems.append("平台月度额度不能为负")
         for raw in self.invalid_origins:
             problems.append(f"可信 Origin 无法解析（应为 scheme://host[:port]）：{raw!r}")
         for raw in self.invalid_proxies:

@@ -18,8 +18,8 @@ import pytest
 from app.api.http_idempotency import (
     MAX_CACHED_RESPONSE_BYTES,
     InMemoryHttpIdempotencyStore,
-    PostgresHttpIdempotencyStore,
 )
+from app.db.idempotency_store import PostgresHttpIdempotencyStore
 from app.identity.models import Principal
 from app.identity.ports import SystemContext
 from app.main import DEMO_PRINCIPAL, DEMO_TENANT, create_app

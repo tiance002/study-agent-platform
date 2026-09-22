@@ -16,8 +16,95 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 
-from app.core.contracts import require_aware, require_id, require_positive, require_text
+from app.core.contracts import (
+    later_than,
+    require_aware,
+    require_id,
+    require_positive,
+    require_text,
+)
+
+
+class AuthMethod(StrEnum):
+    """How a persistent browser session was authenticated."""
+
+    INVITATION = "invitation"
+    PASSWORD = "password"
+
+
+@dataclass(frozen=True)
+class Invitation:
+    """A one-time invitation bound to a tenant and principal."""
+
+    invitation_id: str
+    tenant_id: str
+    token_hash: str
+    issued_by: str
+    invitee_principal_id: str
+    issued_at: datetime
+    expires_at: datetime
+    consumed_at: datetime | None = None
+    consumed_by: str | None = None
+
+    def __post_init__(self) -> None:
+        require_id(self.invitation_id, "invitation_id")
+        require_id(self.tenant_id, "tenant_id")
+        require_id(self.token_hash, "token_hash")
+        require_id(self.issued_by, "issued_by")
+        require_id(self.invitee_principal_id, "invitee_principal_id")
+        require_aware(self.issued_at, "issued_at")
+        require_aware(self.expires_at, "expires_at")
+        later_than(self.expires_at, self.issued_at, "expires_at")
+        if self.consumed_at is not None:
+            require_aware(self.consumed_at, "consumed_at")
+
+    def is_live(self, now: datetime) -> bool:
+        return self.consumed_at is None and now < self.expires_at
+
+
+@dataclass(frozen=True)
+class UserSession:
+    """A revocable persistent authenticated session."""
+
+    session_id: str
+    tenant_id: str
+    principal_id: str
+    issued_at: datetime
+    expires_at: datetime
+    revoked_at: datetime | None = None
+    auth_method: AuthMethod = AuthMethod.INVITATION
+    credential_id: str | None = None
+    security_generation: int | None = None
+
+    def __post_init__(self) -> None:
+        require_id(self.session_id, "session_id")
+        require_id(self.tenant_id, "tenant_id")
+        require_id(self.principal_id, "principal_id")
+        require_aware(self.issued_at, "issued_at")
+        require_aware(self.expires_at, "expires_at")
+        later_than(self.expires_at, self.issued_at, "expires_at")
+        if self.revoked_at is not None:
+            require_aware(self.revoked_at, "revoked_at")
+        if not isinstance(self.auth_method, AuthMethod):
+            raise ValueError("auth_method 必须是 AuthMethod")
+        if self.auth_method is AuthMethod.INVITATION:
+            if self.credential_id is not None:
+                raise ValueError("邀请会话不能关联密码凭据")
+            generation = self.security_generation
+            if generation is None:
+                generation = 1
+                object.__setattr__(self, "security_generation", generation)
+            require_positive(generation, "security_generation")
+        else:
+            generation = self.security_generation
+            if not self.credential_id or generation is None:
+                raise ValueError("密码会话必须关联凭据和安全代际")
+            require_positive(generation, "security_generation")
+
+    def is_live(self, now: datetime) -> bool:
+        return self.revoked_at is None and now < self.expires_at
 
 
 @dataclass(frozen=True)

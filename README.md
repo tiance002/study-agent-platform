@@ -2,21 +2,19 @@
 
 多用户 SaaS 学习助手，首个垂直领域为 **Agent 工程实践**。教学法是 project-first：围绕用户想解决的真实问题反推知识、先修关系与验收证据，而不是先摆一套固定课程。
 
-本仓库当前包含**设计规格**与**批次一最小闭环的可运行实现**。
+本仓库包含设计规格、可运行的首版应用、PostgreSQL 持久化实现与生产部署资产。
 
 ---
 
-## 本版是什么（以及不是什么）
+## 当前能力与边界
 
-本版实现了「批次一上线门槛」中**最需要机械证明的那部分**：策略、预算、幂等、审计、证据、子任务边界。
-它们全部是纯 Python、零第三方依赖，并由一组不变量测试逐条证明。
+首版已支持开放注册、密码登录、Cookie 会话、项目与对话、计划和任务、资料上传与持久摄取、关键词检索、学习证据，以及可持久恢复的教学运行。生产环境使用 PostgreSQL、nginx、systemd worker 和真实 DeepSeek 兼容接口；开发环境默认使用内存适配器，也可显式切换 PostgreSQL。
 
 > 测试数量**不在本文档里硬编码**（写死会随迭代过期）。用 `pytest --collect-only -q | tail -1` 查看当前值。
 
-**⚠️ 本版不是可上线的多租户服务。** 下面这些是设计里有、但本版**没有实现**的部分，
-实现时用开发适配器占位并已显式标注 —— 请勿在未替换它们之前用于任何真实数据。
+下面的表格记录已经实现的边界和仍然明确受限的能力；受限能力不会由模拟结果伪装成已完成。
 
-| 未实现项 | 本版现状 | 后果 |
+| 能力 | 本版现状 | 边界 |
 |---|---|---|
 | ~~PostgreSQL 接入应用~~ | **主要领域已实现**：身份、产品、学习闭环、摄取四组仓储都有 PostgreSQL 适配器，跑同一套参数化契约测试，各有端到端退出门 | 开发默认仍是内存适配器；审计 sink 仍写本地文件；registry / workflow 运行时尚在进程内 |
 | ~~认证与授权~~ | **已实现**：签名会话令牌 + 项目归属校验；请求体不含任何身份字段 | 令牌签发的生产替代（OIDC / SAML）待接入 |
@@ -26,13 +24,13 @@
 | Fetcher / Package Proxy | 仅域名白名单示意，**不真的出网** | 无 SSRF 防护实现 |
 | 资料解析格式 | **只有** UTF-8 纯文本与 Markdown，单版本上限 1 MiB（按字节） | 无 PDF / Office / OCR / 网页抓取 —— 这些都需要新的解析边界，且会引入"解析结果不可复现" |
 | 语义检索 | **不是**：检索是 `keyword/v1` 关键词基线（NFKC 归一 + 中文 2-gram + 整数权重），结果确定性可复现 | 同义改写命中不了；无 pgvector、无 reranker、无中文分词器 |
-| 模型调用（L0/L1/L2） | 只有档位声明，无 provider | 无实际模型调用；检索命中也**不会**被报成"核心结论有证据"（证据状态恒为 `insufficient`） |
+| 模型调用（L0/L1/L2） | 已接入 OpenAI Responses 兼容 provider，并完成 DeepSeek 生产联调 | 无资料时明确降级为 `inference_only`；尚无原生 token 流 |
 | ~~durable 摄取队列~~ | **已实现**：`ingestion_jobs` + lease + `FOR UPDATE SKIP LOCKED`；崩溃后租约到期可回收，重复完成幂等 | outbox（面向外部副作用的持久化派发）仍未实现 |
 | ~~摄取凭据边界~~ | **已实现**：跨租户队列可见性限给 `study_worker` **数据库角色**（迁移 `0008`）；应用角色自设 `app.worker_id` 无效，且已收回队列表的 `UPDATE` | 真实的凭据轮换与最小权限审计未做过（本机 trust 认证，密码不参与验证） |
 | ~~认领围栏~~ | **已实现**：每次认领产生不可复用的 `claim_token`（迁移 `0009`）；`complete` / `fail` 在**一条条件更新**里比对状态 + token + 租约期限 | 落定后 token 清空，因此"旧持有者的迟到 `complete`"与"重复投递"事后不可区分（不改变状态、不重复写片段） |
-| ~~模型教学交互~~ | **已实现（模拟器）**：durable teaching run（`claim_token` 围栏）+ provider attempt 存证 + 整数微单位预算（租户/项目两级）+ 引用三道关卡（快照子集→回读→内容一致）+ SSE 事件回放（Last-Event-ID 续传） | 真实云 provider 未接入（无凭据，ADR-015）；原生 token 流未实现 |
-| 前端 | 单页演示（原生 HTML） | 非设计中的 React + Vite 应用 |
-| 可观测性 | 无 | 无 OTel、无指标与告警 |
+| ~~模型教学交互~~ | **已实现**：durable teaching run（`claim_token` 围栏）+ provider attempt 存证 + 整数微单位预算 + 引用三道关卡 + SSE 事件回放 | 原生 token 流未实现 |
+| 前端 | React 单页工作台，由同源 FastAPI 静态托管 | 尚未拆分为独立构建产物和组件包 |
+| 可观测性 | 健康检查、审计 outbox、systemd 日志和备份恢复记录 | 尚无 OTel、集中指标与告警 |
 | 学习闭环题型/评分/复测 | 有诊断、计划生成、任务流转、自报提交与证据投影 | 无题库、无自动评分、无复测分级 |
 
 这些不是「顺手没做」，而是**按设计有意延后**：先让边界可证明，再逐项换掉适配器。
@@ -43,8 +41,7 @@
 
 ### 1. 安装依赖（Python 3.11+）
 
-> ⚠️ **本项目目录下的 `.venv` 目前不存在。** 调试过程中它被 pip 弄成了半安装状态
-> （有 `python.exe`、没有任何包），已删除。请在你自己的终端里重建——大概一两分钟。
+仓库已有可用 `.venv` 时可直接复用；新环境按下面的命令创建。
 
 ```bat
 cd E:\codex_workspace\study-plan
@@ -81,16 +78,16 @@ python -m venv .venv
 
 ### 3. 启动数据库（可选）
 
-PostgreSQL 16.4 已装在本机 `E:\pgsql`。**必须在你自己的终端里启动** ——
-由自动化工具启动的进程会在命令结束时被清理，无法常驻。
+本工作站的 PostgreSQL 安装在 `E:\pgsql`，并注册为自动启动的 Windows 服务
+`study-plan-postgresql`。先检查服务状态：
 
-```bat
-scripts\pg_start.cmd
+```powershell
+Get-Service study-plan-postgresql
+pg_isready -h 127.0.0.1 -p 5432
 ```
 
-它会启动数据库并打印连接串。停止用 `scripts\pg_stop.cmd`。
-
-两个脚本都是**幂等**的：重复启动会提示「已在运行」，重复停止会提示「未运行」，不会报错。
+在未注册服务的其他 Windows 开发机上，仍可使用 `scripts\pg_start.cmd` 和
+`scripts\pg_stop.cmd` 管理仓库自带的数据目录。
 
 #### 验证数据库连通与 RLS
 
@@ -122,8 +119,7 @@ scripts\db_check.cmd
 > **在文件开头写 `chcp 65001` 救不了** —— 错位发生在这一行生效之前。
 > 所以脚本里只用英文提示，中文说明一律放在这份 README 里。行尾统一 CRLF。
 
-> 应用目前**还没有连接这个数据库**（仍是进程内适配器）。数据库已经就绪、RLS 也已验证生效，
-> 但正式接入属于下一步工作，见文末「下一步」。
+开发默认使用内存适配器；设置 `STUDY_PLATFORM_PERSISTENCE=postgres` 后，应用会在启动时连接数据库并核对迁移版本。生产模式强制使用 PostgreSQL，连接或版本不正确时直接启动失败。
 
 ### 4. 启动控制面
 
@@ -159,20 +155,16 @@ set PYTHONPATH=backend
 .venv/Scripts/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-### 5. 签发会话令牌
+### 5. 注册与登录
 
-**这一步是必须的**：所有接口都要求认证，而页面上刻意没有「登录」按钮 ——
-那会退化成"客户端自报身份"。签发是运维动作，只能在服务端做。
+页面默认显示用户名和密码登录。开发或生产环境需要显式开启注册与密码登录：
 
-新开一个终端：
-
-```bash
-.venv/Scripts/python tools/issue_session.py --tenant tenant_demo --principal user_demo
+```powershell
+$env:STUDY_PLATFORM_REGISTRATION_ENABLED = "true"
+$env:STUDY_PLATFORM_PASSWORD_LOGIN_ENABLED = "true"
 ```
 
-复制输出的令牌，打开 **http://127.0.0.1:8000/** ，粘贴到第一个输入框，点「验证身份」。
-
-开箱可用的演示数据：租户 `tenant_demo` / 主体 `user_demo` / 项目 `proj_demo`。
+用户名支持 1 到 16 个规范化 Unicode 字符。密码只通过 Argon2id 摘要保存；平台不要求邮箱，因此忘记密码时目前需要管理员处置。邀请码兑换保留为兼容入口，不是开放注册的必经步骤。
 
 ### 6. 校验设计知识索引与契约
 

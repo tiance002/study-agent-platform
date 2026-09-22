@@ -64,6 +64,45 @@ def test_openai_responses_adapter_parses_answer_and_usage(response_server):
     assert _ResponsesHandler.seen_headers["authorization"] == "Bearer test-secret"
 
 
+def test_openai_responses_adapter_allows_plain_text_only_without_materials(response_server):
+    _ResponsesHandler.response_status = 200
+    _ResponsesHandler.response_body = {
+        "id": "resp_plain",
+        "status": "completed",
+        "output_text": "函数是一段可复用的代码。",
+        "usage": {"input_tokens": 12, "output_tokens": 7},
+    }
+    provider = OpenAIResponsesProvider(
+        api_key="test-secret",
+        base_url=f"http://127.0.0.1:{response_server.server_port}/v1",
+    )
+
+    result = provider.generate(a_request(artifacts=()))
+
+    assert result.status is ProviderStatus.COMPLETED
+    assert result.answer_text == "函数是一段可复用的代码。"
+    assert result.citations == ()
+    assert result.usage == TokenUsage(input_tokens=12, output_tokens=7)
+
+
+def test_openai_responses_adapter_keeps_plain_text_malformed_with_materials(response_server):
+    _ResponsesHandler.response_status = 200
+    _ResponsesHandler.response_body = {
+        "id": "resp_plain_grounded",
+        "status": "completed",
+        "output_text": "函数是一段可复用的代码。",
+        "usage": {"input_tokens": 12, "output_tokens": 7},
+    }
+    provider = OpenAIResponsesProvider(
+        api_key="test-secret",
+        base_url=f"http://127.0.0.1:{response_server.server_port}/v1",
+    )
+
+    result = provider.generate(a_request())
+
+    assert result.status is ProviderStatus.MALFORMED
+
+
 def test_openai_responses_adapter_treats_server_error_as_unknown(response_server):
     _ResponsesHandler.response_status = 503
     _ResponsesHandler.response_body = {"error": {"message": "hidden"}}

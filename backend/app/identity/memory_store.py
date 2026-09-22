@@ -25,9 +25,8 @@ from app.audit.sink import RiskLevel
 from app.core.clock import Clock, SystemClock
 from app.core.errors import ErrorCode, deny
 from app.identity.limits import MAX_SESSION_TTL
-from app.identity.models import Principal
+from app.identity.models import Invitation, Principal, UserSession
 from app.identity.ports import SystemContext
-from app.product.models import Invitation, UserSession
 
 if TYPE_CHECKING:  # 类型标注专用：避免运行时循环导入
     from app.audit.outbox import InMemoryAuditOutbox

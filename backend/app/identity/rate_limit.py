@@ -46,7 +46,14 @@ class RateLimitDecision:
 class RateLimiter(Protocol):
     """注册一次尝试并给出判定。窗口对齐公式内存/PG 必须一致。"""
 
-    def register(self, key: str, *, now: datetime) -> RateLimitDecision: ...
+    def register(
+        self,
+        key: str,
+        *,
+        now: datetime,
+        limit: int | None = None,
+        window_seconds: int | None = None,
+    ) -> RateLimitDecision: ...
 
 
 def window_start_epoch(now: datetime, window_seconds: int) -> int:
@@ -60,17 +67,48 @@ def window_start_epoch(now: datetime, window_seconds: int) -> int:
 class InMemoryRateLimiter:
     """进程内固定窗口限流（开发适配器；单进程成立）。"""
 
-    def __init__(self, *, limit: int, window_seconds: int) -> None:
+    def __init__(self, *, limit: int, window_seconds: int, capacity: int = 10_000) -> None:
         if limit <= 0 or window_seconds <= 0:
             raise ValueError("限流次数与窗口秒数都必须为正")
+        if capacity <= 0:
+            raise ValueError("限流桶容量必须为正")
         self._limit = limit
         self._window = window_seconds
+        self._capacity = capacity
         self._counters: dict[str, tuple[int, int]] = {}
         self._lock = threading.Lock()
 
-    def register(self, key: str, *, now: datetime) -> RateLimitDecision:
-        start = window_start_epoch(now, self._window)
+    def register(
+        self,
+        key: str,
+        *,
+        now: datetime,
+        limit: int | None = None,
+        window_seconds: int | None = None,
+    ) -> RateLimitDecision:
+        effective_limit = self._limit if limit is None else limit
+        effective_window = self._window if window_seconds is None else window_seconds
+        if effective_limit <= 0 or effective_window <= 0:
+            raise ValueError("限流次数与窗口秒数都必须为正")
+        start = window_start_epoch(now, effective_window)
         with self._lock:
+            # TTL cleanup is bounded to the current counter map.  If a hostile
+            # stream fills every bucket in one window, reject new keys instead
+            # of growing memory without bound.
+            if key not in self._counters and len(self._counters) >= self._capacity:
+                self._counters = {
+                    bucket: value
+                    for bucket, value in self._counters.items()
+                    if value[0] == start
+                }
+                if len(self._counters) >= self._capacity:
+                    return RateLimitDecision(
+                        allowed=False,
+                        attempts=effective_limit + 1,
+                        limit=effective_limit,
+                        window_seconds=effective_window,
+                        retry_after_seconds=effective_window,
+                    )
             previous = self._counters.get(key)
             if previous is None or previous[0] != start:
                 attempts = 1
@@ -79,12 +117,12 @@ class InMemoryRateLimiter:
             self._counters[key] = (start, attempts)
 
         retry_after = 0
-        if attempts > self._limit:
-            retry_after = self._window - (int(now.timestamp()) - start)
+        if attempts > effective_limit:
+            retry_after = effective_window - (int(now.timestamp()) - start)
         return RateLimitDecision(
-            allowed=attempts <= self._limit,
+            allowed=attempts <= effective_limit,
             attempts=attempts,
-            limit=self._limit,
-            window_seconds=self._window,
+            limit=effective_limit,
+            window_seconds=effective_window,
             retry_after_seconds=max(retry_after, 0),
         )

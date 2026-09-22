@@ -35,6 +35,12 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Literal
 
+from app.budget.platform import (
+    PlatformPaidBudgetPort,
+    PlatformReservationState,
+    reservation_id_for_run,
+)
+from app.budget.ports import PRICE_VERSION, usage_to_micro
 from app.core.clock import Clock, SystemClock
 from app.core.errors import ErrorCode, PlatformError
 from app.identity.models import Principal
@@ -79,6 +85,9 @@ class TeachingService:
     max_output_tokens: int
     clock: Clock = None  # type: ignore[assignment]
     provider_timeout_seconds: int = DEFAULT_PROVIDER_TIMEOUT_SECONDS
+    platform_budget: PlatformPaidBudgetPort | None = None
+    platform_provider: str = "unknown"
+    platform_price_version: str = PRICE_VERSION
 
     def __post_init__(self) -> None:
         if self.clock is None:  # pragma: no cover - 装配层保证
@@ -128,6 +137,42 @@ class TeachingService:
             max_output_tokens=max_output_tokens,
             deadline=deadline,
         )
+        platform_reservation_id: str | None = None
+        platform_reservation_held = False
+        platform_budget = self.platform_budget
+        if platform_budget is not None:
+            platform_reservation_id = reservation_id_for_run(claim.run.run_id)
+            try:
+                platform_reservation = platform_budget.reserve(
+                    provider=self.platform_provider,
+                    price_version=self.platform_price_version,
+                    max_spend_micro=usage_to_micro(est_input, max_output_tokens),
+                    at=self.clock.now(),
+                    reservation_id=platform_reservation_id,
+                )
+                platform_reservation_id = platform_reservation.reservation_id
+                platform_reservation_held = (
+                    platform_reservation.state is PlatformReservationState.HELD
+                )
+                # Mark the durable platform reservation before the teaching
+                # attempt.  A crash between these two operations conservatively
+                # leaves an in-flight obligation rather than allowing a second
+                # provider dispatch to spend the same cap.
+                platform_budget.mark_in_flight(platform_reservation_id)
+            except PlatformError as exc:
+                if platform_reservation_id is not None and platform_reservation_held:
+                    platform_budget.release_before_dispatch(platform_reservation_id)
+                if exc.code is not ErrorCode.BUDGET_EXCEEDED:
+                    raise
+                self.teaching.fail_run(
+                    claim,
+                    error_code="PLATFORM_BUDGET_EXCEEDED",
+                    safe_detail="平台付费额度不足或已暂停派发",
+                    dispatch_happened=False,
+                    usage=None,
+                )
+                return "failed"
+
         try:
             self.teaching.mark_dispatched(
                 claim,
@@ -137,6 +182,8 @@ class TeachingService:
                 request_payload=self._serialize_request(request),
             )
         except PlatformError as exc:
+            if platform_reservation_id is not None and platform_budget is not None:
+                platform_budget.release_dispatch_failed(platform_reservation_id)
             if exc.code is not ErrorCode.BUDGET_EXCEEDED:
                 raise
             self.teaching.fail_run(
@@ -160,6 +207,7 @@ class TeachingService:
             return "reconciliation_required"
 
         if result.status is ProviderStatus.DISPATCH_FAILED:
+            self._release_platform_dispatch_failed(platform_reservation_id)
             self.teaching.fail_run(
                 claim,
                 error_code="PROVIDER_DISPATCH_FAILED",
@@ -197,6 +245,9 @@ class TeachingService:
                 provider_request_id=result.provider_request_id,
                 payload=payload,
             )
+            self._settle_platform(
+                platform_reservation_id, result.usage, max_input_tokens, max_output_tokens
+            )
             self.teaching.finish_run(
                 claim,
                 attempt_id=attempt_id,
@@ -219,6 +270,9 @@ class TeachingService:
                 safe_detail="provider 失败但没有可采纳的权威用量；待对账",
             )
             return "reconciliation_required"
+        self._settle_platform(
+            platform_reservation_id, settled_usage, max_input_tokens, max_output_tokens
+        )
         self.teaching.fail_run(
             claim,
             error_code=f"PROVIDER_{result.status.value.upper()}",
@@ -262,6 +316,12 @@ class TeachingService:
         usage = self._settled_usage(
             self._deserialize_usage(payload.get("usage")), max_input_tokens, max_output_tokens
         )
+        self._settle_platform(
+            self._platform_reservation_for_claim(claim),
+            usage,
+            max_input_tokens,
+            max_output_tokens,
+        )
         self.teaching.finish_run(
             claim,
             attempt_id=payload["attempt_id"],
@@ -273,6 +333,36 @@ class TeachingService:
             citation_rejections=self._rejection_dicts(validation),
         )
         return "succeeded"
+
+    def _release_platform_dispatch_failed(self, reservation_id: str | None) -> None:
+        if reservation_id is not None and self.platform_budget is not None:
+            self.platform_budget.release_dispatch_failed(reservation_id)
+
+    def _settle_platform(
+        self,
+        reservation_id: str | None,
+        usage: TokenUsage | None,
+        max_input_tokens: int,
+        max_output_tokens: int,
+    ) -> None:
+        if reservation_id is None or self.platform_budget is None or usage is None:
+            # Unknown provider usage deliberately leaves the reservation in
+            # flight for reconciliation; it must never be treated as zero.
+            return
+        settled = self._settled_usage(usage, max_input_tokens, max_output_tokens)
+        if settled is None:
+            return
+        self.platform_budget.settle(
+            reservation_id,
+            actual_spend_micro=usage_to_micro(settled.input_tokens, settled.output_tokens),
+        )
+
+    def _platform_reservation_for_claim(self, claim: RunClaim) -> str | None:
+        """Reconstruct the durable reservation id after a worker restart."""
+
+        if self.platform_budget is None:
+            return None
+        return reservation_id_for_run(claim.run.run_id)
 
     # ------------------------------------------------------------ 内部
 

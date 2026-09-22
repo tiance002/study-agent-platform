@@ -31,8 +31,7 @@ from hashlib import sha256
 from app.core.clock import Clock
 from app.core.errors import ErrorCode, deny
 from app.core.hashing import canonical_json
-from app.identity.models import Principal
-from app.product.models import UserSession
+from app.identity.models import Principal, UserSession
 
 #: 会话 cookie 的名字。前端不需要知道内容，只需要原样携带。
 SESSION_COOKIE_NAME = "study_session"

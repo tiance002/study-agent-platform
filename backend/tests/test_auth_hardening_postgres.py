@@ -233,8 +233,8 @@ def test_auth_audit_outbox_is_tenant_isolated():
 @pytest.mark.invariant
 def test_two_audit_projectors_keep_one_valid_hash_chain(tmp_path):
     """两个 worker 各持独立 sink 缓存时，数据库锁仍必须保持单链。"""
-    from app.audit.outbox import PostgresAuditOutbox
     from app.audit.sink import AuditSink
+    from app.db.audit_store import PostgresAuditOutbox
 
     event_ids = ["aud_" + uuid.uuid4().hex for _ in range(12)]
     with psycopg.connect(pg_support.migration_dsn()) as conn:

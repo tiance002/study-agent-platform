@@ -196,8 +196,9 @@ def test_cross_tenant_principal_reference_is_rejected_physically(seeded):
         with pytest.raises(psycopg.errors.ForeignKeyViolation):
             conn.execute(
                 "INSERT INTO user_sessions"
-                " (session_id, tenant_id, principal_id, issued_at, expires_at)"
-                " VALUES (%s, %s, %s, %s, %s)",
+                " (session_id, tenant_id, principal_id, issued_at, expires_at,"
+                " auth_method, security_generation)"
+                " VALUES (%s, %s, %s, %s, %s, 'invitation', 1)",
                 (
                     "sess_0003_bad",
                     TENANT,

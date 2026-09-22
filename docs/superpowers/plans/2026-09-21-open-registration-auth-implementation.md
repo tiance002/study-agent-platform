@@ -1,6 +1,6 @@
 # 开放注册与中文用户名认证实施计划
 
-> **For agentic workers:** 使用 superpowers:executing-plans 按任务执行，逐项记录证据。当前状态：等待用户审批，只完成文档，不执行实现、迁移或部署。
+> **For agentic workers:** 使用 superpowers:executing-plans 按任务执行，逐项记录证据。当前状态：已获用户批准，按边界任务实施；不一次性混合代码、迁移和部署。
 
 **Goal:** 用户无需邀请码即可用中文用户名与密码注册、登录，并拥有隔离的个人学习空间。
 
@@ -8,23 +8,32 @@
 
 **Tech Stack:** Python、FastAPI、psycopg、Alembic、Argon2id、React、pytest、Playwright。
 
+## 执行状态（2026-09-21）
+
+实现范围已完成：用户名/密码契约、`0012` 迁移、内存/PG 仓储、注册/登录/退出 API、Argon2 计算池、持久限流、平台级付费预算、前端入口及运维手册均已落地。非 PostgreSQL 全量回归、定向认证/预算测试、Ruff、mypy、compileall、前端语法、合同生成与许可证扫描已通过。
+
+仍未宣称完成的发布门：本机 PostgreSQL 当前不可达，因此 `0012` 最新 SQL 的临时库往返、权限、并发和真实 HTTP 重启测试待数据库可达后执行；浏览器 Playwright 及生产发布也不在本轮本地执行。迁移未通过这些门槛前，两个认证开关和付费派发开关都保持关闭。
+
 ## 全局约束与设计修正
 
-- 用户名原始输入及 NFKC + casefold 后均为 1–16 个 Unicode 码点；支持单字中文，沿用规格中的字符集合和首字符要求。全局唯一，不截断、不自动 trim。前端用 Array.from(value).length 计数，不依赖 UTF-16 maxlength 作为唯一验证。
-- 密码保持原样，12–128 个码点，确认密码只在请求验证使用，不持久化。显示名 1–80 个字符，可在界面默认填入用户名。
+- 用户名首版仅允许 `U+4E00–U+9FFF`、`U+3400–U+4DBF`、ASCII 英文字母/数字及 `_`、`.`、`-`；仅额外接受全角 ASCII 英文字母兼容输入。原文与 `NFKC + casefold()` 结果均按允许集合、首字符和 1–16 码点检查；保存原文，规范化值使用 `COLLATE "C"` 唯一键；测试向量锁定 Unicode 数据版本。
+- 密码保持原样，12–128 个码点，不做 Unicode 规范化。注册不单独收集显示名，服务端将原始用户名复制到 `principals.display_name`。
 - 注册事务包括租户、主体、凭据、会话、成功审计 outbox；任何一步失败全部回滚。HTTP 响应丢失后用户可直接登录，不得再次创建身份。
-- 登录读取哈希后进行密码验证；提交会话时再次锁定并检查凭据版本、禁用状态，防止验证与提交之间状态改变。last_login_at、会话、审计一起提交。
+- 登录读取哈希后进行密码验证；提交会话时再次锁定并检查凭据版本、禁用状态，防止验证与提交之间状态改变。`security_generation` 与 Argon2 `hash_version` 分离；`last_login_at`、会话、审计一起提交。
 - 认证函数只给应用角色最小执行权，固定 search_path、撤销 PUBLIC；这些函数是应用服务信任边界，不声称持有应用数据库凭据的攻击者也无法模拟登录。
 - 旧规格“主体禁用”没有独立持久字段，本轮以凭据 disabled_at 作为密码账号禁用事实，并让禁用账号的现有密码会话也被拒绝；邀请码身份兼容。禁止凭空检查不存在的字段。
 - 邀请码新增严格来源检查会影响旧测试客户端；迁移测试必须显式传 Origin，并加入跨站兑换拒绝用例。
 - 不收集邮箱，因此首版没有自助找回密码；注册页明确告知用户保存密码。旧邀请用户不自动绑定同名账号或转移数据。
+- 有效 Cookie 调用注册/登录返回 `409 already_authenticated`；失效 Cookie 视为未登录。普通 logout 可清除失效 Cookie 但不得伪称撤销成功；`logout/all` 仅接受有效当前会话。
+- `registration_enabled` 与 `password_login_enabled` 独立且默认关闭；缺失/读取失败均关闭。平台付费开关独立于注册开关。
+- 每个任务只修改列出的范围；与冻结契约冲突时报告并停止相关实现，不自行改规则、放宽安全约束或顺带重构。每项交付列出修改文件、实际测试结果、未运行项和契约偏差。
 - 审批后才执行代码、数据库变更和部署。生产库不能用作 pytest 测试库。
 
 ## 任务 1：冻结规则和密码边界
 
 文件：新增 backend/app/identity/passwords.py、backend/app/identity/accounts.py、backend/tests/test_password_accounts.py；修改 pyproject.toml、requirements.lock.txt 和许可证清单。
 
-- [ ] 明确接口 normalize_username(raw: str) -> str、hash_password(raw: str) -> str、verify_password(raw: str, encoded: str) -> bool；用成熟 Argon2id 库，锁定兼容版本并检查许可证。
+- [ ] 明确接口 normalize_username(raw: str) -> str、hash_password(raw: str) -> str、verify_password(raw: str, encoded: str) -> bool；用成熟 Argon2id 库，锁定兼容版本并检查许可证。追加原始用户名保存接口和 Unicode 版本常量。
 - [ ] 先写边界测试：张、张三、16 字通过；空串、17 字、空格、换行、零宽与双向控制字符拒绝；全角Ａ与 a 冲突；casefold 扩展后超长拒绝；密码不能被 trim 或 Unicode 规范化。
 - [ ] 运行测试确认行为失败，再实现。哈希参数集中配置，初始采用 memory_cost=19456 KiB、time_cost=2、parallelism=1；上线机基准验证延迟与并发内存后可提高，不静默降低。
 - [ ] 缺失用户也执行预生成 dummy hash 验证；哈希损坏对外统一失败，内部记录脱敏诊断；成功登录支持 check_needs_rehash。
@@ -34,9 +43,9 @@
 
 文件：新增 alembic/versions/0012_open_registration_auth.py、backend/app/db/account_store.py、backend/app/identity/account_memory_store.py、backend/tests/test_account_repositories.py、backend/tests/test_account_postgres.py；修改 identity/accounts.py 和 main.py 装配。
 
-- [ ] 定义 AccountCredential（主体、租户、规范化用户名、哈希、credential_version、disabled_at）与仓储接口 register_and_create_session、lookup_for_login、complete_login。具体参数使用服务端生成 ID、期限、预期凭据版本，禁止 HTTP 传入身份字段。
+- [ ] 定义 AccountCredential（主体、租户、原始用户名、规范化用户名、哈希、hash_version、security_generation、disabled_at）与仓储接口 register_and_create_session、lookup_for_login、complete_login。具体参数使用服务端生成 ID、期限、预期凭据版本，禁止 HTTP 传入身份字段。
 - [ ] 在随机 study_test_* 临时库先写失败用例：规范化同名并发注册只有一次成功；会话/outbox 故障时五类写入全部回滚；不同账号空间隔离；禁用/版本变化后完成登录被拒绝。
-- [ ] 新表增加全局唯一 username_normalized、每主体唯一凭据、组合外键、1–16 长度 CHECK、版本字段；启用 FORCE RLS，应用/worker 不得直接查询密码表。
+- [ ] 新表增加全局唯一 `username_normalized COLLATE "C"`、每主体唯一凭据、组合外键、1–16 长度 CHECK、`hash_version` 与 `security_generation`；`user_sessions` 增加 `auth_method`、可空 `credential_id`、`security_generation` 及对应 CHECK/FK。存量会话先核验来源，全部确认为邀请后才回填；应用/worker 不得直接查询密码表。
 - [ ] definer 函数分为注册、精确凭据查找、登录提交；输入长度、会话 TTL、凭据版本和主体归属在数据库再次检查。返回值不进入 HTTP 序列化。
 - [ ] 内存实现用同一临界区和共享会话/outbox 完成对应原子操作，不写入私有字典绕过仓储接口。
 - [ ] 验证空库到 head、0011 → 0012 → 0011 → 0012；降级仅在临时库演练，检查函数授权、RLS 和现有邀请数据未损坏。
@@ -49,8 +58,8 @@
 - [ ] POST /auth/register 成功 201，POST /auth/login 成功 200；返回主体 ID 和到期时间，使用既有 Secure/HttpOnly/SameSite Cookie。用户名占用 409，非法输入 422，错误账号/密码/禁用统一 401，限流 429 + Retry-After。
 - [ ] 顺序固定为请求大小限制、严格来源检查、持久限流、密码计算、原子提交、Cookie 响应；成功响应不得因 outbox 投递失败变成账号已创建却返回失败。
 - [ ] 默认注册每 IP 每小时 5 次；登录每 IP 每 10 分钟 30 次、每规范化账号每 10 分钟 10 次，独立桶均需通过；账号桶使用摘要，不能只用 IP+账号组合让攻击者轮换一端绕过。
-- [ ] Argon2 同时执行上限初始为 2；满载及时返回可重试错误，限制排队。生产 PostgreSQL 限流重启不清零，保留受信代理解析。
-- [ ] 登录/注册换发新 session_id，已有会话切换不得继承前端身份状态。检查禁用密码账号时同步拒绝既有会话。
+- [ ] Argon2 每进程并发上限初始为 2，覆盖注册/登录/dummy/rehash；登录优先、注册低优先，队列上限和等待时限显式配置。策略限流返回 429，计算池饱和返回 503 + `Retry-After`。生产 PostgreSQL 限流重启不清零，保留受信代理解析。
+- [ ] 有效已有会话调用注册/登录返回 `409 already_authenticated`；失效 Cookie 视为未登录。登录/注册换发新 session_id，检查禁用密码账号时同步拒绝既有会话；普通 logout 可清除失效 Cookie，logout/all 不得由失效会话触发。
 - [ ] 测试跨站登录/注册/邀请、缺 Origin、伪造 XFF、注入 tenant_id、错误消息统一、响应与审计无密码/哈希、请求验证失败不回显输入。
 - [ ] 回归 logout、logout/all、TTL、密钥轮换、生产 Bearer 禁用、邀请码单次兑换及有效会话；测试客户端显式传同源 Origin。
 
@@ -61,7 +70,7 @@
 - [ ] 先证明现有项目预算是否允许通过新建项目/账号增加总支出；记录当前真实计费单位，禁止凭字段名猜测货币。
 - [ ] 在真实 provider 派发前原子预留平台总预算，所有账号和项目共同受限；并发最后一份额度只准一次派发，进程重启不重置。
 - [ ] 与已有未知计费语义一致：超时或用量不明不能释放为免费额度；用量明确后结算。不得新增自动付费重试。
-- [ ] 平台总额度缺失时拒绝付费调用；审批后实施时由用户指定总预算数值，注册/登录开发与测试不依赖这个数值。开放注册不等于无限免费模型额度。
+- [ ] 平台总额度缺失时拒绝付费调用；首版所有 provider 共享、按数据库 UTC 自然月归属，预留固定 `billing_period`、provider、price_version、最大可支出和结算状态；跨月不自动释放陈旧 `in_flight`，降额只阻止新派发。独立 `paid_dispatch_enabled` 缺失默认关闭；注册/登录开发与测试不依赖具体预算数值。
 
 ## 任务 5：普通用户认证界面
 

@@ -12,8 +12,6 @@
 
 from __future__ import annotations
 
-import os
-
 from app.deployment import DeploymentSettings
 from app.teaching.openai_provider import OpenAIResponsesProvider
 from app.teaching.ports import TeachingProvider
@@ -32,10 +30,8 @@ def build_teaching_provider(
         return ScriptedProvider(script or [])
     if settings.teaching_provider == "openai":
         return OpenAIResponsesProvider(
-            api_key=os.environ.get("STUDY_PLATFORM_TEACHING_API_KEY", ""),
-            base_url=os.environ.get(
-                "STUDY_PLATFORM_TEACHING_BASE_URL", "https://api.openai.com/v1"
-            ),
+            api_key=settings.teaching_api_key,
+            base_url=settings.teaching_base_url,
         )
     raise RuntimeError(
         f"未知的教学 provider：{settings.teaching_provider!r}"

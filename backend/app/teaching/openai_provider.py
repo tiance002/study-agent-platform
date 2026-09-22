@@ -112,6 +112,23 @@ class OpenAIResponsesProvider:
                 detail="provider 没有返回文本答案",
             )
         parsed = parse_answer_payload(request.attempt_id, text)
+        # Some compatible endpoints still return plain text for a no-material
+        # question despite JSON mode.  Keep grounded answers strict: only an
+        # empty artifact snapshot may use this explicit inference-only path.
+        if (
+            parsed.status is ProviderStatus.MALFORMED
+            and parsed.detail == "响应不是合法 JSON"
+            and not request.artifacts
+            and text.strip()
+        ):
+            return ProviderResult(
+                attempt_id=request.attempt_id,
+                status=ProviderStatus.COMPLETED,
+                provider_request_id=provider_request_id,
+                answer_text=text.strip(),
+                usage=usage,
+                detail="provider 返回自然语言；按无资料 inference-only 回答落定",
+            )
         return replace(parsed, provider_request_id=provider_request_id, usage=usage)
 
 

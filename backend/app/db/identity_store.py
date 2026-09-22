@@ -27,7 +27,7 @@ from datetime import datetime
 
 from psycopg import errors as pg_errors
 
-from app.audit.outbox import PostgresAuditOutbox
+from app.audit.outbox import TransactionalAuditOutbox
 from app.audit.sink import RiskLevel
 from app.core.clock import Clock, SystemClock
 from app.core.errors import ErrorCode, deny
@@ -36,15 +36,15 @@ from app.db.session import (
     principal_transaction,
     tenant_only_transaction,
 )
-from app.identity.models import LearningProject, Principal
+from app.identity.models import AuthMethod, Invitation, LearningProject, Principal, UserSession
 from app.identity.ports import SystemContext
-from app.product.models import Invitation, UserSession
 
 _PROJECT_COLUMNS = (
     "project_id, tenant_id, name, goal, created_at, updated_at, version"
 )
 _SESSION_COLUMNS = (
-    "session_id, tenant_id, principal_id, issued_at, expires_at, revoked_at"
+    "session_id, tenant_id, principal_id, issued_at, expires_at, revoked_at, "
+    "auth_method, credential_id, security_generation"
 )
 
 
@@ -68,6 +68,9 @@ def _session_from_row(row: tuple) -> UserSession:
         issued_at=row[3],
         expires_at=row[4],
         revoked_at=row[5],
+        auth_method=AuthMethod(row[6]),
+        credential_id=row[7],
+        security_generation=row[8],
     )
 
 
@@ -254,7 +257,7 @@ class PostgresInvitationRepository:
         clock: Clock | None = None,
         dsn: str | None = None,
         sessions: PostgresSessionRepository | None = None,
-        outbox: "PostgresAuditOutbox | None" = None,
+        outbox: "TransactionalAuditOutbox | None" = None,
     ) -> None:
         self._clock = clock or SystemClock()
         self._dsn = dsn
@@ -378,14 +381,18 @@ class PostgresSessionRepository:
             ) as conn:
                 conn.execute(
                     "INSERT INTO user_sessions"
-                    " (session_id, tenant_id, principal_id, issued_at, expires_at)"
-                    " VALUES (%s, %s, %s, %s, %s)",
+                    " (session_id, tenant_id, principal_id, issued_at, expires_at, "
+                    "auth_method, credential_id, security_generation)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         session.session_id,
                         session.tenant_id,
                         session.principal_id,
                         session.issued_at,
                         session.expires_at,
+                        session.auth_method.value,
+                        session.credential_id,
+                        session.security_generation,
                     ),
                 )
         except pg_errors.CheckViolation as exc:

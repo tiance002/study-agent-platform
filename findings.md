@@ -1,5 +1,37 @@
 # 调研与发现
 
+## 2026-09-22 · PostgreSQL 本机与 ECS 边界
+
+- 本机 PostgreSQL 和 ECS PostgreSQL 是两个独立实例；本机不可达不会直接证明 ECS 故障，但会使本地 PG 退出门失去可信度。
+- 本机根因不是迁移或账号，而是未注册 Windows 服务。`E:\pgsql` 已有完整数据目录，注册服务并清除已验证失效的 `postmaster.pid` 后恢复。
+- 发布新迁移后必须同步更新应用启动自检版本；否则数据库已升级而 web/worker 会 fail-fast。该缺陷已由本机真实 PG 重启场景捕获并修复。
+- 生产 `platform_budget_config.monthly_cap_micro = NULL` 的含义是“不按平台月度金额拒绝”，不是取消 token、超时、未知结果对账或 worker 租约限制；这些边界仍必须保留。
+
+## 2026-09-22 · PostgreSQL 服务身份与真实 provider 收口
+
+- `E:\pgsql` 是 PostgreSQL 的程序和数据目录；Windows 服务身份是另一层概念。将 `study-plan-postgresql` 配成 `NT AUTHORITY\NetworkService` 后，服务能自动启动并访问 `E:\pgsql\data`，不需要人工注册一个同名账号，也不改变应用数据库角色。
+- 本机 PostgreSQL 不可达的根因是服务未注册以及遗留失效 `postmaster.pid`，不是 `E:\pgsql` 数据损坏；清理前先验证 PID 不存在，随后以服务方式恢复，避免重建或覆盖已有数据。
+- 真实 provider 联调连续暴露了测试容易遗漏的三层问题：provider 纯文本返回、模型在 JSON 前输出推理前缀、API run 查询只返回 `answer_message_id` 而不直接带答案正文。最终通过“无资料才允许 inference-only 纯文本降级”和“只提取包含 `answer_markdown` 的最后 JSON 对象”收口，并保留有资料场景的严格失败。
+- 四次真实调用均有平台 usage/成本结算；最终成功运行恢复演练可读回 `run_zj_ZR1pfWRgyjYrwgHhJlg` 与 `att_12280c1ca4ac`。这说明恢复测试应验证业务事实和账务事实，而不只验证 Alembic 版本号。
+
+## 2026-09-21 · 开放注册修订方案审查（完成）
+
+- 基线吻合：当前 `HEAD` 为 `0d31e54`，现有最高迁移为 `0011_teaching_request_snapshot.py`，`backend/app/main.py` 将期望 schema 固定为 `0011`。
+- 当前 `_require_cookie_session()` 仅做 cookie 验签、时效和同源校验，没有调用 `session_store.get_live()`；已撤销但尚未过期的 cookie 仍可触发 `logout/all`。修订方案准确捕获了这一风险。
+- 当前预算树只有 tenant + project 两层，尚无平台全局账户；开放注册确实需要在 provider 派发前补平台级原子预留。
+- 前端已按 `principalId/projectId/conversationId` 管理部分 scope 与 localStorage，但全局 `401` 对邀请码兑换之外的所有端点都触发 session-expired；新增登录接口若不显式排除，会被误判。修订方案已指出此处。
+- `test_round8_http.py` 当前只有少量响应/摄取元数据测试；修订方案要求补 R8-H/R8-I 的完整重启/中断 HTTP 验收有现实依据。
+- 仍需补齐的实施契约（按优先级）：
+  1. **密码会话关联必须从“推荐”冻结为唯一 schema**：现有 `user_sessions` 只有 session/tenant/principal/时间/撤销字段；需明确 `auth_method`、可空 `credential_id`、`security_generation` 及 CHECK/FK。密码重哈希参数升级不能与“安全代际”共用同一个版本号，否则正常 rehash 会误杀全部旧会话。
+  2. **功能开关必须拆分**：`registration_enabled` 与 `password_login_enabled` 不能是同一个开关。关闭注册/回滚时必须仍允许既有密码账号登录；开关缺失或无法读取时应 fail closed，且多实例行为一致。
+  3. **用户名规则仍有歧义**：需冻结“汉字/英文字母”的精确定义、先规范化后校验还是双重校验、规范化显示值、Unicode 数据版本和 PostgreSQL 唯一索引的二进制排序规则；否则 Python/数据库或运行时升级可能改变冲突集合。
+  4. **显示名契约缺失**：现有 `principals.display_name` 存在，但修订方案的注册 API/UI 未明确是否收集显示名、默认等于原始用户名还是规范化用户名；必须定一个出口。
+  5. **公开未认证端点的资源闸不完整**：需在 JSON/Pydantic/Argon2 之前冻结请求体字节上限和 Content-Type；Argon2 并发上限要明确覆盖注册、真实登录、dummy 验证与 rehash，并说明是每进程还是整台主机、队列上限与饱和状态码。仅数据库限流挡不住大量随机账号造成的 DB 计数基数和 Web 连接耗尽。
+  6. **平台预算需要生命周期契约**：总额度的周期/时区、额度修改语义、price_version、陈旧 `in_flight` 对账、管理员停机开关及多 provider 是否共享同一 cap 尚未冻结；只有“新增一层总预算”不足以可靠运维。
+  7. **账号切换的服务端语义未冻结**：带着账号 A 的有效/撤销 cookie 调用 register/login 时，是忽略、拒绝还是成功后撤销 A 当前会话；只清前端 epoch 不能处理仍存活的旧服务端会话。认证成功/失败响应还应明确 `Cache-Control: no-store`。
+  8. **审计/可观测性与处置闭环**：应冻结注册成功/冲突、登录成功/失败/禁用、dummy/损坏哈希、Argon2 饱和和总预算拒绝的事件字段（用户名只记带密钥摘要）、指标阈值和告警动作；`SECURITY DEFINER` 精确查找会把哈希返回给应用进程，文档只能声称阻止裸表/批量读取，不能声称应用数据库凭据泄露后哈希仍不可获取。
+  9. **无邮箱后的账号生命周期要明确**：至少决定首版是否完全不支持管理员重置、用户名修改、账号删除/数据导出；若都不做，应在 UI/条款与运维手册明确“丢失密码即无法恢复”，并提供禁用/删除的人工处置流程。
+
 ## 2026-09-20 复审发现
 
 - 第一轮既有 P1 大部分已有修复草稿：生产密钥长度/隔离、可信代理链、SECURITY DEFINER schema 限定、认证审计 transactional outbox。
@@ -298,3 +330,26 @@ R4-05 之后写入的片段都经过"与持久化原文比对"，但**在此之�
 - **组合外键决定写入顺序**：预留行的组合外键指向运行行，先插预留必然
   FK 违约；顺序调整后原子性不受影响（同一事务）。外键不只是防脏数据，
   它还在编译期（迁移审查时）声明了对象的依赖方向。
+
+## 开放注册审查新发现（2026-09-22）
+
+- **“全绿”不等于目标环境被验证**：PostgreSQL 不可达时，默认测试会跳过数据库专项；涉及迁移、RLS、函数授权或并发锁的轮次，退出门必须单独断言 PostgreSQL 用例数和 `0 skipped`，不能只看总命令退出码。
+- **权限测试必须以真实调用者执行**：管理员连接能成功调用函数，只证明 SQL 可运行，无法证明最小权限。关键函数要分别以 app、worker、migrator 身份验证允许与拒绝路径。
+- **持久恢复需要稳定业务关联键**：只保存随机预算预留 ID、却不在 teaching run 中持久化映射，worker 重启后无法可靠结算。恢复标识必须能从持久事实重建，且预算终态要先于业务终态提交。
+- **审计事件只能有一个权威写入源**：事务 outbox 与请求处理器同时写成功事件会产生重复审计。业务事务负责落 outbox，API 层只负责刷新投影。
+- **请求大小限制必须发生在缓冲之前**：只在 `request.body()` 后检查长度无法防止无 `Content-Length` 的大请求占用内存；应按 chunk 累计并在越界时立即拒绝。
+- **迁移往返是独立退出门**：升级成功不会发现 downgrade 引用了旧迁移所有的索引。每个新 head 都要在临时库执行 `previous -> head -> previous -> head` 并复核权限。
+- **provider 配置不等于允许付费派发**：ECS 已加载 DeepSeek provider，但数据库平台预算单例仍为关闭/零额度；真实请求在 provider 之前被拒绝。预算闸门必须保持独立，不能因为填了 API key 就自动放行，也不能猜测微单位的货币含义。
+## 2026-09-22 · PostgreSQL 本机与 ECS 边界
+
+- 本机 PostgreSQL 和 ECS PostgreSQL 是两个独立实例；本机不可达不会直接证明 ECS 故障，但会使本地 PG 退出门失去可信度。
+- 本机根因不是迁移或账号，而是未注册 Windows 服务。`E:\pgsql` 已有完整数据目录，注册服务并清除已验证失效的 `postmaster.pid` 后恢复。
+- 发布新迁移后必须同步更新应用启动自检版本；否则数据库已升级而 web/worker 会 fail-fast。该缺陷已由本机真实 PG 重启场景捕获并修复。
+- 生产 `platform_budget_config.monthly_cap_micro = NULL` 的含义是“不按平台月度金额拒绝”，不是取消 token、超时、未知结果对账或 worker 租约限制；这些边界仍必须保留。
+## 2026-09-22 · 架构精简实施发现
+
+- 生产 API 面与开发调试面应在路由装配时分离，而不是依赖端点内部认证来“隐藏”；不存在的生产能力现在返回 404，稳定端点仍按原认证语义工作。
+- “依赖放在 optional extra”不足以形成可选依赖；只有组合根延迟导入、上层模块不导入驱动包，内存模式才能在未安装 `psycopg` 时真正启动。
+- 身份会话和邀请属于 identity；保留 `product.models` 兼容导入可以在不破坏调用方的情况下纠正所有权方向。
+- 内存与 PG 适配器共享的校验必须是纯领域规则，不能让一个适配器调用另一个适配器的私有方法。
+- Provider 配置必须一次解析后注入。工厂二次读取 `os.environ` 会让测试映射、进程配置与实际请求出现三个互相矛盾的事实源。

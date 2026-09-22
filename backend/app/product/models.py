@@ -23,13 +23,13 @@ from datetime import datetime
 from enum import StrEnum
 
 from app.core.contracts import (
-    later_than,
     require_aware,
     require_id,
     require_non_negative,
     require_positive,
     require_text,
 )
+from app.identity.models import AuthMethod, Invitation, UserSession  # noqa: F401
 
 
 class MessageRole(StrEnum):
@@ -293,67 +293,3 @@ class SourceRecord:
             "media_type": self.media_type,
             "registered_at": self.registered_at.isoformat(),
         }
-
-
-@dataclass(frozen=True)
-class Invitation:
-    """一次性邀请。**只存哈希** —— 原始令牌不进库、不进日志、不进审计载荷。
-
-    `invitee_principal_id` 是**签发时预绑定**的被邀请主体（0003 迁移起为
-    NOT NULL + 组合外键）。这是「客户端不能通过兑换决定自己是谁」的落点：
-    兑换函数从邀请行读出主体，调用方没有身份参数可传。
-    """
-
-    invitation_id: str
-    tenant_id: str
-    token_hash: str
-    issued_by: str
-    invitee_principal_id: str
-    issued_at: datetime
-    expires_at: datetime
-    consumed_at: datetime | None = None
-    consumed_by: str | None = None
-
-    def __post_init__(self) -> None:
-        require_id(self.invitation_id, "invitation_id")
-        require_id(self.tenant_id, "tenant_id")
-        require_id(self.token_hash, "token_hash")
-        require_id(self.issued_by, "issued_by")
-        require_id(self.invitee_principal_id, "invitee_principal_id")
-        require_aware(self.issued_at, "issued_at")
-        require_aware(self.expires_at, "expires_at")
-        later_than(self.expires_at, self.issued_at, "expires_at")
-        if self.consumed_at is not None:
-            require_aware(self.consumed_at, "consumed_at")
-
-    def is_live(self, now: datetime) -> bool:
-        return self.consumed_at is None and now < self.expires_at
-
-
-@dataclass(frozen=True)
-class UserSession:
-    """数据库支撑的会话。
-
-    撤销是**时间戳**而不是布尔：需要知道"什么时候撤的"，
-    而且"是否有效"要能按任意时刻判断（重放排查时用得上）。
-    """
-
-    session_id: str
-    tenant_id: str
-    principal_id: str
-    issued_at: datetime
-    expires_at: datetime
-    revoked_at: datetime | None = None
-
-    def __post_init__(self) -> None:
-        require_id(self.session_id, "session_id")
-        require_id(self.tenant_id, "tenant_id")
-        require_id(self.principal_id, "principal_id")
-        require_aware(self.issued_at, "issued_at")
-        require_aware(self.expires_at, "expires_at")
-        later_than(self.expires_at, self.issued_at, "expires_at")
-        if self.revoked_at is not None:
-            require_aware(self.revoked_at, "revoked_at")
-
-    def is_live(self, now: datetime) -> bool:
-        return self.revoked_at is None and now < self.expires_at

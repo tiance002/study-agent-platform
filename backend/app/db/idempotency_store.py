@@ -1,10 +1,11 @@
-"""占位重导出：PostgreSQL 幂等适配器实现在 api.http_idempotency（与守卫同文件，
-因为 claim 的翻译逻辑与错误语义强耦合，拆两处只会让"内存/PG 行为一致"
-变成两份代码的口头约定）。
+"""PostgreSQL HTTP idempotency adapter wiring."""
 
-本文件保留导入路径的稳定：`from app.db.idempotency_store import ...`。
-"""
+from app.api.http_idempotency import PostgresHttpIdempotencyStore as _StoreCore
+from app.db.session import connect
 
-from app.api.http_idempotency import PostgresHttpIdempotencyStore
+
+class PostgresHttpIdempotencyStore(_StoreCore):
+    def __init__(self, dsn: str | None = None) -> None:
+        super().__init__(dsn, connect_factory=connect)
 
 __all__ = ["PostgresHttpIdempotencyStore"]

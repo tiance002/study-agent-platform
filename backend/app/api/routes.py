@@ -41,6 +41,7 @@ from app.tenancy.context import TenantContext, tenant_scope
 from app.workflow.runtime import InteractionRequest
 
 router = APIRouter()
+legacy_router = APIRouter()
 
 # 幂等键长度上限。见 `InteractionBody.idempotency_key` 的说明。
 IDEMPOTENCY_KEY_MAX_CHARS = 200
@@ -146,6 +147,15 @@ def healthz(request: Request) -> dict:
             "persistence": state.persistence_backend,
             "rls": state.rls_label,
         },
+        "features": {
+            "registration_enabled": state.registration_enabled,
+            "password_login_enabled": state.password_login_enabled,
+            # PostgreSQL uses platform_budget_config as the live source; the
+            # environment value is only authoritative for the memory adapter.
+            "paid_dispatch_config_source": (
+                "database" if state.persistence_backend == "postgresql" else "environment"
+            ),
+        },
         # 审计 outbox 里尚未投影进链式 sink 的事件数。
         # >0 不是错误（事实已可靠落库），但是必须被消化的积压信号。
         "audit_outbox_pending": (
@@ -160,7 +170,7 @@ def me(request: Request) -> dict:
     return _authenticate(request).to_dict()
 
 
-@router.get("/registry")
+@legacy_router.get("/registry")
 def registry_view(request: Request) -> dict:
     """工具与 node 的边界声明。这是给人看「边界画在哪」的接口。"""
     state = _state(request)
@@ -198,7 +208,7 @@ def registry_view(request: Request) -> dict:
     }
 
 
-@router.post("/projects/{project_id}/retrieval/chunks", response_model=None)
+@legacy_router.post("/projects/{project_id}/retrieval/chunks", response_model=None)
 def ingest(request: Request, project_id: str, body: IngestBody) -> dict | JSONResponse:
     """【演示管线夹具】往检索索引塞 chunk。
 
@@ -253,7 +263,7 @@ def ingest(request: Request, project_id: str, body: IngestBody) -> dict | JSONRe
         return result
 
 
-@router.post("/projects/{project_id}/confirmations", response_model=None)
+@legacy_router.post("/projects/{project_id}/confirmations", response_model=None)
 def create_confirmation(
     request: Request, project_id: str, body: ConfirmationBody
 ) -> dict | JSONResponse:
@@ -326,7 +336,7 @@ def create_confirmation(
         return result
 
 
-@router.post("/projects/{project_id}/interactions", response_model=None)
+@legacy_router.post("/projects/{project_id}/interactions", response_model=None)
 def interact(
     request: Request, project_id: str, body: InteractionBody
 ) -> dict | JSONResponse:
@@ -398,7 +408,7 @@ def mastery(request: Request, project_id: str) -> dict:
     return projection.to_dict()
 
 
-@router.get("/projects/{project_id}/audit")
+@legacy_router.get("/projects/{project_id}/audit")
 def audit_view(request: Request, project_id: str) -> dict:
     """审计链校验，按认证身份所属租户与项目过滤。
 
@@ -419,7 +429,7 @@ def audit_view(request: Request, project_id: str) -> dict:
     }
 
 
-@router.get("/projects/{project_id}/budget")
+@legacy_router.get("/projects/{project_id}/budget")
 def budget_view(request: Request, project_id: str) -> dict:
     """预算与未结敞口，按认证身份所属租户与项目过滤。"""
     state = _state(request)
@@ -471,6 +481,17 @@ def error_response(exc: PlatformError):
         payload = public_error_payload(
             "UNAUTHENTICATED", "未认证或凭据无效", request_id=request_id
         )
+    elif exc.code is ErrorCode.ACCOUNT_ALREADY_AUTHENTICATED:
+        status = 409
+    elif exc.code is ErrorCode.USERNAME_TAKEN:
+        status = 409
+    elif exc.code in (ErrorCode.REGISTRATION_DISABLED, ErrorCode.PASSWORD_LOGIN_DISABLED):
+        status = 403
+    elif exc.code is ErrorCode.AUTH_POOL_SATURATED:
+        status = 503
+        response = JSONResponse(status_code=status, content=payload)
+        response.headers["Retry-After"] = str(max(int(exc.details.get("retry_after_seconds", 1)), 1))
+        return response
     elif exc.code is ErrorCode.INVITATION_INVALID:
         # 邀请兑换失败：401，但**保留** INVITATION_INVALID 码与统一话术 ——
         # 未知 / 已过期 / 已消费共用这一个码与同一句话，

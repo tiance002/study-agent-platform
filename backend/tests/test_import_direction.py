@@ -13,6 +13,10 @@
 from __future__ import annotations
 
 import ast
+import os
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -64,6 +68,19 @@ def imported_app_modules(path: Path) -> set[str]:
             for alias in node.names:
                 if alias.name.startswith("app."):
                     found.add(alias.name.split(".")[1])
+    return found
+
+
+def imported_app_paths(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("app."):
+            found.add(node.module)
+        elif isinstance(node, ast.Import):
+            found.update(
+                alias.name for alias in node.names if alias.name.startswith("app.")
+            )
     return found
 
 
@@ -125,3 +142,52 @@ def test_shared_contracts_live_in_core():
 
     assert ArtifactRef.__module__ == "app.core.artifacts"
     assert DisplayPolicy.__module__ == "app.core.artifacts"
+
+
+def test_memory_mode_import_does_not_require_psycopg():
+    code = textwrap.dedent(
+        """
+        import importlib.abc
+        import sys
+
+        class BlockPsycopg(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "psycopg" or fullname.startswith("psycopg."):
+                    raise ModuleNotFoundError("psycopg intentionally unavailable")
+                return None
+
+        sys.meta_path.insert(0, BlockPsycopg())
+        import app.main
+        """
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(APP_ROOT.parent)
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.invariant
+def test_adapter_boundaries_do_not_regress_to_direct_cycles():
+    violations: list[str] = []
+    forbidden_package_edges = {
+        "api": "app.db",
+        "audit": "app.db",
+        "identity": "app.product",
+    }
+    for source, forbidden in forbidden_package_edges.items():
+        for path in sorted((APP_ROOT / source).rglob("*.py")):
+            for target in imported_app_paths(path):
+                if target == forbidden or target.startswith(forbidden + "."):
+                    violations.append(f"{path.relative_to(APP_ROOT)} -> {target}")
+
+    learning_store = APP_ROOT / "db" / "learning_store.py"
+    if "app.learning.loop_store" in imported_app_paths(learning_store):
+        violations.append("db/learning_store.py -> app.learning.loop_store")
+
+    assert not violations, "适配器边界发生回退：\n" + "\n".join(violations)
