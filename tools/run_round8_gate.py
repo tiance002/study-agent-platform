@@ -13,7 +13,7 @@ sys.path.insert(0, str(repo_root / "backend"))
 sys.path.insert(0, str(repo_root / "backend" / "tests"))
 sys.path.insert(0, str(repo_root / "tools"))
 import pg_support  # noqa: E402
-from pytest_gate_support import read_junit_stats  # noqa: E402
+from pytest_gate_support import read_junit_skips, read_junit_stats  # noqa: E402
 
 
 def run(command: list[str], environment: dict[str, str]) -> int:
@@ -68,11 +68,21 @@ def main() -> int:
         ["node", "--check", "frontend/app.js"],
         [python, "tools/skills/gen_contracts.py", "--all", "--check"],
         [python, "tools/check_round8_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts, "--invite", args.invite],
+        [python, "tools/check_round8_process_recovery.py"],
     ]
     for command in commands:
         if run(command, environment) != 0:
             print("ROUND8_GATE_FAILED:", " ".join(command))
             return 1
+
+    full_stats = read_junit_stats(full_xml)
+    full_skips = read_junit_skips(full_xml)
+    if full_stats.tests <= 0 or full_stats.failures or full_stats.errors:
+        print(f"ROUND8_GATE_FAILED: invalid full-suite evidence {full_stats}")
+        return 1
+    print(f"FULL_PYTEST_EVIDENCE: {full_stats}")
+    for detail in full_skips:
+        print("FULL_PYTEST_SKIP:", detail)
 
     postgres_stats = read_junit_stats(postgres_xml)
     if postgres_stats.tests <= 0 or postgres_stats.failures or postgres_stats.errors or postgres_stats.skipped:

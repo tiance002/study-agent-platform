@@ -36,6 +36,7 @@ from app.identity.ports import MembershipRepository
 from app.product.memory_store import InMemoryProductRepository
 from app.product.models import MessageRole
 from app.teaching.models import TokenUsage
+from app.teaching.routing import RoutingDecision
 from app.teaching.runs import (
     Grounding,
     RunClaim,
@@ -184,9 +185,7 @@ class InMemoryTeachingRepository:
                     role=MessageRole.USER,
                     content=question,
                 )
-                answer_seq = self.products.reserve_message_seq(
-                    actor, project_id, conversation_id
-                )
+                answer_seq = self.products.reserve_message_seq(actor, project_id, conversation_id)
                 now = self.clock.now()
                 run = TeachingRun(
                     run_id=run_id,
@@ -228,11 +227,7 @@ class InMemoryTeachingRepository:
         self.membership.get(actor, project_id)
         with self._lock:
             run = self._runs.get(run_id)
-        if (
-            run is None
-            or run.project_id != project_id
-            or run.tenant_id != actor.tenant_id
-        ):
+        if run is None or run.project_id != project_id or run.tenant_id != actor.tenant_id:
             raise deny(ErrorCode.CROSS_TENANT_DENIED, "资源不存在", run_id=run_id)
         return run
 
@@ -307,6 +302,7 @@ class InMemoryTeachingRepository:
         estimated_input_tokens: int,
         estimated_output_tokens: int,
         request_payload: dict | None = None,
+        routing_decision: RoutingDecision | None = None,
     ) -> None:
         with self._lock:
             current = self._require_live_claim(claim)
@@ -314,8 +310,7 @@ class InMemoryTeachingRepository:
             if reservation.state is not ReservationState.HELD:
                 raise PlatformError(
                     ErrorCode.BUDGET_TREE_INVALID,
-                    f"派发前的预留必须停在 held，当前 {reservation.state}"
-                    "（记账与派发已经脱节）",
+                    f"派发前的预留必须停在 held，当前 {reservation.state}（记账与派发已经脱节）",
                 )
             self._resize_held_reservation(
                 current,
@@ -336,9 +331,20 @@ class InMemoryTeachingRepository:
                 status="dispatched",
                 request_payload=dict(request_payload or {}),
             )
+            if routing_decision is not None:
+                self._runs[claim.run.run_id] = replace(current, routing_decision=routing_decision)
             self._touch(claim)
             self._append_event(
-                claim.run.run_id, "run.dispatched", {"attempt_id": attempt_id}
+                claim.run.run_id,
+                "run.dispatched",
+                {
+                    "attempt_id": attempt_id,
+                    **(
+                        {"routing_decision": routing_decision.to_dict()}
+                        if routing_decision is not None
+                        else {}
+                    ),
+                },
             )
 
     def record_result(
@@ -353,9 +359,7 @@ class InMemoryTeachingRepository:
             self._require_live_claim(claim)
             attempt = self._attempts.get(attempt_id)
             if attempt is None or attempt.run_id != claim.run.run_id:
-                raise deny(
-                    ErrorCode.CROSS_TENANT_DENIED, "attempt 不存在", attempt_id=attempt_id
-                )
+                raise deny(ErrorCode.CROSS_TENANT_DENIED, "attempt 不存在", attempt_id=attempt_id)
             if attempt.status != "dispatched":
                 raise PlatformError(
                     ErrorCode.ILLEGAL_STATE_TRANSITION,
@@ -386,9 +390,7 @@ class InMemoryTeachingRepository:
             self._require_live_claim(claim)
             attempt = self._attempts.get(attempt_id)
             if attempt is None or attempt.run_id != claim.run.run_id:
-                raise deny(
-                    ErrorCode.CROSS_TENANT_DENIED, "attempt 不存在", attempt_id=attempt_id
-                )
+                raise deny(ErrorCode.CROSS_TENANT_DENIED, "attempt 不存在", attempt_id=attempt_id)
             # 唯一 assistant 消息（槽位在 start_run 已预留）。
             self.products.append_reserved_message(
                 _principal_of(current),
@@ -507,9 +509,7 @@ class InMemoryTeachingRepository:
             )
             return run
 
-    def require_reconciliation(
-        self, claim: RunClaim, *, error_code: str, safe_detail: str
-    ) -> TeachingRun:
+    def require_reconciliation(self, claim: RunClaim, *, error_code: str, safe_detail: str) -> TeachingRun:
         with self._lock:
             current = self._run_for_claim(claim)
             if current.status is RunStatus.RECONCILIATION_REQUIRED:
@@ -567,20 +567,12 @@ class InMemoryTeachingRepository:
     def _lease_expired(self, run: TeachingRun, now: datetime) -> bool:
         claim = self._claims.get(run.run_id)
         # 没有认领记录的 running 是孤儿（持有者状态丢了），视同过期可回收。
-        return run.status is RunStatus.RUNNING and (
-            claim is None or claim.lease_until <= now
-        )
+        return run.status is RunStatus.RUNNING and (claim is None or claim.lease_until <= now)
 
     def _run_for_claim(self, claim: RunClaim) -> TeachingRun:
         run = self._runs.get(claim.run.run_id)
-        if (
-            run is None
-            or run.tenant_id != claim.run.tenant_id
-            or run.project_id != claim.run.project_id
-        ):
-            raise deny(
-                ErrorCode.CROSS_TENANT_DENIED, "运行不存在", run_id=claim.run.run_id
-            )
+        if run is None or run.tenant_id != claim.run.tenant_id or run.project_id != claim.run.project_id:
+            raise deny(ErrorCode.CROSS_TENANT_DENIED, "运行不存在", run_id=claim.run.run_id)
         return run
 
     def _require_live_claim(self, claim: RunClaim) -> TeachingRun:
@@ -599,8 +591,7 @@ class InMemoryTeachingRepository:
         if live is None or live.claim_token != claim.claim_token:
             raise PlatformError(
                 ErrorCode.ILLEGAL_STATE_TRANSITION,
-                "这次认领已经失效（租约过期后任务被重新认领）；"
-                "不得用旧凭证改写当前持有者的运行",
+                "这次认领已经失效（租约过期后任务被重新认领）；不得用旧凭证改写当前持有者的运行",
             )
         if live.lease_until <= self.clock.now():
             raise PlatformError(
@@ -617,9 +608,7 @@ class InMemoryTeachingRepository:
         for reservation in self._reservations.values():
             if reservation.run_id == run_id:
                 return reservation
-        raise PlatformError(
-            ErrorCode.BUDGET_TREE_INVALID, "运行没有预算预留（记账与运行脱节）"
-        )
+        raise PlatformError(ErrorCode.BUDGET_TREE_INVALID, "运行没有预算预留（记账与运行脱节）")
 
     def _attempt_for_run(self, run_id: str) -> _Attempt | None:
         for attempt in self._attempts.values():
@@ -676,6 +665,4 @@ def _principal_of(run: TeachingRun) -> Principal:
     答案消息属于提问者的会话：principal_id 来自运行行（start_run 记录），
     不是 worker 编的占位身份 —— 否则内存版的归属判定就成了"谁都能过"。
     """
-    return Principal(
-        principal_id=run.principal_id, tenant_id=run.tenant_id, display_name="教学提问者"
-    )
+    return Principal(principal_id=run.principal_id, tenant_id=run.tenant_id, display_name="教学提问者")

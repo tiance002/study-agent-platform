@@ -76,6 +76,7 @@ from app.identity.ports import (
 from app.identity.rate_limit import InMemoryRateLimiter, RateLimiter
 from app.identity.session import SessionIssuer
 from app.knowledge.acquisition_ports import AcquisitionRepository
+from app.knowledge.discovery import SourceSearchProvider, TavilySearchProvider
 from app.knowledge.memory_acquisition_store import InMemoryAcquisitionRepository
 from app.knowledge.memory_store import InMemoryIngestionRepository
 from app.knowledge.ports import IngestionRepository
@@ -91,8 +92,9 @@ from app.policy.token import TokenIssuer
 from app.product.memory_store import InMemoryProductRepository
 from app.product.ports import ProductRepository
 from app.registry.registry import Registry
+from app.teaching.local_router import build_local_query_rewriter
 from app.teaching.memory_store import InMemoryTeachingRepository
-from app.teaching.ports import TeachingProvider, TeachingRunRepository
+from app.teaching.ports import LocalQueryRewriter, TeachingProvider, TeachingRunRepository
 from app.teaching.providers_factory import build_teaching_provider
 from app.workflow.catalog import build_registry
 from app.workflow.runtime import InteractionRuntime
@@ -112,7 +114,7 @@ DEMO_PROJECT = "proj_demo"
 DEFAULT_SESSION_TTL = timedelta(hours=8)
 
 #: 代码预期的数据库迁移版本。启动自检核对它；新增迁移必须同步更新。
-EXPECTED_SCHEMA_VERSION = "0014"
+EXPECTED_SCHEMA_VERSION = "0017"
 
 
 @dataclass
@@ -160,6 +162,8 @@ class PlatformState:
     knowledge: KnowledgeRepository
     # 显式候选与下载任务：web 只登记/授权，外网访问留给独立 worker。
     acquisition: AcquisitionRepository
+    source_search_provider: SourceSearchProvider | None
+    local_query_rewriter: LocalQueryRewriter | None
     # 教学运行仓储（第五轮）。必填同理：教学端点不能等第一个请求才暴露装配缺失。
     teaching: TeachingRunRepository
     # 教学 provider。None = 功能显式关闭（无凭据/未配置）——
@@ -317,9 +321,7 @@ def build_platform(
         session_store = pg_sessions
         accounts = PostgresAccountRepository(sessions=pg_sessions, dsn=dsn, clock=clock)
         audit_outbox = PostgresAuditOutbox(sink=audit, dsn=dsn)
-        invitations = PostgresInvitationRepository(
-            clock, dsn, sessions=pg_sessions, outbox=audit_outbox
-        )
+        invitations = PostgresInvitationRepository(clock, dsn, sessions=pg_sessions, outbox=audit_outbox)
         confirmations = PostgresConfirmationStore(dsn)
         products = PostgresProductRepository(membership=membership, clock=clock, dsn=dsn)
         acquisition = PostgresAcquisitionRepository(
@@ -331,9 +333,7 @@ def build_platform(
         )
         http_idempotency = PostgresHttpIdempotencyStore(dsn)
         evidence = PostgresEvidenceRepository(clock, dsn)
-        learning_loop = PostgresLearningLoopRepository(
-            products=products, evidence=evidence, dsn=dsn
-        )
+        learning_loop = PostgresLearningLoopRepository(products=products, evidence=evidence, dsn=dsn)
         ingestion = PostgresIngestionRepository(
             membership=membership,
             clock=clock,
@@ -350,6 +350,12 @@ def build_platform(
             clock=clock,
         )
         teaching_provider = build_teaching_provider(loaded)
+        local_query_rewriter = build_local_query_rewriter(loaded)
+        source_search_provider = (
+            TavilySearchProvider(api_key=loaded.source_search_api_key)
+            if loaded.source_search_provider == "tavily"
+            else None
+        )
         rate_limiter: RateLimiter = PostgresRateLimiter(
             limit=loaded.exchange_limit,
             window_seconds=loaded.exchange_window_seconds,
@@ -395,6 +401,8 @@ def build_platform(
             ingestion=ingestion,
             knowledge=knowledge,
             acquisition=acquisition,
+            source_search_provider=source_search_provider,
+            local_query_rewriter=local_query_rewriter,
             teaching=teaching,
             teaching_provider=teaching_provider,
             accounts=accounts,
@@ -410,9 +418,7 @@ def build_platform(
             settings=loaded,
             persistence_backend="postgresql",
             rls_label="postgresql_row_level_security",
-            auth_mode_label=(
-                "cookie_session" if loaded.is_production else "cookie_session_bearer_compat"
-            ),
+            auth_mode_label=("cookie_session" if loaded.is_production else "cookie_session_bearer_compat"),
             registration_enabled=loaded.registration_enabled,
             password_login_enabled=loaded.password_login_enabled,
             paid_dispatch_enabled=loaded.paid_dispatch_enabled,
@@ -437,9 +443,7 @@ def build_platform(
     memory_sessions = InMemorySessionRepository(clock=clock)
     session_store = memory_sessions
     audit_outbox = InMemoryAuditOutbox(sink=audit)
-    invitations = InMemoryInvitationRepository(
-        clock=clock, sessions=memory_sessions, outbox=audit_outbox
-    )
+    invitations = InMemoryInvitationRepository(clock=clock, sessions=memory_sessions, outbox=audit_outbox)
     accounts = InMemoryAccountRepository(
         membership=membership,
         sessions=memory_sessions,
@@ -452,17 +456,17 @@ def build_platform(
     http_idempotency = InMemoryHttpIdempotencyStore()
     evidence = InMemoryEvidenceRepository(clock=clock)
     learning_loop = InMemoryLearningLoopRepository(memory_products, evidence)
-    ingestion = InMemoryIngestionRepository(
-        membership=membership, products=products, clock=clock
-    )
+    ingestion = InMemoryIngestionRepository(membership=membership, products=products, clock=clock)
     knowledge = KnowledgeRepository(ingestion=ingestion)
-    acquisition = InMemoryAcquisitionRepository(
-        membership=membership, products=products, clock=clock
-    )
-    teaching = InMemoryTeachingRepository(
-        membership=membership, products=memory_products, clock=clock
-    )
+    acquisition = InMemoryAcquisitionRepository(membership=membership, products=products, clock=clock)
+    teaching = InMemoryTeachingRepository(membership=membership, products=memory_products, clock=clock)
     teaching_provider = build_teaching_provider(loaded)
+    local_query_rewriter = build_local_query_rewriter(loaded)
+    source_search_provider = (
+        TavilySearchProvider(api_key=loaded.source_search_api_key)
+        if loaded.source_search_provider == "tavily"
+        else None
+    )
     rate_limiter = InMemoryRateLimiter(
         limit=loaded.exchange_limit,
         window_seconds=loaded.exchange_window_seconds,
@@ -507,6 +511,8 @@ def build_platform(
         ingestion=ingestion,
         knowledge=knowledge,
         acquisition=acquisition,
+        source_search_provider=source_search_provider,
+        local_query_rewriter=local_query_rewriter,
         teaching=teaching,
         teaching_provider=teaching_provider,
         accounts=accounts,
@@ -622,9 +628,7 @@ def create_app(*, platform: PlatformState | None = None) -> FastAPI:
                 declared_length = int(length) if length is not None else None
             except ValueError:
                 declared_length = -1
-            if declared_length is not None and (
-                declared_length < 0 or declared_length > 64 * 1024
-            ):
+            if declared_length is not None and (declared_length < 0 or declared_length > 64 * 1024):
                 response = JSONResponse(
                     status_code=413 if declared_length > 64 * 1024 else 400,
                     content=public_error_payload(
@@ -680,9 +684,7 @@ def create_app(*, platform: PlatformState | None = None) -> FastAPI:
         return response
 
     @app.exception_handler(RequestValidationError)
-    async def _request_validation_error(
-        request: Request, exc: RequestValidationError
-    ) -> JSONResponse:
+    async def _request_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
         """请求形状错误。
 
         必须显式注册：FastAPI 的默认实现返回 `{"detail": [...]}`，

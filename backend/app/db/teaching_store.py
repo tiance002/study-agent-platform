@@ -46,18 +46,17 @@ from app.db.session import full_transaction, tenant_transaction, worker_transact
 from app.identity.models import Principal
 from app.identity.ports import MembershipRepository
 from app.teaching.models import TokenUsage
+from app.teaching.routing import RoutingDecision
 from app.teaching.runs import Grounding, RunClaim, RunStatus, TeachingEvent, TeachingRun
 
 _RUN_COLUMNS = (
     "run_id, tenant_id, project_id, conversation_id, user_message_id,"
     " principal_id, answer_message_id, answer_seq, question, status,"
     " attempt_count, model_id, prompt_version, ranking_version, grounding,"
-    " error_code, error_detail, created_at, updated_at"
+    " error_code, error_detail, created_at, updated_at, routing_decision"
 )
 
-_LEASE_EXPIRED_SQL = (
-    "(status = 'running' AND lease_until IS NOT NULL AND lease_until < now())"
-)
+_LEASE_EXPIRED_SQL = "(status = 'running' AND lease_until IS NOT NULL AND lease_until < now())"
 
 
 def _run_from_row(row: tuple) -> TeachingRun:
@@ -81,6 +80,7 @@ def _run_from_row(row: tuple) -> TeachingRun:
         error_detail=row[16],
         created_at=row[17],
         updated_at=row[18],
+        routing_decision=(RoutingDecision.from_dict(row[19]) if row[19] is not None else None),
     )
 
 
@@ -131,7 +131,7 @@ class PostgresTeachingRepository:
                 dsn=self._dsn,
             ) as conn:
                 # 会话可见性：UPDATE 命中 0 行 = 会话不存在或不属于本项目
-                #（RLS 过滤），统一拒绝。
+                # （RLS 过滤），统一拒绝。
                 seq_row = conn.execute(
                     "UPDATE conversations SET last_message_seq = last_message_seq + 2"
                     " WHERE conversation_id = %s"
@@ -228,7 +228,7 @@ class PostgresTeachingRepository:
             ).fetchone()
         if row is None:
             raise deny(ErrorCode.CROSS_TENANT_DENIED, "资源不存在", run_id=run_id)
-        return replace_run_metadata(_run_from_row(row[:19]), row[19], row[20])
+        return replace_run_metadata(_run_from_row(row[:20]), row[20], row[21])
 
     def list_events(
         self, actor: Principal, project_id: str, run_id: str, *, after_seq: int = 0
@@ -258,12 +258,8 @@ class PostgresTeachingRepository:
 
     def budget_snapshot(self, actor: Principal, project_id: str) -> dict:
         self.membership.get(actor, project_id)
-        with tenant_transaction(
-            tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
-        ) as conn:
-            return budget_store.snapshot_in_conn(
-                conn, tenant_id=actor.tenant_id, project_id=project_id
-            )
+        with tenant_transaction(tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn) as conn:
+            return budget_store.snapshot_in_conn(conn, tenant_id=actor.tenant_id, project_id=project_id)
 
     def get_run_limits(self, claim: RunClaim) -> tuple[int, int]:
         with worker_transaction(
@@ -320,11 +316,11 @@ class PostgresTeachingRepository:
                 (worker_id, float(lease_seconds), selected[0]),
             ).fetchone()
         assert row is not None, "刚被本事务锁住并选中的行不可能在 UPDATE 时消失"
-        run = _run_from_row(row[:19])
+        run = _run_from_row(row[:20])
         return RunClaim(
             run=run,
             # RETURNING 拿到的就是本次生成的 token（同一事务内读回）。
-            claim_token=str(row[19]),
+            claim_token=str(row[20]),
             worker_id=worker_id,
         )
 
@@ -336,6 +332,7 @@ class PostgresTeachingRepository:
         estimated_input_tokens: int,
         estimated_output_tokens: int,
         request_payload: dict | None = None,
+        routing_decision: RoutingDecision | None = None,
     ) -> None:
         with worker_transaction(
             tenant_id=claim.run.tenant_id,
@@ -368,6 +365,14 @@ class PostgresTeachingRepository:
                 max_output_tokens=int(limits[1]),
             )
             budget_store.hold_to_in_flight_in_conn(conn, run_id=claim.run.run_id)
+            if routing_decision is not None:
+                conn.execute(
+                    "UPDATE teaching_runs SET routing_decision = %s::jsonb WHERE run_id = %s",
+                    (
+                        json.dumps(routing_decision.to_dict(), ensure_ascii=False),
+                        claim.run.run_id,
+                    ),
+                )
             conn.execute(
                 "INSERT INTO provider_attempts (attempt_id, tenant_id, project_id,"
                 " run_id, status, request_payload) VALUES (%s, %s, %s, %s, 'dispatched', %s::jsonb)",
@@ -379,7 +384,19 @@ class PostgresTeachingRepository:
                     json.dumps(request_payload or {}, ensure_ascii=False),
                 ),
             )
-            self._insert_event(conn, claim.run.run_id, "run.dispatched", {"attempt_id": attempt_id})
+            self._insert_event(
+                conn,
+                claim.run.run_id,
+                "run.dispatched",
+                {
+                    "attempt_id": attempt_id,
+                    **(
+                        {"routing_decision": routing_decision.to_dict()}
+                        if routing_decision is not None
+                        else {}
+                    ),
+                },
+            )
 
     def record_result(
         self,
@@ -432,9 +449,7 @@ class PostgresTeachingRepository:
                 (claim.run.run_id,),
             ).fetchone()
             if row is None:
-                raise deny(
-                    ErrorCode.CROSS_TENANT_DENIED, "运行不存在", run_id=claim.run.run_id
-                )
+                raise deny(ErrorCode.CROSS_TENANT_DENIED, "运行不存在", run_id=claim.run.run_id)
             if row[0] == str(RunStatus.SUCCEEDED):
                 # 幂等重放：上次提交其实成功了。返回既有状态，不写第二条消息。
                 fresh = conn.execute(
@@ -451,9 +466,7 @@ class PostgresTeachingRepository:
                 "SELECT answer_seq FROM teaching_runs WHERE run_id = %s",
                 (claim.run.run_id,),
             ).fetchone()
-            assert seq_row is not None and seq_row[0] is not None, (
-                "start_run 必须已为答案预留槽位"
-            )
+            assert seq_row is not None and seq_row[0] is not None, "start_run 必须已为答案预留槽位"
             conn.execute(
                 "INSERT INTO messages (message_id, tenant_id, project_id,"
                 " conversation_id, seq, role, content)"
@@ -471,11 +484,7 @@ class PostgresTeachingRepository:
             budget_store.settle_in_conn(
                 conn,
                 run_id=claim.run.run_id,
-                actual_micro=(
-                    None
-                    if usage is None
-                    else budget_store_usage_micro(usage)
-                ),
+                actual_micro=(None if usage is None else budget_store_usage_micro(usage)),
                 input_tokens=usage.input_tokens if usage else None,
                 output_tokens=usage.output_tokens if usage else None,
             )
@@ -551,9 +560,7 @@ class PostgresTeachingRepository:
                 (claim.run.run_id,),
             ).fetchone()
             if row is None:
-                raise deny(
-                    ErrorCode.CROSS_TENANT_DENIED, "运行不存在", run_id=claim.run.run_id
-                )
+                raise deny(ErrorCode.CROSS_TENANT_DENIED, "运行不存在", run_id=claim.run.run_id)
             if row[0] == str(RunStatus.FAILED):
                 fresh = conn.execute(
                     "SELECT " + _RUN_COLUMNS + " FROM teaching_runs WHERE run_id = %s",
@@ -615,9 +622,7 @@ class PostgresTeachingRepository:
             )
             return _run_from_row(updated)
 
-    def require_reconciliation(
-        self, claim: RunClaim, *, error_code: str, safe_detail: str
-    ) -> TeachingRun:
+    def require_reconciliation(self, claim: RunClaim, *, error_code: str, safe_detail: str) -> TeachingRun:
         with worker_transaction(
             tenant_id=claim.run.tenant_id,
             project_id=claim.run.project_id,
@@ -629,9 +634,7 @@ class PostgresTeachingRepository:
                 (claim.run.run_id,),
             ).fetchone()
             if row is None:
-                raise deny(
-                    ErrorCode.CROSS_TENANT_DENIED, "运行不存在", run_id=claim.run.run_id
-                )
+                raise deny(ErrorCode.CROSS_TENANT_DENIED, "运行不存在", run_id=claim.run.run_id)
             if row[0] == str(RunStatus.RECONCILIATION_REQUIRED):
                 fresh = conn.execute(
                     "SELECT " + _RUN_COLUMNS + " FROM teaching_runs WHERE run_id = %s",
@@ -684,9 +687,7 @@ class PostgresTeachingRepository:
 
     def run_status_for_worker(self, run_id: str) -> tuple[RunStatus, str]:
         with worker_transaction(dsn=self._worker_dsn) as conn:
-            conn.execute(
-                "SELECT set_config('app.worker_id', 'status-read', true)"
-            )
+            conn.execute("SELECT set_config('app.worker_id', 'status-read', true)")
             row = conn.execute(
                 "SELECT status, claim_token FROM teaching_runs WHERE run_id = %s",
                 (run_id,),
@@ -721,8 +722,7 @@ class PostgresTeachingRepository:
         if valid is None:
             raise PlatformError(
                 ErrorCode.ILLEGAL_STATE_TRANSITION,
-                "这次认领已经失效（租约过期后任务被重新认领）；"
-                "不得用旧凭证改写当前持有者的运行",
+                "这次认领已经失效（租约过期后任务被重新认领）；不得用旧凭证改写当前持有者的运行",
             )
         return fresh
 
@@ -744,13 +744,9 @@ class PostgresTeachingRepository:
         return row is not None
 
     def _attempt_id_for_run(self, conn, run_id: str) -> str:
-        row = conn.execute(
-            "SELECT attempt_id FROM provider_attempts WHERE run_id = %s", (run_id,)
-        ).fetchone()
+        row = conn.execute("SELECT attempt_id FROM provider_attempts WHERE run_id = %s", (run_id,)).fetchone()
         if row is None:
-            raise PlatformError(
-                ErrorCode.BUDGET_TREE_INVALID, "运行没有 attempt 行（记账与派发脱节）"
-            )
+            raise PlatformError(ErrorCode.BUDGET_TREE_INVALID, "运行没有 attempt 行（记账与派发脱节）")
         return str(row[0])
 
     def _insert_event(self, conn, run_id: str, event_type: str, payload: dict) -> None:
@@ -788,7 +784,5 @@ def replace_run_metadata(run: TeachingRun, citations: object, rejections: object
     return replace(
         run,
         citations=tuple(dict(item) for item in raw_citations if isinstance(item, dict)),
-        citation_rejections=tuple(
-            dict(item) for item in raw_rejections if isinstance(item, dict)
-        ),
+        citation_rejections=tuple(dict(item) for item in raw_rejections if isinstance(item, dict)),
     )

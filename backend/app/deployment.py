@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -53,6 +54,7 @@ DEFAULT_EXCHANGE_WINDOW_SECONDS = 600
 #: 教学 provider 的合法开关值（闭集）。`scripted` 仅供测试/演练注入模拟器；
 #: 真实云 provider 接入后在此追加（见 ADR-015）。空值 = disabled。
 TEACHING_PROVIDER_CHOICES = frozenset({"disabled", "scripted", "openai"})
+SOURCE_SEARCH_PROVIDER_CHOICES = frozenset({"disabled", "tavily"})
 
 #: 教学输出的默认上限（token）。环境变量可调小；调大不受此默认值限制，
 #: 但生产启动要求显式配置（见 configuration_problems）。
@@ -72,9 +74,7 @@ class PersistenceKind(StrEnum):
     POSTGRES = "postgres"
 
 
-def _env_bool(
-    name: str, default: bool = False, env: Mapping[str, str] | None = None
-) -> bool:
+def _env_bool(name: str, default: bool = False, env: Mapping[str, str] | None = None) -> bool:
     # 标注成 Mapping 而不是 dict：调用方传进来的可能是 os.environ
     # （_Environ 不是 dict 子类），只要求"能按名字取值"才是真实的契约。
     source: Mapping[str, str] = os.environ if env is None else env
@@ -84,9 +84,7 @@ def _env_bool(
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _env_optional_nonnegative_int(
-    name: str, default: int | None, env: Mapping[str, str]
-) -> int | None:
+def _env_optional_nonnegative_int(name: str, default: int | None, env: Mapping[str, str]) -> int | None:
     """Parse an optional non-negative integer; ``unlimited`` means ``None``."""
 
     raw = env.get(name)
@@ -160,6 +158,11 @@ class DeploymentSettings:
     #: accidentally print it.
     teaching_api_key: str = field(default="", repr=False)
     teaching_base_url: str = "https://api.openai.com/v1"
+    source_search_provider: str = "disabled"
+    source_search_api_key: str = field(default="", repr=False)
+    local_query_rewriter_url: str = ""
+    local_query_rewriter_model: str = ""
+    local_query_rewriter_timeout_seconds: float = 1.5
     # Open registration and password login are independent kill switches.
     # Missing environment variables deliberately resolve to False.
     registration_enabled: bool = False
@@ -192,9 +195,7 @@ class DeploymentSettings:
         raw_mode = env.get("STUDY_PLATFORM_ENV", DeploymentMode.DEVELOPMENT).strip().lower()
         if raw_mode not in {m.value for m in DeploymentMode}:
             # 未知模式不静默回退：拼错的 production 静默变成 development 是最坏情况。
-            raise RuntimeError(
-                f"STUDY_PLATFORM_ENV 只能是 development 或 production，收到 {raw_mode!r}"
-            )
+            raise RuntimeError(f"STUDY_PLATFORM_ENV 只能是 development 或 production，收到 {raw_mode!r}")
         mode = DeploymentMode(raw_mode)
 
         raw_persistence = env.get("STUDY_PLATFORM_PERSISTENCE", "").strip().lower()
@@ -206,9 +207,7 @@ class DeploymentSettings:
             # 生产模式下持久化不是可选项，忽略该变量的任何其他取值。
             persistence = PersistenceKind.POSTGRES
         else:
-            persistence = (
-                PersistenceKind(raw_persistence) if raw_persistence else PersistenceKind.MEMORY
-            )
+            persistence = PersistenceKind(raw_persistence) if raw_persistence else PersistenceKind.MEMORY
 
         session_secret = env.get("STUDY_PLATFORM_SESSION_SECRET", DEV_SESSION_SECRET)
         # cookie 密钥缺省复用会话密钥（仅开发态少配一个变量）。
@@ -264,6 +263,12 @@ class DeploymentSettings:
                 "STUDY_PLATFORM_TEACHING_PROVIDER 只能是 "
                 f"{sorted(TEACHING_PROVIDER_CHOICES)} 之一，收到 {teaching_provider!r}"
             )
+        source_search_provider = env.get("STUDY_PLATFORM_SOURCE_SEARCH_PROVIDER", "disabled").strip().lower()
+        if source_search_provider not in SOURCE_SEARCH_PROVIDER_CHOICES:
+            raise RuntimeError(
+                "STUDY_PLATFORM_SOURCE_SEARCH_PROVIDER 只能是 "
+                f"{sorted(SOURCE_SEARCH_PROVIDER_CHOICES)} 之一，收到 {source_search_provider!r}"
+            )
 
         return cls(
             mode=mode,
@@ -296,6 +301,13 @@ class DeploymentSettings:
             teaching_base_url=env.get(
                 "STUDY_PLATFORM_TEACHING_BASE_URL", "https://api.openai.com/v1"
             ).strip(),
+            source_search_provider=source_search_provider,
+            source_search_api_key=env.get("STUDY_PLATFORM_SOURCE_SEARCH_API_KEY", ""),
+            local_query_rewriter_url=env.get("STUDY_PLATFORM_LOCAL_QUERY_REWRITER_URL", "").strip(),
+            local_query_rewriter_model=env.get("STUDY_PLATFORM_LOCAL_QUERY_REWRITER_MODEL", "").strip(),
+            local_query_rewriter_timeout_seconds=float(
+                env.get("STUDY_PLATFORM_LOCAL_QUERY_REWRITER_TIMEOUT_SECONDS", "1.5")
+            ),
             registration_enabled=_env_bool("STUDY_PLATFORM_REGISTRATION_ENABLED", env=env),
             password_login_enabled=_env_bool("STUDY_PLATFORM_PASSWORD_LOGIN_ENABLED", env=env),
             paid_dispatch_enabled=_env_bool("STUDY_PLATFORM_PAID_DISPATCH_ENABLED", env=env),
@@ -335,34 +347,50 @@ class DeploymentSettings:
             problems.append("会话 TTL 必须为正（STUDY_PLATFORM_SESSION_TTL_MINUTES）")
         if self.session_ttl > MAX_SESSION_TTL:
             problems.append(
-                f"会话 TTL 不得超过硬上限 {MAX_SESSION_TTL.days} 天"
-                "（STUDY_PLATFORM_SESSION_TTL_MINUTES）"
+                f"会话 TTL 不得超过硬上限 {MAX_SESSION_TTL.days} 天（STUDY_PLATFORM_SESSION_TTL_MINUTES）"
             )
         if self.exchange_limit <= 0:
             problems.append("邀请兑换限流次数必须为正（STUDY_PLATFORM_EXCHANGE_LIMIT）")
         if self.exchange_window_seconds <= 0:
-            problems.append(
-                "邀请兑换限流窗口必须为正秒数（STUDY_PLATFORM_EXCHANGE_WINDOW_SECONDS）"
-            )
+            problems.append("邀请兑换限流窗口必须为正秒数（STUDY_PLATFORM_EXCHANGE_WINDOW_SECONDS）")
         if self.auth_rate_limit_capacity <= 0:
             problems.append("认证限流桶容量必须为正")
+        if not 0 < self.local_query_rewriter_timeout_seconds <= 3:
+            problems.append("本地查询改写超时必须在 (0, 3] 秒范围内")
+        if self.local_query_rewriter_url or self.local_query_rewriter_model:
+            if not self.local_query_rewriter_url or not self.local_query_rewriter_model:
+                problems.append("启用本地查询改写时必须同时配置端点和模型标识")
+            else:
+                endpoint = urlsplit(self.local_query_rewriter_url)
+                try:
+                    loopback = ipaddress.ip_address(endpoint.hostname or "").is_loopback
+                    valid_port = endpoint.port is not None and 1 <= endpoint.port <= 65535
+                except ValueError:
+                    loopback = False
+                    valid_port = False
+                if (
+                    endpoint.scheme != "http"
+                    or not loopback
+                    or not valid_port
+                    or endpoint.username is not None
+                    or endpoint.password is not None
+                    or endpoint.query
+                    or endpoint.fragment
+                    or endpoint.path != "/v1/chat/completions"
+                ):
+                    problems.append("本地查询改写端点必须是固定路径上的字面 loopback HTTP URL")
         if self.auth_argon2_max_concurrency <= 0:
             problems.append("Argon2 并发上限必须为正")
         if self.auth_argon2_queue_limit < 0:
             problems.append("Argon2 队列上限不能为负")
         if self.auth_argon2_wait_seconds <= 0:
             problems.append("Argon2 等待时限必须为正")
-        if (
-            self.platform_monthly_cap_micro is not None
-            and self.platform_monthly_cap_micro < 0
-        ):
+        if self.platform_monthly_cap_micro is not None and self.platform_monthly_cap_micro < 0:
             problems.append("平台月度额度不能为负")
         for raw in self.invalid_origins:
             problems.append(f"可信 Origin 无法解析（应为 scheme://host[:port]）：{raw!r}")
         for raw in self.invalid_proxies:
-            problems.append(
-                f"可信代理条目不能包含空白或逗号（应为 IP 或 CIDR）：{raw!r}"
-            )
+            problems.append(f"可信代理条目不能包含空白或逗号（应为 IP 或 CIDR）：{raw!r}")
 
         # 教学配置的形状校验（任何模式都查 —— 数值荒谬的配置不该等上线才暴露）。
         if self.teaching_max_input_tokens <= 0 or self.teaching_max_output_tokens <= 0:
@@ -372,10 +400,7 @@ class DeploymentSettings:
                 "STUDY_PLATFORM_TEACHING_MAX_OUTPUT_TOKENS）"
             )
         if self.teaching_project_budget_micro <= 0:
-            problems.append(
-                "教学项目预算必须为正微单位"
-                "（STUDY_PLATFORM_TEACHING_PROJECT_BUDGET_MICRO）"
-            )
+            problems.append("教学项目预算必须为正微单位（STUDY_PLATFORM_TEACHING_PROJECT_BUDGET_MICRO）")
         if self.teaching_provider == "openai":
             # 真实 provider：模型必须显式批准 + 凭据必须存在。
             # key 的值不进这里（秘密不进配置），只查存在性。
@@ -389,6 +414,8 @@ class DeploymentSettings:
                     "启用教学 provider 时必须提供 STUDY_PLATFORM_TEACHING_API_KEY"
                     "（凭据只由服务端读取，不进仓库/日志/数据库）"
                 )
+        if self.source_search_provider == "tavily" and not self.source_search_api_key:
+            problems.append("启用资料搜索时必须提供 STUDY_PLATFORM_SOURCE_SEARCH_API_KEY")
         if self.behind_proxy and not self.trusted_proxies:
             problems.append(
                 "开启 STUDY_PLATFORM_BEHIND_PROXY=1 必须同时配置 "
@@ -404,9 +431,7 @@ class DeploymentSettings:
         if self.persistence is not PersistenceKind.POSTGRES:
             problems.append("生产模式必须使用 PostgreSQL 持久化")
         if not self.dsn_explicitly_set:
-            problems.append(
-                "生产模式必须显式提供 STUDY_PLATFORM_DSN（不允许使用本机 trust 默认连接串）"
-            )
+            problems.append("生产模式必须显式提供 STUDY_PLATFORM_DSN（不允许使用本机 trust 默认连接串）")
         elif self.dsn == DEFAULT_APP_DSN:
             problems.append("生产模式的 STUDY_PLATFORM_DSN 不能是本机开发默认值")
 
@@ -420,9 +445,7 @@ class DeploymentSettings:
                 "（worker 与 API 是两条凭据边界，不能共用一个角色）"
             )
         elif self.worker_dsn == DEFAULT_WORKER_DSN:
-            problems.append(
-                "生产模式的 STUDY_PLATFORM_WORKER_DSN 不能是本机开发默认值"
-            )
+            problems.append("生产模式的 STUDY_PLATFORM_WORKER_DSN 不能是本机开发默认值")
         if self.worker_dsn and self.dsn and self.worker_dsn == self.dsn:
             problems.append(
                 "STUDY_PLATFORM_WORKER_DSN 不能与 STUDY_PLATFORM_DSN 相同："
@@ -437,9 +460,7 @@ class DeploymentSettings:
             if not secret:
                 problems.append(f"{name} 不能为空")
             elif secret in _DEV_SECRETS:
-                problems.append(
-                    f"{name} 仍然是仓库内的开发占位密钥，生产必须由 KMS/Secret Manager 注入"
-                )
+                problems.append(f"{name} 仍然是仓库内的开发占位密钥，生产必须由 KMS/Secret Manager 注入")
             elif len(secret.encode("utf-8")) < MIN_SECRET_BYTES:
                 problems.append(
                     f"{name} 至少需要 {MIN_SECRET_BYTES} 字节随机材料"
@@ -449,8 +470,7 @@ class DeploymentSettings:
 
         if self.cookie_secret == self.session_secret:
             problems.append(
-                "cookie 签名密钥必须与会话令牌密钥分离（泄露隔离）："
-                "请单独设置 STUDY_PLATFORM_COOKIE_SECRET"
+                "cookie 签名密钥必须与会话令牌密钥分离（泄露隔离）：请单独设置 STUDY_PLATFORM_COOKIE_SECRET"
             )
 
         # 全量交叉复用检查：session / cookie / token / 历史 cookie 密钥
@@ -469,23 +489,18 @@ class DeploymentSettings:
                 continue
             if secret in seen:
                 problems.append(
-                    f"{label} 密钥与 {seen[secret]} 密钥重复："
-                    "所有用途的密钥必须两两互异（泄露隔离）"
+                    f"{label} 密钥与 {seen[secret]} 密钥重复：所有用途的密钥必须两两互异（泄露隔离）"
                 )
             else:
                 seen[secret] = label
         if not self.cookie_secure:
-            problems.append(
-                "生产模式必须设置 STUDY_PLATFORM_COOKIE_SECURE=1（HTTPS-only cookie）"
-            )
+            problems.append("生产模式必须设置 STUDY_PLATFORM_COOKIE_SECURE=1（HTTPS-only cookie）")
         if not self.trusted_origins:
             problems.append(
                 "生产模式必须设置 STUDY_PLATFORM_TRUSTED_ORIGINS"
                 "（逗号分隔的外部可信 Origin，即反代后的外部域名）"
             )
-        if self.cookie_previous_secrets and any(
-            old in _DEV_SECRETS for old in self.cookie_previous_secrets
-        ):
+        if self.cookie_previous_secrets and any(old in _DEV_SECRETS for old in self.cookie_previous_secrets):
             problems.append("STUDY_PLATFORM_COOKIE_SECRET_PREVIOUS 不允许包含开发占位密钥")
         return problems
 
@@ -495,6 +510,5 @@ class DeploymentSettings:
         if problems:
             joined = "\n  - ".join(problems)
             raise RuntimeError(
-                f"启动自检失败（{self.mode.value}）：\n  - {joined}\n"
-                "拒绝以不完整的安全配置启动。"
+                f"启动自检失败（{self.mode.value}）：\n  - {joined}\n拒绝以不完整的安全配置启动。"
             )

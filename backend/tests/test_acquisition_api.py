@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from app.knowledge.discovery import SearchResult
 
 ORIGIN = {"Origin": "http://testserver"}
 
@@ -114,3 +115,120 @@ def test_candidate_from_another_project_is_not_selectable(acquisition_project):
         headers=keyed(),
     )
     assert response.status_code == 404
+
+
+def test_search_results_are_persisted_as_unselected_candidates(acquisition_project, platform):
+    client, project_id = acquisition_project
+
+    class SearchProvider:
+        calls = 0
+
+        def search(self, query: str, *, limit: int):
+            self.calls += 1
+            assert query == "事务隔离"
+            assert limit == 5
+            return (
+                SearchResult("指南", "https://example.com/guide", "公开摘要"),
+                SearchResult("私网", "http://127.0.0.1/private", "不得入库"),
+                SearchResult("重复", "https://example.com/guide", "重复网址"),
+            )
+
+    provider = SearchProvider()
+    platform.source_search_provider = provider
+    headers = keyed("source-search-once")
+    response = client.post(
+        f"/projects/{project_id}/source-search",
+        json={"query": "事务隔离", "limit": 5},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    candidates = response.json()["candidates"]
+    assert len(candidates) == 1
+    assert candidates[0]["status"] == "discovered"
+    assert candidates[0]["snippet"] == "公开摘要"
+    replay = client.post(
+        f"/projects/{project_id}/source-search",
+        json={"query": "事务隔离", "limit": 5},
+        headers=headers,
+    )
+    assert replay.headers["X-Idempotent-Replay"] == "true"
+    assert replay.json() == response.json()
+    assert provider.calls == 1
+
+
+def test_source_search_is_explicitly_disabled_without_provider(acquisition_project):
+    client, project_id = acquisition_project
+    response = client.post(
+        f"/projects/{project_id}/source-search",
+        json={"query": "事务隔离"},
+        headers=keyed("disabled-search"),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "SOURCE_SEARCH_DISABLED"
+
+
+def test_search_provider_error_is_cached_to_prevent_duplicate_dispatch(
+    acquisition_project, platform
+):
+    client, project_id = acquisition_project
+
+    class BrokenProvider:
+        calls = 0
+
+        def search(self, _query: str, *, limit: int):
+            self.calls += 1
+            raise RuntimeError("provider body must stay private")
+
+    provider = BrokenProvider()
+    platform.source_search_provider = provider
+    headers = keyed("failed-source-search")
+    path = f"/projects/{project_id}/source-search"
+    body = {"query": "事务隔离"}
+    first = client.post(path, json=body, headers=headers)
+    replay = client.post(path, json=body, headers=headers)
+
+    assert first.status_code == replay.status_code == 503
+    assert first.json()["code"] == "SOURCE_SEARCH_UNAVAILABLE"
+    assert "provider body" not in first.text
+    assert replay.headers["X-Idempotent-Replay"] == "true"
+    assert provider.calls == 1
+
+    fresh_attempt = client.post(path, json=body, headers=keyed("fresh-search-attempt"))
+    assert fresh_attempt.status_code == 503
+    assert provider.calls == 2
+
+
+def test_source_search_is_persistently_rate_limited_before_provider_dispatch(
+    acquisition_project, platform
+):
+    client, project_id = acquisition_project
+
+    class SearchProvider:
+        calls = 0
+
+        def search(self, _query: str, *, limit: int):
+            self.calls += 1
+            return ()
+
+    provider = SearchProvider()
+    platform.source_search_provider = provider
+    path = f"/projects/{project_id}/source-search"
+    body = {"query": "事务隔离"}
+
+    for index in range(20):
+        response = client.post(path, json=body, headers=keyed(f"search-{index}"))
+        assert response.status_code == 200
+
+    blocked = client.post(path, json=body, headers=keyed("search-over-limit"))
+
+    assert blocked.status_code == 429
+    assert blocked.json()["code"] == "RATE_LIMITED"
+    assert int(blocked.headers["Retry-After"]) > 0
+    assert provider.calls == 20
+
+    replay = client.post(path, json=body, headers=keyed("search-0"))
+    assert replay.status_code == 200
+    assert replay.headers["X-Idempotent-Replay"] == "true"
+    assert provider.calls == 20

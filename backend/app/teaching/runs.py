@@ -18,6 +18,7 @@ from app.core.contracts import (
     require_positive,
     require_text,
 )
+from app.teaching.routing import RoutingDecision
 
 
 class RunStatus(StrEnum):
@@ -86,6 +87,7 @@ class TeachingRun:
     citations: tuple[dict, ...] = ()
     #: 被拒绝的 provider 引用及稳定原因，不把原始 provider payload 暴露给用户。
     citation_rejections: tuple[dict, ...] = ()
+    routing_decision: RoutingDecision | None = None
 
     def __post_init__(self) -> None:
         require_text(self.run_id, "run_id")
@@ -115,6 +117,8 @@ class TeachingRun:
             isinstance(item, dict) for item in self.citation_rejections
         ):
             raise ValueError("citation_rejections 必须是 dict 元组")
+        if self.routing_decision is not None and not isinstance(self.routing_decision, RoutingDecision):
+            raise ValueError("routing_decision 必须是 RoutingDecision 或 None")
         require_aware(self.created_at, "created_at")
         require_aware(self.updated_at, "updated_at")
         # 状态 ↔ 附属事实的一致性（与 0010 的 CHECK 同一条规则）。
@@ -122,9 +126,7 @@ class TeachingRun:
             if self.answer_message_id is None or self.grounding is None:
                 raise ValueError("succeeded 的运行必须有答案消息与 grounding")
         elif self.answer_message_id is not None or self.grounding is not None:
-            raise ValueError(
-                f"只有 succeeded 的运行携带答案消息，当前状态是 {self.status}"
-            )
+            raise ValueError(f"只有 succeeded 的运行携带答案消息，当前状态是 {self.status}")
         if self.status in (RunStatus.FAILED, RunStatus.RECONCILIATION_REQUIRED):
             if not self.error_code:
                 raise ValueError(f"{self.status} 的运行必须有错误码")
@@ -144,6 +146,7 @@ class TeachingRun:
             "error_detail": self.error_detail,
             "citations": [dict(item) for item in self.citations],
             "citation_rejections": [dict(item) for item in self.citation_rejections],
+            "routing_decision": (self.routing_decision.to_dict() if self.routing_decision else None),
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }

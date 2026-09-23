@@ -21,6 +21,7 @@ import pytest
 from app.core.errors import ErrorCode, PlatformError
 from app.identity.models import Principal
 from app.teaching.models import TokenUsage
+from app.teaching.routing import RoutingDecision
 from app.teaching.runs import Grounding, RunStatus
 
 #: 整场会话跑在随机临时库上（`conftest.pg_database`，会话级 autouse）。
@@ -54,8 +55,7 @@ def pg_seed() -> None:
     with psycopg.connect(pg_support.migration_dsn()) as conn:
         with conn.transaction():
             conn.execute(
-                "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)"
-                " ON CONFLICT (tenant_id) DO NOTHING",
+                "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s) ON CONFLICT (tenant_id) DO NOTHING",
                 (TENANT, TENANT),
             )
 
@@ -114,9 +114,7 @@ def env(request, pg_seed):
         return Env(
             membership=membership,
             products=products,
-            teaching=InMemoryTeachingRepository(
-                membership=membership, products=products, clock=clock
-            ),
+            teaching=InMemoryTeachingRepository(membership=membership, products=products, clock=clock),
             clock=clock,
             is_postgres=False,
         )
@@ -150,13 +148,11 @@ def _world(env: Env, *, tag: str = "a") -> tuple[Principal, str, str]:
         with psycopg.connect(dsn) as conn:
             with conn.transaction():
                 conn.execute(
-                    "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)"
-                    " ON CONFLICT DO NOTHING",
+                    "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                     (tenant, tenant),
                 )
                 conn.execute(
-                    "INSERT INTO principals (principal_id, tenant_id)"
-                    " VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    "INSERT INTO principals (principal_id, tenant_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                     (principal, tenant),
                 )
     actor = Principal(principal_id=principal, tenant_id=tenant)
@@ -219,6 +215,33 @@ def test_start_run_writes_message_run_reservation_and_event(env):
     assert snapshot["project"]["reserved_micro"] == EST_MICRO
     events = env.teaching.list_events(actor, project_id, run.run_id)
     assert [e.event_type for e in events] == ["run.created"]
+
+
+@pytest.mark.invariant
+def test_routing_decision_persists_atomically_with_dispatch_in_both_adapters(env):
+    actor, project_id, conversation_id = _world(env)
+    run = _start(env, actor, project_id, conversation_id)
+    claim = env.teaching.claim_run(worker_id="route-worker", lease_seconds=60)
+    assert claim is not None and claim.run.run_id == run.run_id
+    decision = RoutingDecision(
+        query_rewrite_status="fallback",
+        reason_code="local_unavailable_or_invalid",
+    )
+    attempt_id = _unique("att")
+
+    env.teaching.mark_dispatched(
+        claim,
+        attempt_id=attempt_id,
+        estimated_input_tokens=100,
+        estimated_output_tokens=50,
+        request_payload={"routing_decision": decision.to_dict()},
+        routing_decision=decision,
+    )
+
+    stored = env.teaching.get_run(actor, project_id, run.run_id)
+    events = env.teaching.list_events(actor, project_id, run.run_id)
+    assert stored.routing_decision == decision
+    assert events[-1].payload["routing_decision"] == decision.to_dict()
 
 
 @pytest.mark.invariant
@@ -302,8 +325,10 @@ def test_claim_and_finish_settle_budget_and_write_answer(env):
     claim, attempt_id = _claim_and_dispatch(env, run)
     assert claim.run.status is RunStatus.RUNNING
     env.teaching.record_result(
-        claim, attempt_id=attempt_id,
-        provider_request_id="req_1", payload={"answer_markdown": "幂等是……", "citations": []},
+        claim,
+        attempt_id=attempt_id,
+        provider_request_id="req_1",
+        payload={"answer_markdown": "幂等是……", "citations": []},
     )
     answer_id = _unique("msg")
     finished = env.teaching.finish_run(
@@ -326,7 +351,9 @@ def test_claim_and_finish_settle_budget_and_write_answer(env):
 
     events = env.teaching.list_events(actor, project_id, run.run_id)
     assert [e.event_type for e in events] == [
-        "run.created", "run.dispatched", "run.succeeded",
+        "run.created",
+        "run.dispatched",
+        "run.succeeded",
     ]
     assert [e.seq for e in events] == [1, 2, 3]
 
@@ -361,8 +388,7 @@ def _expire_lease(env: Env, run_id: str) -> None:
     with psycopg.connect(dsn) as conn:
         with conn.transaction():
             updated = conn.execute(
-                "UPDATE teaching_runs SET lease_until = now() - interval '1 second'"
-                " WHERE run_id = %s",
+                "UPDATE teaching_runs SET lease_until = now() - interval '1 second' WHERE run_id = %s",
                 (run_id,),
             ).rowcount
     assert updated == 1, "租约没被改到 —— 后面那句'已过期'就没有意义"
@@ -376,11 +402,7 @@ def self_attempt_id(env, run_id: str) -> str:
             return conn.execute(
                 "SELECT attempt_id FROM provider_attempts WHERE run_id = %s", (run_id,)
             ).fetchone()[0]
-    return next(
-        attempt.attempt_id
-        for attempt in env.teaching._attempts.values()
-        if attempt.run_id == run_id
-    )
+    return next(attempt.attempt_id for attempt in env.teaching._attempts.values() if attempt.run_id == run_id)
 
 
 @pytest.mark.invariant
@@ -542,8 +564,10 @@ def test_replay_uses_stored_result_without_new_dispatch(env):
     first, attempt_id = _claim_and_dispatch(env, run)
     payload = {"answer_markdown": "已存证的答案", "citations": []}
     env.teaching.record_result(
-        first, attempt_id=attempt_id,
-        provider_request_id="req_1", payload=payload,
+        first,
+        attempt_id=attempt_id,
+        provider_request_id="req_1",
+        payload=payload,
     )
     _expire_lease(env, run.run_id)
     # 第二个 worker 接管（模拟第一个 worker 提交前崩溃、租约过期）。
@@ -555,9 +579,7 @@ def test_replay_uses_stored_result_without_new_dispatch(env):
 
 @pytest.mark.postgres
 @pytest.mark.invariant
-@pytest.mark.skipif(
-    not pg_support.reachable(), reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）"
-)
+@pytest.mark.skipif(not pg_support.reachable(), reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）")
 def test_app_role_cannot_see_the_run_queue_with_a_self_set_variable():
     """教学队列的跨租户可见性只授予 `study_worker`（0010 的 TO study_worker）。
 

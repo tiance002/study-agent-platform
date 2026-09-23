@@ -28,6 +28,7 @@ from app.identity.models import Principal
 from app.identity.ports import MembershipRepository
 from app.knowledge.models import (
     ACQUISITION_METHOD_UPLOAD,
+    ACQUISITION_METHOD_WEB,
     DOCUMENT_PARSER_VERSION,
     IngestionJob,
     IngestionStatus,
@@ -81,6 +82,10 @@ class InMemoryIngestionRepository:
         language: str,
         acquisition_method: str = ACQUISITION_METHOD_UPLOAD,
         taint_sources: tuple = (),
+        parser_version: str = DOCUMENT_PARSER_VERSION,
+        fetch_attempt_id: str = "",
+        source_content_type: str = "",
+        raw_content_hash: str = "",
     ) -> tuple[SourceDocument, IngestionJob]:
         # 资料必须存在且属于该项目 —— 内存版没有组合外键兜底，
         # 这一句就是"不能给别的项目的资料挂原文"的唯一防线。
@@ -97,9 +102,12 @@ class InMemoryIngestionRepository:
             media_type=media_type,
             language=language,
             observed_at=now,
-            parser_version=DOCUMENT_PARSER_VERSION,
+            parser_version=parser_version,
             acquisition_method=acquisition_method,
             taint_sources=taint_sources or (TaintSource.UPLOADED_SOURCE,),
+            fetch_attempt_id=fetch_attempt_id,
+            source_content_type=source_content_type,
+            raw_content_hash=raw_content_hash,
         )
         with self._lock:
             existing = self._documents.get(document_id)
@@ -115,16 +123,30 @@ class InMemoryIngestionRepository:
                     or existing.media_type != media_type
                     or existing.language != language
                     or existing.acquisition_method != acquisition_method
+                    or existing.parser_version != parser_version
+                    or existing.fetch_attempt_id != fetch_attempt_id
+                    or existing.source_content_type != source_content_type
+                    or existing.raw_content_hash != raw_content_hash
                 ):
                     raise deny(ErrorCode.VERSION_CONFLICT, "同一下载任务的原文标识已被占用")
                 return existing, existing_job
+            if acquisition_method == ACQUISITION_METHOD_WEB:
+                for prior_job in self._jobs.values():
+                    prior_document = self._documents[prior_job.document_id]
+                    if (
+                        prior_job.status is not IngestionStatus.FAILED
+                        and prior_document.tenant_id == actor.tenant_id
+                        and prior_document.project_id == project_id
+                        and prior_document.source_id == source_id
+                        and prior_document.acquisition_method == ACQUISITION_METHOD_WEB
+                        and prior_document.content_hash == document.content_hash
+                        and prior_document.parser_version == parser_version
+                        and prior_document.content == content
+                    ):
+                        return prior_document, prior_job
             version = (
                 max(
-                    (
-                        row.version
-                        for row in self._documents.values()
-                        if row.source_id == source_id
-                    ),
+                    (row.version for row in self._documents.values() if row.source_id == source_id),
                     default=0,
                 )
                 + 1
@@ -155,9 +177,7 @@ class InMemoryIngestionRepository:
             job = self._jobs.get(job_id)
         if job is None or job.project_id != project_id or job.tenant_id != actor.tenant_id:
             # 不可见与不存在同码同话术：区分原因等于提供存在性探针。
-            raise deny(
-                ErrorCode.CROSS_TENANT_DENIED, "无权访问该项目", job_id=job_id
-            )
+            raise deny(ErrorCode.CROSS_TENANT_DENIED, "无权访问该项目", job_id=job_id)
         return job
 
     def list_jobs(self, actor: Principal, project_id: str) -> tuple[IngestionJob, ...]:
@@ -173,11 +193,7 @@ class InMemoryIngestionRepository:
     def load_document(self, job: IngestionJob) -> SourceDocument:
         with self._lock:
             document = self._documents.get(job.document_id)
-        if (
-            document is None
-            or document.tenant_id != job.tenant_id
-            or document.project_id != job.project_id
-        ):
+        if document is None or document.tenant_id != job.tenant_id or document.project_id != job.project_id:
             raise deny(
                 ErrorCode.CROSS_PROJECT_DENIED,
                 "任务对应的原文不在该任务的作用域内",
@@ -226,9 +242,7 @@ class InMemoryIngestionRepository:
                     return chunk
         return None
 
-    def _only_latest_versions(
-        self, chunks: list[StoredChunk]
-    ) -> list[StoredChunk]:
+    def _only_latest_versions(self, chunks: list[StoredChunk]) -> list[StoredChunk]:
         """每个来源只保留**版本号最大**的那一版片段。
 
         与 PostgreSQL 版的 `DISTINCT ON (source_id) ... ORDER BY version DESC`
@@ -286,9 +300,7 @@ class InMemoryIngestionRepository:
         with self._lock:
             current = self._jobs.get(job.job_id)
             if current is None:
-                raise deny(
-                    ErrorCode.CROSS_TENANT_DENIED, "任务不存在", job_id=job.job_id
-                )
+                raise deny(ErrorCode.CROSS_TENANT_DENIED, "任务不存在", job_id=job.job_id)
             if not self._holds_settlement_rights(current, job):
                 self._reject_if_claim_is_stale(current, job, action="complete")
                 # 走到这里 = 任务已是 succeeded：重复投递，直接返回既有状态。
@@ -321,9 +333,7 @@ class InMemoryIngestionRepository:
         with self._lock:
             current = self._jobs.get(job.job_id)
             if current is None:
-                raise deny(
-                    ErrorCode.CROSS_TENANT_DENIED, "任务不存在", job_id=job.job_id
-                )
+                raise deny(ErrorCode.CROSS_TENANT_DENIED, "任务不存在", job_id=job.job_id)
             if not self._holds_settlement_rights(current, job):
                 self._reject_if_claim_is_stale(current, job, action="fail")
                 # 走到这里 = 终态重复上报：幂等成功，**不覆盖**首次记录的错误。
@@ -341,9 +351,7 @@ class InMemoryIngestionRepository:
 
     # ------------------------------------------------------------------ 内部
 
-    def _holds_settlement_rights(
-        self, current: IngestionJob, claim: IngestionJob
-    ) -> bool:
+    def _holds_settlement_rights(self, current: IngestionJob, claim: IngestionJob) -> bool:
         """这次认领现在**仍然有权**落定吗（状态 + token + 未过期的租约）。
 
         三个条件缺一不可：
@@ -362,9 +370,7 @@ class InMemoryIngestionRepository:
             and self._clock.now() < current.lease_until
         )
 
-    def _reject_if_claim_is_stale(
-        self, current: IngestionJob, job: IngestionJob, *, action: str
-    ) -> None:
+    def _reject_if_claim_is_stale(self, current: IngestionJob, job: IngestionJob, *, action: str) -> None:
         """条件落空时分辨两种情况，**只有当这次调用是重复投递时才正常返回**。
 
         名字刻意不是 `is_...` / `settled_already`：那种返回布尔的形状，
@@ -391,14 +397,11 @@ class InMemoryIngestionRepository:
             return
         raise deny(
             ErrorCode.ILLEGAL_STATE_TRANSITION,
-            "这次认领已经失效（租约过期后任务被重新认领）；"
-            f"不得用 {action} 改写当前持有者的任务",
+            f"这次认领已经失效（租约过期后任务被重新认领）；不得用 {action} 改写当前持有者的任务",
             job_id=job.job_id,
         )
 
-    def _assert_chunk_slots_free(
-        self, job: IngestionJob, chunks: tuple[StoredChunk, ...]
-    ) -> None:
+    def _assert_chunk_slots_free(self, job: IngestionJob, chunks: tuple[StoredChunk, ...]) -> None:
         for chunk in chunks:
             if chunk.chunk_id in self._chunks:
                 raise deny(

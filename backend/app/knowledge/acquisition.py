@@ -8,6 +8,11 @@ from enum import StrEnum
 from urllib.parse import urlsplit
 
 from app.core.contracts import require_aware, require_id, require_non_negative, require_text
+from app.knowledge.models import TEXT_MEDIA_TYPES
+
+MAX_ACQUISITION_ATTEMPTS = 3
+ACQUISITION_ATTEMPTS_EXHAUSTED = "ACQUISITION_ATTEMPTS_EXHAUSTED"
+ACQUISITION_ATTEMPTS_EXHAUSTED_DETAIL = "下载任务连续中断，已停止自动重试"
 
 
 class CandidateStatus(StrEnum):
@@ -143,11 +148,13 @@ class AcquisitionJob:
             require_id(getattr(self, name), name)
         _require_source_url(self.url)
         require_text(self.title, "title")
-        if self.media_type not in {"text/plain", "text/markdown", "text/html"}:
+        if self.media_type not in TEXT_MEDIA_TYPES:
             raise ValueError("media_type 不在首版允许范围内")
         require_text(self.language, "language")
         _require_status(self.status, DownloadStatus, "status")
         require_non_negative(self.attempt_count, "attempt_count")
+        if self.attempt_count > MAX_ACQUISITION_ATTEMPTS:
+            raise ValueError("attempt_count 超过 acquisition 自动重试上限")
         require_aware(self.created_at, "created_at")
         require_aware(self.updated_at, "updated_at")
         if self.updated_at < self.created_at:
@@ -217,7 +224,7 @@ class AcquisitionRequest:
             require_id(getattr(self, name), name)
         _require_source_url(self.url)
         require_text(self.title, "title")
-        if self.media_type not in {"text/plain", "text/markdown", "text/html"}:
+        if self.media_type not in TEXT_MEDIA_TYPES:
             raise ValueError("media_type 不在首版允许范围内")
         require_text(self.language, "language")
         require_aware(self.requested_at, "requested_at")
@@ -273,6 +280,8 @@ def claim_download(
 
     if job.status is not DownloadStatus.QUEUED:
         raise ValueError(f"download claim requires queued status, got {job.status}")
+    if job.attempt_count >= MAX_ACQUISITION_ATTEMPTS:
+        raise ValueError("download claim 已达到自动重试上限")
     require_text(lease_owner, "lease_owner")
     require_text(claim_token, "claim_token")
     require_aware(lease_until, "lease_until")

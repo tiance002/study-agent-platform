@@ -24,3 +24,18 @@ def read_junit_stats(path: Path) -> JUnitStats:
         errors=sum(int(suite.attrib.get("errors", "0")) for suite in suites),
         skipped=sum(int(suite.attrib.get("skipped", "0")) for suite in suites),
     )
+
+
+def read_junit_skips(path: Path) -> tuple[str, ...]:
+    root = ElementTree.parse(path).getroot()
+    details: list[str] = []
+    for testcase in root.iter("testcase"):
+        skipped = testcase.find("skipped")
+        if skipped is None:
+            continue
+        identity = "::".join(
+            part for part in (testcase.get("classname", ""), testcase.get("name", "")) if part
+        )
+        reason = (skipped.get("message") or "").strip() or (skipped.text or "").strip()
+        details.append(f"{identity}: {reason or 'reason not recorded'}")
+    return tuple(details)

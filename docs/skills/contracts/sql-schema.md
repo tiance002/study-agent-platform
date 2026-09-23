@@ -7,13 +7,13 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:c621ad41075110f8da3dac557b8dd840dccc1d6d085686bd038df36d631bd11e, generated_at=2026-09-22T12:54:12Z -->
-> 生成时间：2026-09-22T12:54:12Z
+<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:82aab0ffc0636b9913374ac033040451c50a82bc2c14992fa82a8ce16a37cc99, generated_at=2026-09-23T08:11:42Z -->
+> 生成时间：2026-09-23T08:11:42Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
 
-当前 head：`0014`
+当前 head：`0017`
 
 ### 表总览
 
@@ -40,14 +40,15 @@
 | `provider_attempts` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 13 |
 | `source_candidates` | 0014 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 10 |
 | `source_chunks` | 0007 | 租户+项目 | SELECT, INSERT | SELECT, INSERT | 15 |
-| `source_documents` | 0007 | 租户+项目 | SELECT, INSERT | SELECT | 15 |
+| `source_documents` | 0007 | 租户+项目 | SELECT, INSERT | SELECT | 18 |
+| `source_fetch_artifacts` | 0016 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 8 |
 | `sources` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 8 |
 | `task_assessments` | 0005 | 租户+项目 | SELECT, INSERT | — | 8 |
 | `task_submissions` | 0005 | 租户+项目+主体 | SELECT, INSERT | — | 8 |
 | `teaching_budgets` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 11 |
 | `teaching_events` | 0010 | 租户+项目 | SELECT, INSERT | SELECT, INSERT | 7 |
 | `teaching_reservations` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 12 |
-| `teaching_runs` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 22 |
+| `teaching_runs` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 23 |
 | `teaching_tenant_budgets` | 0010 | 租户 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 8 |
 | `tenants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 3 |
 | `user_sessions` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE, DELETE | — | 6 |
@@ -270,6 +271,17 @@
 | `source_documents` | `taint_sources` | `jsonb` |
 | `source_documents` | `derived_from` | `jsonb` |
 | `source_documents` | `observed_at` | `timestamptz` |
+| `source_documents` | `fetch_attempt_id` | `text` |
+| `source_documents` | `source_content_type` | `text` |
+| `source_documents` | `raw_content_hash` | `text` |
+| `source_fetch_artifacts` | `acquisition_id` | `text` |
+| `source_fetch_artifacts` | `tenant_id` | `text` |
+| `source_fetch_artifacts` | `project_id` | `text` |
+| `source_fetch_artifacts` | `content_type` | `text` |
+| `source_fetch_artifacts` | `raw_content` | `bytea` |
+| `source_fetch_artifacts` | `content_hash` | `text` |
+| `source_fetch_artifacts` | `parser_version` | `text` |
+| `source_fetch_artifacts` | `fetched_at` | `timestamptz` |
 | `sources` | `source_id` | `text` |
 | `sources` | `tenant_id` | `text` |
 | `sources` | `project_id` | `text` |
@@ -346,6 +358,7 @@
 | `teaching_runs` | `error_detail` | `text` |
 | `teaching_runs` | `created_at` | `timestamptz` |
 | `teaching_runs` | `updated_at` | `timestamptz` |
+| `teaching_runs` | `routing_decision` | `jsonb` |
 | `teaching_tenant_budgets` | `tenant_id` | `text` |
 | `teaching_tenant_budgets` | `total_micro` | `bigint` |
 | `teaching_tenant_budgets` | `reserved_micro` | `bigint` |

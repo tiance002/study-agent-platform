@@ -19,7 +19,7 @@ body { margin: 0; color: var(--ink); background: var(--wash); font: 15px/1.6 -ap
 button, input, textarea, select { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: wait; opacity: 0.55; }
-button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 3px solid rgba(29, 93, 143, 0.28); outline-offset: 2px; }
+button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 3px solid rgba(29, 93, 143, 0.28); outline-offset: 2px; }
 
 .app-shell { min-height: 100vh; }
 .topbar { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; border-bottom: 1px solid var(--line); background: var(--paper); }
@@ -44,7 +44,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .project-item.selected { border-color: #b7c8d9; background: var(--paper); font-weight: 700; box-shadow: 0 2px 8px rgba(16, 42, 67, 0.05); }
 .project-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); flex: 0 0 auto; }
 .rail-empty, .empty-rail { color: var(--muted); font-size: 13px; }
-.project-form { margin-top: 30px; padding-top: 20px; border-top: 1px solid #cbd5e1; }
+.project-create { margin-top: 30px; border-top: 1px solid #cbd5e1; }
+.project-create > summary { display: flex; align-items: center; justify-content: space-between; padding: 14px 0; color: var(--ink-soft); cursor: pointer; font-size: 12px; font-weight: 700; list-style: none; }
+.project-create > summary::-webkit-details-marker { display: none; }
+.project-create > summary::after { content: "+"; color: var(--blue); font-size: 18px; line-height: 1; }
+.project-create[open] > summary::after { content: "-"; }
+.project-create .project-form { margin: 0; padding-top: 4px; border-top: 0; }
 
 label { display: block; margin: 14px 0 5px; color: var(--ink-soft); font-size: 12px; font-weight: 700; }
 input, textarea, select { width: 100%; border: 1px solid #bcccdc; border-radius: 5px; padding: 9px 10px; color: var(--ink); background: var(--paper); }
@@ -94,6 +99,10 @@ input::placeholder, textarea::placeholder { color: #9fb3c8; }
 .plan-form .primary-button, .source-form .primary-button { justify-self: start; margin-top: 18px; }
 .plan-summary, .source-list { margin-top: 36px; border-top: 1px solid var(--line); }
 .candidate-form { margin-top: 4px; }
+.source-search-form { display: grid; gap: 8px; margin: 18px 0 24px; }
+.source-search-controls { display: flex; align-items: center; gap: 10px; }
+.source-search-controls input { min-width: 0; flex: 1; }
+.source-search-controls .primary-button { flex: 0 0 auto; }
 .candidate-list { margin-top: 24px; }
 .candidate-row { align-items: flex-start; }
 .candidate-row a { color: var(--blue); font-size: 12px; overflow-wrap: anywhere; }
@@ -112,6 +121,7 @@ input::placeholder, textarea::placeholder { color: #9fb3c8; }
 
 .evidence-status { display: flex; align-items: center; gap: 9px; padding: 12px 0; border-bottom: 1px solid #cbd5e1; }
 .grounding { color: var(--ink-soft); font-size: 13px; }
+.routing-mode { color: var(--ink-soft); font-size: 12px; margin: 8px 0; }
 .citation-list { display: grid; gap: 12px; margin-top: 19px; }
 .citation { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 9px; padding-bottom: 12px; border-bottom: 1px solid #cbd5e1; }
 .citation-index { color: var(--blue); font: 700 12px ui-monospace, SFMono-Regular, Consolas, monospace; }
@@ -159,7 +169,8 @@ input::placeholder, textarea::placeholder { color: #9fb3c8; }
   .project-rail { border-right: 0; border-bottom: 1px solid var(--line); padding: 15px 16px; }
   .project-list { display: flex; overflow-x: auto; padding-bottom: 4px; }
   .project-item { width: max-content; min-width: 150px; }
-  .project-form { display: block; margin-top: 18px; padding-top: 15px; }
+  .project-create { margin-top: 18px; }
+  .project-create .project-form { display: block; }
   .main-column { padding: 22px 16px 48px; }
   .workspace-heading { display: block; }
   .workspace-heading h1 { font-size: 27px; }

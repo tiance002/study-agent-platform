@@ -11,6 +11,9 @@ from app.db.session import tenant_transaction, worker_transaction
 from app.identity.models import Principal
 from app.identity.ports import MembershipRepository
 from app.knowledge.acquisition import (
+    ACQUISITION_ATTEMPTS_EXHAUSTED,
+    ACQUISITION_ATTEMPTS_EXHAUSTED_DETAIL,
+    MAX_ACQUISITION_ATTEMPTS,
     AcquisitionJob,
     AcquisitionRequest,
     CandidateStatus,
@@ -18,6 +21,7 @@ from app.knowledge.acquisition import (
     SourceCandidate,
 )
 from app.knowledge.acquisition_ports import AcquisitionRepository
+from app.knowledge.fetch_artifact import AcquisitionArtifact
 from app.product.ports import ProductRepository
 
 _CANDIDATE_COLUMNS = (
@@ -33,10 +37,14 @@ _JOB_INSERT_COLUMNS = (
     "acquisition_id, tenant_id, project_id, source_id, candidate_id, requested_by,"
     " url, title, media_type, language, idempotency_key, status, attempt_count"
 )
-_CLAIM_SELECT = """
+_ARTIFACT_COLUMNS = (
+    "acquisition_id, tenant_id, project_id, content_type, raw_content, content_hash,"
+    " parser_version, fetched_at"
+)
+_CLAIM_SELECT = f"""
 SELECT acquisition_id FROM acquisition_jobs
- WHERE status = 'queued'
-    OR (status = 'running' AND lease_until < now())
+ WHERE (status = 'queued' OR (status = 'running' AND lease_until < now()))
+   AND attempt_count < {MAX_ACQUISITION_ATTEMPTS}
  ORDER BY created_at, acquisition_id
  FOR UPDATE SKIP LOCKED
  LIMIT 1
@@ -81,6 +89,25 @@ def _job_from_row(row: tuple) -> AcquisitionJob:
         created_at=row[18],
         updated_at=row[19],
     )
+
+
+def _artifact_from_row(row: tuple) -> AcquisitionArtifact:
+    artifact = AcquisitionArtifact(
+        acquisition_id=row[0],
+        tenant_id=row[1],
+        project_id=row[2],
+        content_type=row[3],
+        raw_content=bytes(row[4]),
+        parser_version=row[6],
+        fetched_at=row[7],
+    )
+    if artifact.content_hash != row[5]:
+        raise deny(
+            ErrorCode.INTERNAL_CONSISTENCY_ERROR,
+            "下载原文指纹与内容不一致",
+            acquisition_id=artifact.acquisition_id,
+        )
+    return artifact
 
 
 class PostgresAcquisitionRepository(AcquisitionRepository):
@@ -144,9 +171,7 @@ class PostgresAcquisitionRepository(AcquisitionRepository):
             or candidate.status is not CandidateStatus.DISCOVERED
         ):
             raise deny(ErrorCode.CROSS_PROJECT_DENIED, "无权创建该项目候选资料")
-        with tenant_transaction(
-            tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
-        ) as conn:
+        with tenant_transaction(tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn) as conn:
             try:
                 conn.execute(
                     "INSERT INTO source_candidates (" + _CANDIDATE_COLUMNS + ")"
@@ -168,26 +193,19 @@ class PostgresAcquisitionRepository(AcquisitionRepository):
                 raise deny(ErrorCode.PARAMS_INVALID, "候选标识已存在") from exc
         return candidate
 
-    def list_candidates(
-        self, actor: Principal, project_id: str
-    ) -> tuple[SourceCandidate, ...]:
+    def list_candidates(self, actor: Principal, project_id: str) -> tuple[SourceCandidate, ...]:
         self._require_membership(actor, project_id)
-        with tenant_transaction(
-            tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
-        ) as conn:
+        with tenant_transaction(tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn) as conn:
             rows = conn.execute(
-                "SELECT " + _CANDIDATE_COLUMNS
+                "SELECT "
+                + _CANDIDATE_COLUMNS
                 + " FROM source_candidates ORDER BY discovered_at DESC, candidate_id DESC"
             ).fetchall()
         return tuple(_candidate_from_row(row) for row in rows)
 
-    def get_candidate(
-        self, actor: Principal, project_id: str, candidate_id: str
-    ) -> SourceCandidate:
+    def get_candidate(self, actor: Principal, project_id: str, candidate_id: str) -> SourceCandidate:
         self._require_membership(actor, project_id)
-        with tenant_transaction(
-            tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
-        ) as conn:
+        with tenant_transaction(tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn) as conn:
             row = conn.execute(
                 "SELECT " + _CANDIDATE_COLUMNS + " FROM source_candidates WHERE candidate_id = %s",
                 (candidate_id,),
@@ -212,12 +230,9 @@ class PostgresAcquisitionRepository(AcquisitionRepository):
             raise deny(ErrorCode.CROSS_TENANT_DENIED, "无权创建该下载任务")
 
         try:
-            with tenant_transaction(
-                tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
-            ) as conn:
+            with tenant_transaction(tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn) as conn:
                 existing = conn.execute(
-                    "SELECT " + _JOB_COLUMNS
-                    + " FROM acquisition_jobs WHERE tenant_id = %s"
+                    "SELECT " + _JOB_COLUMNS + " FROM acquisition_jobs WHERE tenant_id = %s"
                     " AND project_id = %s AND idempotency_key = %s",
                     (actor.tenant_id, project_id, request.idempotency_key),
                 ).fetchone()
@@ -225,7 +240,8 @@ class PostgresAcquisitionRepository(AcquisitionRepository):
                     return self._assert_idempotent_match(_job_from_row(existing), request)
 
                 candidate_row = conn.execute(
-                    "SELECT " + _CANDIDATE_COLUMNS
+                    "SELECT "
+                    + _CANDIDATE_COLUMNS
                     + " FROM source_candidates WHERE candidate_id = %s FOR UPDATE",
                     (request.candidate_id,),
                 ).fetchone()
@@ -241,8 +257,7 @@ class PostgresAcquisitionRepository(AcquisitionRepository):
                 # idempotency key after waiting so a concurrent identical request
                 # returns the committed job instead of seeing only the selected state.
                 existing = conn.execute(
-                    "SELECT " + _JOB_COLUMNS
-                    + " FROM acquisition_jobs WHERE tenant_id = %s"
+                    "SELECT " + _JOB_COLUMNS + " FROM acquisition_jobs WHERE tenant_id = %s"
                     " AND project_id = %s AND idempotency_key = %s",
                     (actor.tenant_id, project_id, request.idempotency_key),
                 ).fetchone()
@@ -253,8 +268,7 @@ class PostgresAcquisitionRepository(AcquisitionRepository):
                     "INSERT INTO acquisition_jobs ("
                     + _JOB_INSERT_COLUMNS
                     + ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-                    " RETURNING "
-                    + _JOB_COLUMNS,
+                    " RETURNING " + _JOB_COLUMNS,
                     (
                         request.acquisition_id,
                         request.tenant_id,
@@ -285,13 +299,9 @@ class PostgresAcquisitionRepository(AcquisitionRepository):
                 retryable=True,
             ) from exc
 
-    def get_job(
-        self, actor: Principal, project_id: str, acquisition_id: str
-    ) -> AcquisitionJob:
+    def get_job(self, actor: Principal, project_id: str, acquisition_id: str) -> AcquisitionJob:
         self._require_membership(actor, project_id)
-        with tenant_transaction(
-            tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
-        ) as conn:
+        with tenant_transaction(tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn) as conn:
             row = conn.execute(
                 "SELECT " + _JOB_COLUMNS + " FROM acquisition_jobs WHERE acquisition_id = %s",
                 (acquisition_id,),
@@ -306,6 +316,19 @@ class PostgresAcquisitionRepository(AcquisitionRepository):
             raise ValueError("lease_seconds 必须为正整数")
         with worker_transaction(dsn=self._worker_dsn) as conn:
             conn.execute("SELECT set_config('app.worker_id', %s, true)", (worker_id,))
+            conn.execute(
+                "UPDATE acquisition_jobs"
+                " SET status = 'unknown', lease_owner = NULL, lease_until = NULL,"
+                "     claim_token = NULL, error_code = %s, error_detail = %s,"
+                "     updated_at = now()"
+                " WHERE attempt_count >= %s"
+                "   AND (status = 'queued' OR (status = 'running' AND lease_until < now()))",
+                (
+                    ACQUISITION_ATTEMPTS_EXHAUSTED,
+                    ACQUISITION_ATTEMPTS_EXHAUSTED_DETAIL,
+                    MAX_ACQUISITION_ATTEMPTS,
+                ),
+            )
             selected = conn.execute(_CLAIM_SELECT).fetchone()
             if selected is None:
                 return None
@@ -315,13 +338,83 @@ class PostgresAcquisitionRepository(AcquisitionRepository):
                 "     lease_owner = %s, lease_until = now() + make_interval(secs => %s),"
                 "     claim_token = gen_random_uuid(), updated_at = now()"
                 " WHERE acquisition_id = %s"
-                " RETURNING "
-                + _JOB_COLUMNS,
+                " RETURNING " + _JOB_COLUMNS,
                 (worker_id, float(lease_seconds), selected[0]),
             ).fetchone()
         if row is None:
             raise deny(ErrorCode.INTERNAL_CONSISTENCY_ERROR, "下载任务认领后无法回读")
         return _job_from_row(row)
+
+    def load_artifact(self, job: AcquisitionJob) -> AcquisitionArtifact | None:
+        with worker_transaction(
+            tenant_id=job.tenant_id,
+            project_id=job.project_id,
+            dsn=self._worker_dsn,
+        ) as conn:
+            row = conn.execute(
+                "SELECT " + _ARTIFACT_COLUMNS + " FROM source_fetch_artifacts WHERE acquisition_id = %s",
+                (job.acquisition_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        artifact = _artifact_from_row(row)
+        if artifact.tenant_id != job.tenant_id or artifact.project_id != job.project_id:
+            raise deny(ErrorCode.CROSS_PROJECT_DENIED, "下载原文作用域与任务不一致")
+        return artifact
+
+    def save_artifact(
+        self,
+        job: AcquisitionJob,
+        artifact: AcquisitionArtifact,
+        *,
+        claim_token: str,
+    ) -> AcquisitionArtifact:
+        if (
+            artifact.acquisition_id != job.acquisition_id
+            or artifact.tenant_id != job.tenant_id
+            or artifact.project_id != job.project_id
+        ):
+            raise deny(ErrorCode.CROSS_PROJECT_DENIED, "下载原文作用域与任务不一致")
+        with worker_transaction(
+            tenant_id=job.tenant_id,
+            project_id=job.project_id,
+            dsn=self._worker_dsn,
+        ) as conn:
+            conn.execute("SELECT set_config('app.worker_id', %s, true)", (job.lease_owner,))
+            current = conn.execute(
+                "SELECT acquisition_id FROM acquisition_jobs"
+                " WHERE acquisition_id = %s AND tenant_id = %s AND project_id = %s"
+                "   AND status = 'running' AND claim_token = %s AND lease_until > now()"
+                " FOR UPDATE",
+                (job.acquisition_id, job.tenant_id, job.project_id, claim_token),
+            ).fetchone()
+            if current is None:
+                raise deny(ErrorCode.ILLEGAL_STATE_TRANSITION, "下载任务认领已经失效")
+            conn.execute(
+                "INSERT INTO source_fetch_artifacts (" + _ARTIFACT_COLUMNS + ")"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (acquisition_id) DO NOTHING",
+                (
+                    artifact.acquisition_id,
+                    artifact.tenant_id,
+                    artifact.project_id,
+                    artifact.content_type,
+                    artifact.raw_content,
+                    artifact.content_hash,
+                    artifact.parser_version,
+                    artifact.fetched_at,
+                ),
+            )
+            row = conn.execute(
+                "SELECT " + _ARTIFACT_COLUMNS + " FROM source_fetch_artifacts WHERE acquisition_id = %s",
+                (job.acquisition_id,),
+            ).fetchone()
+        if row is None:
+            raise deny(ErrorCode.INTERNAL_CONSISTENCY_ERROR, "下载原文写入后无法回读")
+        stored = _artifact_from_row(row)
+        if stored != artifact:
+            raise deny(ErrorCode.PARAMS_INVALID, "同一下载任务的原始响应不可覆盖")
+        return stored
 
     def settle(
         self,
@@ -338,9 +431,7 @@ class PostgresAcquisitionRepository(AcquisitionRepository):
             DownloadStatus.UNKNOWN,
         }:
             raise ValueError("settle status 必须是 succeeded、failed 或 unknown")
-        if status in {DownloadStatus.FAILED, DownloadStatus.UNKNOWN} and (
-            not error_code or not safe_detail
-        ):
+        if status in {DownloadStatus.FAILED, DownloadStatus.UNKNOWN} and (not error_code or not safe_detail):
             raise ValueError("失败或未知下载必须带安全错误信息")
         with worker_transaction(
             tenant_id=job.tenant_id,

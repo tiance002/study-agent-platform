@@ -84,6 +84,7 @@
     const [projects, setProjects] = useState([]);
     const [projectId, setProjectId] = useState("");
     const [project, setProject] = useState(null);
+    const [projectFormOpen, setProjectFormOpen] = useState(false);
     const [conversations, setConversations] = useState([]);
     const [conversationId, setConversationId] = useState("");
     const [messages, setMessages] = useState([]);
@@ -114,6 +115,7 @@
       mediaType: "text/markdown",
     });
     const [candidateForm, setCandidateForm] = useState({ url: "", title: "", snippet: "" });
+    const [sourceSearchQuery, setSourceSearchQuery] = useState("");
 
     const principalId = user?.principal_id || "";
     const scopeKey = `${principalId}|${projectId}|${conversationId}`;
@@ -274,6 +276,7 @@
       setNewConversation("");
       setSourceForm({ displayName: "", title: "", content: "", mediaType: "text/markdown" });
       setCandidateForm({ url: "", title: "", snippet: "" });
+      setSourceSearchQuery("");
       setPlanForm({ goal: "", milestone: "" });
     }, [principalId, projectId]);
 
@@ -466,6 +469,7 @@
           setNotice("项目已创建");
           await refreshProjects();
           if (scopeRef.current.epoch !== renderEpoch) return;
+          setProjectFormOpen(false);
           setConversationId("");
           setProjectId(created.project_id);
         });
@@ -717,6 +721,41 @@
       }
     }
 
+    async function searchSourceCandidates(event) {
+      event.preventDefault();
+      const query = sourceSearchQuery.trim();
+      if (!projectId || !query) return;
+      setLoading(true);
+      try {
+        await executeCommand(
+          `source-search:${projectId}:${query}`,
+          "搜索资料",
+          "POST",
+          `/projects/${projectId}/source-search`,
+          { query, limit: 8 },
+          async (result) => {
+            const found = result.candidates || [];
+            setCandidates((previous) => [
+              ...found,
+              ...previous.filter((item) => !found.some((candidate) => candidate.candidate_id === item.candidate_id)),
+            ]);
+            setNotice(found.length ? `找到 ${found.length} 条候选资料，请确认后下载` : "没有找到可用资料候选");
+          }
+        );
+      } catch (caught) {
+        if (
+          caught instanceof ApiError
+          && ["SOURCE_SEARCH_DISABLED", "SOURCE_SEARCH_UNAVAILABLE"].includes(caught.payload?.code)
+        ) {
+          commandRef.current.delete(`source-search:${projectId}:${query}`);
+          setPendingCommand(null);
+        }
+        setError(errorText(caught));
+      } finally {
+        setLoading(false);
+      }
+    }
+
     async function selectCandidate(candidate) {
       if (!projectId || candidate.status !== "discovered") return;
       setLoading(true);
@@ -799,7 +838,7 @@
         "div",
         { className: "workspace" },
         h(ProjectRail, {
-          projects, projectId, setProjectId: (id) => { setConversationId(""); setProjectId(id); }, newProject, setNewProject, createProject, loading,
+          projects, projectId, setProjectId: (id) => { setConversationId(""); setProjectId(id); }, newProject, setNewProject, createProject, loading, projectFormOpen, setProjectFormOpen,
         }),
         h("main", { className: "main-column" },
           error && h("div", { className: "alert alert-error", role: "alert" }, h("span", null, error), h("button", { onClick: () => setError("") , "aria-label": "关闭错误" }, "×")),
@@ -810,7 +849,7 @@
             project && h("form", { className: "new-conversation", onSubmit: createConversation }, h("input", { value: newConversation, onChange: (event) => setNewConversation(event.target.value), placeholder: "新会话名称", "aria-label": "新会话名称" }), h("button", { className: "primary-button compact", disabled: loading }, "+ 新会话"))
           ),
           project && h(WorkspaceTabs, { view, setView }),
-          project ? h(MainView, { view, projectId, conversations, conversationId, setConversationId, currentConversation, messages, question, setQuestion, askQuestion, loading, activeRun, plan, planForm, setPlanForm, savePlan, sources, ingestionJobs, candidates, acquisitionJobs, sourceForm, setSourceForm, saveSource, candidateForm, setCandidateForm, saveCandidate, selectCandidate }) : h(EmptyProject, { onFocus: () => document.querySelector(".project-form input")?.focus() })
+          project ? h(MainView, { view, projectId, conversations, conversationId, setConversationId, currentConversation, messages, question, setQuestion, askQuestion, loading, activeRun, plan, planForm, setPlanForm, savePlan, sources, ingestionJobs, candidates, acquisitionJobs, sourceForm, setSourceForm, saveSource, candidateForm, setCandidateForm, saveCandidate, sourceSearchQuery, setSourceSearchQuery, searchSourceCandidates, selectCandidate }) : h(EmptyProject, { onFocus: () => document.querySelector(".project-create summary")?.click() })
         ),
         project && h(EvidenceRail, { activeRun, sources, projectId, plan, view, onReadCitation: readCitation, citationReading })
       )
@@ -849,15 +888,19 @@
     ));
   }
 
-  function ProjectRail({ projects, projectId, setProjectId, newProject, setNewProject, createProject, loading }) {
+  function ProjectRail({ projects, projectId, setProjectId, newProject, setNewProject, createProject, loading, projectFormOpen, setProjectFormOpen }) {
     return h("aside", { className: "project-rail" },
       h("div", { className: "rail-heading" }, h("span", null, "项目"), h("span", { className: "count" }, projects.length)),
       h("nav", { className: "project-list", "aria-label": "学习项目" }, projects.length ? projects.map((item) => h("button", { key: item.project_id, className: `project-item ${item.project_id === projectId ? "selected" : ""}`, onClick: () => setProjectId(item.project_id) }, h("span", { className: "project-dot", "aria-hidden": true }, ""), h("span", null, item.name))) : h("p", { className: "rail-empty" }, "还没有项目")),
-      h("form", { className: "project-form", onSubmit: createProject },
-        h("label", { htmlFor: "project-name" }, "新建项目"),
-        h("input", { id: "project-name", value: newProject.name, onChange: (event) => setNewProject({ ...newProject, name: event.target.value }), placeholder: "例如：Agent 工程基础" }),
-        h("textarea", { value: newProject.goal, onChange: (event) => setNewProject({ ...newProject, goal: event.target.value }), placeholder: "项目目标（可选）", rows: 3 }),
-        h("button", { className: "primary-button compact", disabled: loading || !newProject.name.trim() }, "+ 创建项目")
+      h("details", { className: "project-create", open: projectFormOpen, onToggle: (event) => setProjectFormOpen(event.currentTarget.open) },
+        h("summary", null, "新建项目"),
+        h("form", { className: "project-form", onSubmit: createProject },
+          h("label", { htmlFor: "project-name" }, "项目名称"),
+          h("input", { id: "project-name", value: newProject.name, onChange: (event) => setNewProject({ ...newProject, name: event.target.value }), placeholder: "例如：Agent 工程基础" }),
+          h("label", { htmlFor: "project-goal" }, "项目目标（可选）"),
+          h("textarea", { id: "project-goal", value: newProject.goal, onChange: (event) => setNewProject({ ...newProject, goal: event.target.value }), placeholder: "项目目标（可选）", rows: 3 }),
+          h("button", { className: "primary-button compact", disabled: loading || !newProject.name.trim() }, "+ 创建项目")
+        )
       )
     );
   }
@@ -923,7 +966,7 @@
     );
   }
 
-  function SourcesView({ sources, ingestionJobs, candidates, acquisitionJobs, sourceForm, setSourceForm, saveSource, candidateForm, setCandidateForm, saveCandidate, selectCandidate, loading }) {
+  function SourcesView({ sources, ingestionJobs, candidates, acquisitionJobs, sourceForm, setSourceForm, saveSource, candidateForm, setCandidateForm, saveCandidate, sourceSearchQuery, setSourceSearchQuery, searchSourceCandidates, selectCandidate, loading }) {
     const labels = { queued: "排队中", processing: "处理中", succeeded: "已处理", failed: "处理失败" };
     const acquisitionLabels = { queued: "等待下载", running: "下载中", succeeded: "已下载", failed: "下载失败", unknown: "待确认" };
     const latestJobs = new Map();
@@ -932,6 +975,13 @@
     });
     return h("section", { className: "content-section form-section" },
       h("div", { className: "section-title" }, h("div", null, h("p", { className: "eyebrow" }, "项目资料"), h("h2", null, `${sources.length} 份资料`))),
+      h("form", { className: "source-search-form", onSubmit: searchSourceCandidates },
+        h("label", { htmlFor: "source-search-query" }, "搜索公开资料"),
+        h("div", { className: "source-search-controls" },
+          h("input", { id: "source-search-query", value: sourceSearchQuery, onChange: (event) => setSourceSearchQuery(event.target.value), maxLength: 2000, placeholder: "输入主题或关键词", required: true }),
+          h("button", { className: "primary-button", disabled: loading || !sourceSearchQuery.trim() }, loading ? "搜索中…" : "搜索")
+        )
+      ),
       h("form", { className: "source-form candidate-form", onSubmit: saveCandidate },
         h("label", { htmlFor: "candidate-url" }, "资料网址"),
         h("input", { id: "candidate-url", type: "url", value: candidateForm.url, onChange: (event) => setCandidateForm({ ...candidateForm, url: event.target.value }), placeholder: "https://example.com/guide", required: true }),
@@ -970,12 +1020,21 @@
   function EvidenceRail({ activeRun, sources, plan, view, onReadCitation, citationReading }) {
     const statusLabel = activeRun?.status === "succeeded"
       ? activeRun.grounding === "sourced" ? "来源已核验" : "一般性回答（未核验来源）"
-      : activeRun?.status === "reconciliation_required"
+        : activeRun?.status === "reconciliation_required"
         ? "需要对账"
         : "运行状态";
+    const rewriteStatus = activeRun?.routing_decision?.query_rewrite_status;
+    const routeLabel = rewriteStatus === "applied"
+      ? "本地查询改写 · 云端教学回答"
+      : rewriteStatus === "fallback"
+        ? "关键词检索降级 · 云端教学回答"
+        : rewriteStatus === "disabled"
+          ? "关键词检索 · 云端教学回答"
+          : "";
     const evidence = activeRun
       ? h(React.Fragment, null,
         h("div", { className: "evidence-status" }, h(StatusDot, { status: activeRun.status }), h("strong", null, statusLabel)),
+        routeLabel && h("p", { className: "routing-mode" }, routeLabel),
         activeRun.grounding && h("p", { className: "grounding" }, activeRun.grounding === "sourced" ? "回答含有已核验来源" : "回答没有通过核验的来源"),
         activeRun.citations?.length
           ? h("div", { className: "citation-list" }, activeRun.citations.map((citation, index) => {

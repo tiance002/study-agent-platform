@@ -68,6 +68,8 @@ MAX_DOCUMENT_BYTES = 1_048_576
 
 #: 本轮支持的媒体类型。闭集：未知类型必须被拒绝，而不是当成纯文本放过去。
 TEXT_MEDIA_TYPES = ("text/plain", "text/markdown")
+WEB_SOURCE_CONTENT_TYPES = ("text/html", "text/markdown", "text/plain")
+WEB_PARSER_VERSIONS = ("html-to-markdown/v1", "web-text/v1")
 
 #: 原文侧解析器版本。纯文本/Markdown 以字节原样入库，**不做任何改写**
 #: （不变量：解析与切块只能增加结构元数据，不得改写证据原文）。
@@ -85,6 +87,7 @@ ACQUISITION_METHOD_WEB = "web_fetch"
 
 #: BCP-47 的宽松子集：`zh` / `en` / `zh-Hans` / `pt-BR` 都合法。
 _LANGUAGE_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]+)*$")
+_RAW_CONTENT_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class IngestionStatus(StrEnum):
@@ -133,8 +136,7 @@ def _require_utf8_size(content: str, limit: int, field_name: str) -> None:
         size = len(content.encode("utf-8"))
     except UnicodeEncodeError as exc:
         raise ValueError(
-            f"{field_name} 不是合法的 UTF-8 文本（{exc.reason}）；"
-            "本轮只支持 UTF-8 纯文本与 Markdown"
+            f"{field_name} 不是合法的 UTF-8 文本（{exc.reason}）；本轮只支持 UTF-8 纯文本与 Markdown"
         ) from exc
     if size > limit:
         raise ValueError(
@@ -185,6 +187,10 @@ class SourceDocument:
     taint_sources: tuple[TaintSource, ...] = (TaintSource.UPLOADED_SOURCE,)
     #: 由哪些事实派生而来（跨版本引用）。用户直接上传的原文为空。
     derived_from: tuple[str, ...] = ()
+    #: Web 原始响应的不可变获取记录；用户上传资料没有这些字段。
+    fetch_attempt_id: str = ""
+    source_content_type: str = ""
+    raw_content_hash: str = ""
 
     def __post_init__(self) -> None:
         require_id(self.document_id, "document_id")
@@ -201,16 +207,31 @@ class SourceDocument:
             )
         if not _LANGUAGE_RE.match(self.language):
             raise ValueError(
-                f"language 必须是 BCP-47 形式的语言标签（如 zh / en / zh-Hans），"
-                f"收到 {self.language!r}"
+                f"language 必须是 BCP-47 形式的语言标签（如 zh / en / zh-Hans），收到 {self.language!r}"
             )
         require_text(self.parser_version, "parser_version")
         require_text(self.acquisition_method, "acquisition_method")
         require_aware(self.observed_at, "observed_at")
+        provenance = (
+            self.fetch_attempt_id,
+            self.source_content_type,
+            self.raw_content_hash,
+        )
+        if self.acquisition_method == ACQUISITION_METHOD_WEB:
+            if not all(provenance):
+                raise ValueError("web provenance 必须完整记录抓取尝试、类型和指纹")
+            require_id(self.fetch_attempt_id, "fetch_attempt_id")
+            if self.source_content_type not in WEB_SOURCE_CONTENT_TYPES:
+                raise ValueError("web provenance 的原始类型不受支持")
+            if self.parser_version not in WEB_PARSER_VERSIONS:
+                raise ValueError("web provenance 的解析器版本不受支持")
+            if not _RAW_CONTENT_HASH_RE.fullmatch(self.raw_content_hash):
+                raise ValueError("web provenance 的原始内容指纹格式无效")
+        elif any(provenance):
+            raise ValueError("只有 web_fetch 文档可以记录抓取 provenance")
         if not self.taint_sources:
             raise ValueError(
-                "taint_sources 不能为空：任何进入系统的内容都有来源，"
-                "「无来源」不是一个可表达的状态"
+                "taint_sources 不能为空：任何进入系统的内容都有来源，「无来源」不是一个可表达的状态"
             )
         for source in self.taint_sources:
             _require_enum(source, TaintSource, "taint_sources[]")
@@ -239,6 +260,9 @@ class SourceDocument:
             "language": self.language,
             "parser_version": self.parser_version,
             "acquisition_method": self.acquisition_method,
+            "fetch_attempt_id": self.fetch_attempt_id,
+            "source_content_type": self.source_content_type,
+            "raw_content_hash": self.raw_content_hash,
             "taint_sources": [str(item) for item in self.taint_sources],
             "derived_from": list(self.derived_from),
             "observed_at": self.observed_at.isoformat(),
@@ -300,9 +324,7 @@ class IngestionJob:
             if not self.lease_owner.strip():
                 raise ValueError("processing 的任务必须记录租约持有者（worker id）")
             if self.lease_until is None:
-                raise ValueError(
-                    "processing 的任务必须有租约到期时间 —— 否则崩溃后无人可回收"
-                )
+                raise ValueError("processing 的任务必须有租约到期时间 —— 否则崩溃后无人可回收")
             require_aware(self.lease_until, "lease_until")
             if not self.claim_token.strip():
                 # 没有 token 的 processing 任务**永远无法落定**：`complete` / `fail`
@@ -323,9 +345,7 @@ class IngestionJob:
             require_text(self.error_code, "error_code")
             require_text(self.error_detail, "error_detail")
         elif self.error_code or self.error_detail:
-            raise ValueError(
-                f"只有 failed 的任务可以携带错误码，当前状态是 {self.status!r}"
-            )
+            raise ValueError(f"只有 failed 的任务可以携带错误码，当前状态是 {self.status!r}")
 
     @property
     def is_terminal(self) -> bool:
@@ -393,9 +413,7 @@ class StoredChunk:
         require_text(self.parser_version, "parser_version")
         require_aware(self.created_at, "created_at")
         if not isinstance(self.display_policy, DisplayPolicy):
-            raise ValueError(
-                f"display_policy 必须是 DisplayPolicy，收到 {self.display_policy!r}"
-            )
+            raise ValueError(f"display_policy 必须是 DisplayPolicy，收到 {self.display_policy!r}")
         for title in self.heading_path:
             require_text(title, "heading_path[]")
         require_non_negative(self.heading_level, "heading_level")
@@ -406,8 +424,7 @@ class StoredChunk:
             )
         if self.span_end <= self.span_start:
             raise ValueError(
-                f"span 必须满足 span_end > span_start，收到 "
-                f"[{self.span_start}, {self.span_end})"
+                f"span 必须满足 span_end > span_start，收到 [{self.span_start}, {self.span_end})"
             )
         if self.span_end - self.span_start != len(self.content):
             # 这条断言只保证**长度对口**：跨度与内容长度必须严丝合缝。
@@ -466,9 +483,7 @@ class StoredChunk:
         }
 
 
-def assert_chunks_match_document(
-    document_id: str, content: str, chunks: tuple[StoredChunk, ...]
-) -> None:
+def assert_chunks_match_document(document_id: str, content: str, chunks: tuple[StoredChunk, ...]) -> None:
     """片段内容必须是**那一版持久化原文**的精确切片。
 
     ⚠️ 这是 R4-05 修的那个缺陷：`StoredChunk` 的类型约束只保证
@@ -504,8 +519,7 @@ def assert_chunks_match_document(
         if chunk.span_start < 0 or chunk.span_end > len(content):
             raise deny(
                 ErrorCode.INTERNAL_CONSISTENCY_ERROR,
-                f"片段跨度 [{chunk.span_start}, {chunk.span_end}) 越出原文长度"
-                f"（{len(content)}）",
+                f"片段跨度 [{chunk.span_start}, {chunk.span_end}) 越出原文长度（{len(content)}）",
                 chunk_id=chunk.chunk_id,
             )
         if content[chunk.span_start : chunk.span_end] != chunk.content:
@@ -516,9 +530,7 @@ def assert_chunks_match_document(
             )
 
 
-def assert_chunks_belong_to_job(
-    job: IngestionJob, chunks: tuple[StoredChunk, ...]
-) -> None:
+def assert_chunks_belong_to_job(job: IngestionJob, chunks: tuple[StoredChunk, ...]) -> None:
     """一批片段是否可以挂到该任务上。
 
     **这是两个适配器共用的唯一判定出口。** 各写一份的话，

@@ -138,6 +138,7 @@ def build_context(
     *,
     knowledge: KnowledgeRepository,
     history: tuple[Message, ...],
+    retrieval_query: str | None = None,
 ) -> TeachingContext:
     """组装派发上下文。检索与历史预算在这里收口（服务层不再自己裁）。"""
     if len(run.question) > MAX_QUESTION_CHARS:
@@ -145,7 +146,12 @@ def build_context(
             ErrorCode.PARAMS_INVALID,
             f"问题超过 {MAX_QUESTION_CHARS} 字符上限；请拆分后再问",
         )
-    hits = knowledge.search(actor, project_id, run.question, limit=DEFAULT_MAX_MATERIALS)
+    hits = knowledge.search(
+        actor,
+        project_id,
+        retrieval_query or run.question,
+        limit=DEFAULT_MAX_MATERIALS,
+    )
     snapshot = build_snapshot(
         actor,
         project_id,

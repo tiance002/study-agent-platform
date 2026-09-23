@@ -55,7 +55,8 @@ from app.teaching.models import (
     RawCitation,
     TokenUsage,
 )
-from app.teaching.ports import TeachingProvider, TeachingRunRepository
+from app.teaching.ports import LocalQueryRewriter, TeachingProvider, TeachingRunRepository
+from app.teaching.routing import RoutingDecision
 from app.teaching.runs import RunClaim
 from app.teaching.validation import validate_citations
 
@@ -88,6 +89,7 @@ class TeachingService:
     platform_budget: PlatformPaidBudgetPort | None = None
     platform_provider: str = "unknown"
     platform_price_version: str = PRICE_VERSION
+    local_query_rewriter: LocalQueryRewriter | None = None
 
     def __post_init__(self) -> None:
         if self.clock is None:  # pragma: no cover - 装配层保证
@@ -112,8 +114,34 @@ class TeachingService:
         actor = Principal(principal_id=run.principal_id, tenant_id=run.tenant_id)
         max_input_tokens, max_output_tokens = self.teaching.get_run_limits(claim)
         history = self._history(actor, run)
+        retrieval_query = run.question
+        route = RoutingDecision(query_rewrite_status="disabled", reason_code="local_not_configured")
+        if self.local_query_rewriter is not None:
+            try:
+                rewritten = self.local_query_rewriter.rewrite(run.question)
+                if (
+                    not isinstance(rewritten, str)
+                    or not rewritten.strip()
+                    or len(rewritten) > 2000
+                ):
+                    raise ValueError("本地检索改写长度无效")
+                retrieval_query = rewritten.strip()
+                route = RoutingDecision(
+                    query_rewrite_status="applied",
+                    reason_code="local_rewrite_accepted",
+                )
+            except Exception:
+                route = RoutingDecision(
+                    query_rewrite_status="fallback",
+                    reason_code="local_unavailable_or_invalid",
+                )
         context = build_context(
-            run, actor, run.project_id, knowledge=self.knowledge, history=history
+            run,
+            actor,
+            run.project_id,
+            knowledge=self.knowledge,
+            history=history,
+            retrieval_query=retrieval_query,
         )
         est_input = self._estimate_input_tokens(context)
         if est_input > max_input_tokens:
@@ -151,9 +179,7 @@ class TeachingService:
                     reservation_id=platform_reservation_id,
                 )
                 platform_reservation_id = platform_reservation.reservation_id
-                platform_reservation_held = (
-                    platform_reservation.state is PlatformReservationState.HELD
-                )
+                platform_reservation_held = platform_reservation.state is PlatformReservationState.HELD
                 # Mark the durable platform reservation before the teaching
                 # attempt.  A crash between these two operations conservatively
                 # leaves an in-flight obligation rather than allowing a second
@@ -179,7 +205,8 @@ class TeachingService:
                 attempt_id=attempt_id,
                 estimated_input_tokens=est_input,
                 estimated_output_tokens=max_output_tokens,
-                request_payload=self._serialize_request(request),
+                request_payload=self._serialize_request(request) | {"routing_decision": route.to_dict()},
+                routing_decision=route,
             )
         except PlatformError as exc:
             if platform_reservation_id is not None and platform_budget is not None:
@@ -245,9 +272,7 @@ class TeachingService:
                 provider_request_id=result.provider_request_id,
                 payload=payload,
             )
-            self._settle_platform(
-                platform_reservation_id, result.usage, max_input_tokens, max_output_tokens
-            )
+            self._settle_platform(platform_reservation_id, result.usage, max_input_tokens, max_output_tokens)
             self.teaching.finish_run(
                 claim,
                 attempt_id=attempt_id,
@@ -270,9 +295,7 @@ class TeachingService:
                 safe_detail="provider 失败但没有可采纳的权威用量；待对账",
             )
             return "reconciliation_required"
-        self._settle_platform(
-            platform_reservation_id, settled_usage, max_input_tokens, max_output_tokens
-        )
+        self._settle_platform(platform_reservation_id, settled_usage, max_input_tokens, max_output_tokens)
         self.teaching.fail_run(
             claim,
             error_code=f"PROVIDER_{result.status.value.upper()}",
@@ -368,9 +391,7 @@ class TeachingService:
 
     def _history(self, actor: Principal, run) -> tuple:
         """会话历史（不含本次问题：它在 prompt 的 QUESTION 区）。"""
-        messages = self.products.list_messages(
-            actor, run.project_id, run.conversation_id
-        )
+        messages = self.products.list_messages(actor, run.project_id, run.conversation_id)
         user_message = next((m for m in messages if m.message_id == run.user_message_id), None)
         if user_message is None:
             return ()
@@ -392,10 +413,7 @@ class TeachingService:
         """用量是否可采纳。缺失或越界一律返回 None（敞口保留，进对账）。"""
         if usage is None:
             return None
-        if (
-            usage.input_tokens > max_input_tokens
-            or usage.output_tokens > max_output_tokens
-        ):
+        if usage.input_tokens > max_input_tokens or usage.output_tokens > max_output_tokens:
             # 越界的"权威用量"本身不可信。不静默截断消费值 ——
             # 截断会伪造一条不存在的账目；敞口是诚实的未知。
             return None
@@ -462,8 +480,7 @@ class TeachingService:
             "max_output_tokens": request.max_output_tokens,
             "deadline": request.deadline.isoformat(),
             "messages": [
-                {"role": str(message.role), "content": message.content}
-                for message in request.messages
+                {"role": str(message.role), "content": message.content} for message in request.messages
             ],
             "artifacts": [item.as_citation_dict() | {"content": item.content} for item in request.artifacts],
         }

@@ -710,3 +710,83 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - 资料页新增候选 URL 登记、显式“确认下载”、状态展示和有限轮询；原有本地资料上传保持不变。当前是手工 URL 纵切，云端搜索 provider、HTML 解析、混合检索与模型路由尚未完成。
 - 真实 PG 临时库已验证应用角色创建候选、worker 认领/结算，以及 web 正文进入摄取队列；针对本轮的内存/PG/API/worker 回归通过。`node --check frontend/app.js`、Ruff、mypy（120 个源文件）、迁移检查和生成契约检查通过。
 - 未切换 ECS：`0014` 尚未发布，且搜索/解析/路由任务仍未达到第九轮退出门。GitHub 上传要等本轮代码门禁完成后统一提交并推送。
+
+## 2026-09-23 · 第九轮搜索接入继续
+
+- 恢复工作区后确认当前分支为 `codex/round8-residual-20260922`，HEAD `e2e0b9f`；搜索适配器、搜索 API/UI 和迁移 `0015` 均为本地未提交改动，尚未部署生产。
+- 冻结方案允许受控云端搜索；用户明确不设月度金额拒绝，但方案仍要求请求超时、循环和重试边界。新增搜索频率约束应复用现有持久 RateLimiter，不改预算语义。
+- `0014` 已是已发布迁移历史，工作区将其媒体类型约束改窄属于迁移历史漂移；应恢复 `0014` 原内容，由 `0015` 前向收紧，并将启动期望 schema 设为 `0015`。
+- 当前完成项仅为实现中的搜索纵切；待完成：持久限流及拒绝响应测试、迁移升级/降级往返、全量回归与静态门禁、GitHub 推送。第九轮余下解析/检索/路由/浏览器流程仍不能宣称完成，也不应部署 ECS。
+- 新增限流 API 回归并先运行，当前实现稳定复现缺陷：同一 Cookie 用户在窗口内发起第 21 次新幂等搜索仍返回 200，且会继续调用 provider；修复应在外部调用前基于 account identity 限流，幂等 replay 不消耗额度。
+- 已补 account 级匿名哈希桶与 20 次/10 分钟持久限流，限流拒绝使用既有 `RATE_LIMITED` 契约。搜索/获取/API 定向套件现为 19 passed；Node 语法通过。Ruff 暴露 `test_source_discovery.py` 的导入排序问题，准备机械整理后继续 PG 与全量门禁。
+- 完成 Ruff 与全仓 mypy：121 个源文件通过；PG 新测试证明 `PostgresRateLimiter` 被重建后继续沿同一个 20/10 分钟窗口累计，到第 21 次拒绝。迁移结构检查确认单头为 `0015`；`0014` 已恢复为 HEAD 原内容。
+- 前端恢复路径审查发现一处跨层错误：搜索 provider 的 503 已被幂等层缓存，通用 UI 却把所有 5xx 作为“未知”并用同一 key 重试，因此用户会被永久困在同一个缓存 503。需在搜索界面将稳定搜索错误作为已知失败处理、清除旧命令并允许用户显式发起新搜索（新 key），同时保留网络断开等真正未知状态。
+- 修正搜索错误恢复后，复核发现首次机械补丁曾误落在通用 retry handler，引用了该作用域不存在的 `query`；已移除并移至搜索自己的 catch。该控制流需要浏览器故障注入覆盖，单靠 `node --check` 不足以验收。
+- 搜索 provider 的 503 文案现明确提示再次搜索会创建新请求、可能产生额外费用；API 测试补充同 key replay 只调用一次、新 Idempotency-Key 才会发起第二次尝试。
+- 真实 Playwright 浏览器故障注入通过 `ROUND8_BROWSER_PASSED`：503 后不显示“用同一请求重试”，第二次主动搜索的 Idempotency-Key 与第一次不同、请求体保持一致；原有注册、项目、会话、资料、计划、教学重试与引用流程也通过。
+- 独立迁移往返脚本第一次因 stdin 脚本未将 `backend` 放入 `sys.path` 而在导入 `pg_support` 前退出；未创建临时库。将修正脚本入口路径后重跑。
+- 迁移往返重跑已通过：隔离临时库从 `0015` 降至 `0014` 再升至 `0015`，没有触碰本机业务库。此前执行中断后该验证已完成，前一条“准备重跑”为过时状态。
+
+### HTML 来源解析方案（遵循已冻结的第九轮计划）
+
+- 保持引用坐标绑定到规范化后的 `SourceDocument.content`，绝不让 chunk span 指向原始 HTML 的字节偏移。
+- 下载原始响应作为独立、append-only 的 acquisition artifact 保存，限制在项目 RLS 下且仅 worker 角色可读写；保存 hash、原始 content type、解析器版本和 acquisition ID。
+- HTML 在 worker 中转为确定性 Markdown（保留标题/段落/列表/代码块，剔除 script/style/nav 等非正文）；规范文本经现有摄取器切块，source document 保存 fetch attempt、原始 content type/hash 和 parser version，引用仍可从规范文本精确回读。
+- 确定性恢复优先读取已持久 artifact；worker 若在下载后崩溃，租约重领时不重复访问外网。该方案比把原始 HTML 暴露给 app role 或丢弃原始响应更符合项目的 RLS、引用和未知结果边界。
+- HTML parser 与 worker 集成测试已先行添加。首轮红灯包含预期的 parser 模块不存在，以及测试自身错误使用了含中文的 bytes literal；后者已改为 UTF-8 显式编码，继续以预期行为失败作为实现起点。
+
+## 2026-09-23 · HTML artifact 与有界恢复纵切
+
+- 新增 0016：worker-only source_fetch_artifacts，项目 RLS、原始响应最大 1 MiB、内容 hash 校验、append-only SELECT/INSERT 权限；study_app 无任何表权限。source_documents 增加 fetch attempt、原始 content type/hash，并以组合外键指向 artifact。
+- Worker 先检查既存 artifact；缺少时才有界抓取并先保存原始字节，再确定性把 HTML 转 Markdown，保留标题/段落/代码结构并剔除导航/脚本/样式。规范文本继续走旧摄取器，因此 citation span 对齐存储的规范文本，而非 HTML 字节。
+- 内存与 PG source document 都持久化 parser version 和原始抓取 provenance；stable document/job replay 同时核对内容与来源指纹。已覆盖保存 artifact 后进程崩溃、重领时不重复外部抓取。
+- 复核旧租约状态机发现过期任务此前可无限重领。新增三次 claim 上限；最后一次 lease 过期后持久转 unknown / ACQUISITION_ATTEMPTS_EXHAUSTED，不自动再次请求外部站点。内存固定时钟与 PG 真实角色测试均通过。
+- 首次全量回归为 898 passed, 1 skipped, 3 failed：其中两项是生成 contract hash 漂移；PG 列核对发现 SQL contract extractor 只识别一条 ADD COLUMN。已重新生成 protocol/sql-schema 视图，并把 migration 三列拆成单列 DDL；相关 16 项复测通过。全量套件需在后续代码变更完成后重跑。
+- 第一次跨文件 apply_patch 因上下文不匹配没有落地；按模块拆分后完成。一次带引号的 PowerShell 迁移检查命令未提供输出，拆开执行后 check_migrations --require-active 确认 0016 单头。
+
+## 2026-09-23 · 本地改写路由、获取幂等与统一门禁
+
+- 补完可选本地查询改写：只接受字面 loopback、闭合 JSON 响应、单次请求和严格超时；不可用时回退关键词检索，最终教学答案仍由既有云端 provider 生成。路由决策已随教学派发持久化，迁移 head 为 `0017`；未配置本地模型时默认关闭。
+- web 获取按 source identity、内容 hash 和 parser version 复用非失败文档/任务；正文变化创建新版本。PG 使用来源级 advisory transaction lock 避免并发重复版本；失败内容允许显式新版本重试，上传路径不改。
+- 添加 HTML artifact→规范文本→摄取→检索→引用原文回读测试，覆盖内存与 PostgreSQL；Playwright 加入搜索候选显式确认、下载状态和默认关键词/云端路由标签。
+- 行尾门禁第一次误扫 `.codex/.serena` 工具缓存；修为在 `os.walk` 阶段剪枝工具目录，定向检查 `3 passed`。
+- 统一门禁通过：全量 `924`（`923 passed, 1 skipped`），PostgreSQL `143 passed, 0 skipped`；Ruff、mypy（125 个源文件）、compileall、Node、生成契约、Playwright `ROUND8_BROWSER_PASSED` 与 `git diff --check` 通过。预览服务器已停止。
+- 尚未闭合：第八轮 C1/C2/C3 真实逆序响应矩阵、真实 Uvicorn 重启/中断恢复；第九轮 pgvector/hybrid retrieval 与 ECS 可安装性评估、完整 acquisition/provider 指标；本地模型和搜索 provider 仍需用户在环境配置凭据/模型。未部署、未提交、未推送，当前工作区仍有用户/工具生成的未跟踪目录，必须保留。
+
+## 2026-09-23 · 第八轮 C1/C2/C3 真实浏览器矩阵
+
+- 扩展 `tools/check_round8_browser.py`：临时拦截真实 fetch 已收到的响应，在切换作用域后再释放，并移除 AbortSignal，专门验证 principal/project/conversation scope guard。
+- C1 通过：项目 A 的计划、消息和完成态运行响应晚到；切换项目 B 后计划标记仍属 B，A 消息与 run strip 不回写。
+- C2 通过：同项目会话一的消息与运行响应晚到；切换会话二后只显示会话二问题。
+- C3 通过：用户一的真实完成态消息和带引用运行响应被暂扣；登出、用户二登录并创建自己的项目/会话后释放，答案、引用入口、notice、run strip、草稿均没有串入。
+- 排障记录：第一次测试钩子把 `targets` 设为数组导致 GET `.has()` TypeError，造成 POST 已提交而项目列表刷新失败；改为 `Set` 后恢复。Playwright 故障注入 route 在断言后立即卸载。临时 `frontend/app.js` console 诊断已撤销，没有产品代码改动。
+- R8 计划现勾选 C1/C2/C3，独立浏览器验收输出 `ROUND8_BROWSER_PASSED`。仍需 R8-H 真实 Uvicorn + PG 进程重启读回、R8-I 网络中断/恢复，以及 R8-G 单独证据；下一步处理重启/中断矩阵。
+
+## 2026-09-23 · R8-H/R8-I 真实进程恢复
+
+- 新增 `tools/check_round8_process_recovery.py`，以隔离 `study_test_*` DB + 真 HTTP + 两个独立 OS 进程（Uvicorn web、ingestion/teaching worker）验收，并加入统一 gate。
+- Cookie 注册后建会话/计划/资料、等待真实 worker 摄取、创建教学 run 并回读精确 citation span；停掉 web/worker 并各自新进程启动后，原 Cookie 仍有效，run、消息、计划、来源、摄取状态和引用均可回读，原幂等请求重放指向同一个 run，settled 教学/平台预算及 provider attempt 只有一份。
+- 网络中断用本机 TCP 代理转发请求并确认上游已提交 `202`，再截断响应体。客户端收到协议层读取错误后以同 key 重试，命中持久 HTTP 幂等缓存，只有一个 run。
+- 未知结果路径：停掉正常 worker，blocker provider 标记 generate 已开始后立即强杀进程；只在临时测试库把租约置过期，再启动新 worker。最终 `reconciliation_required`、provider attempt `unknown`、两种预算预留 `in_flight`、call count 不增，未自动重复付费。
+- 独立进程测试实际通过：`ROUND8_PROCESS_RECOVERY_PASSED`，报告 `var/round8-process-recovery/run-74c15d2c10/summary.json`；无真实 DeepSeek/OpenAI 调用。R8-H/R8-I 现勾选。
+- R8-G 全新用户已覆盖注册/建项目/会话/资料/计划/提问/引用的主体流程、键盘注册与 390/768/1440 溢出断言，但计划要求的全新用户双视口完整闭环/截图人工核验还需确认；统一门禁整体仍待重跑。
+
+## 2026-09-23 · R8-G 与退出门最终补验
+
+- 在登录后的 390x844 视口完成注册用户工作流；补充长中文项目名、长引用及搜索 503 提示下的横向溢出断言，并保存答案/引用、计划、资料状态截图。
+- 同一注册用户在独立项目、1440x900 再走项目、会话、资料、处理状态、计划、教学与精确引用闭环。768x900 纯键盘路径覆盖注册、建项目、会话、资料、计划、提问、打开原文引用。
+- 截图位于 `var/round8-g-final-browser/`：移动端答案引用/计划/资料状态、桌面答案引用/计划/资料状态、键盘工作区；已人工查看。长标题折行、证据原文折行，没有控件覆盖或横向滚动。
+- 最终版本浏览器脚本独立运行输出 `ROUND8_BROWSER_PASSED`，Ruff 通过。一次断言同时匹配证据栏与资料列表的同名标题，已将 locator 收窄到来源列表；未改产品逻辑。
+- 统一 gate 在新增最终移动端截图断言前通过：全量 `924 tests`（`923 passed, 1 skipped, 0 failures/errors`），PostgreSQL `143 passed, 0 skipped`；Ruff、mypy 125 源文件、compileall、Node、生成契约、桌面/键盘浏览器矩阵和进程恢复均通过。之后仅扩展浏览器验收脚本，最终完整浏览器脚本已单独在全新预览进程中通过。
+- 单个全量 skip 为 `backend.tests.test_teaching_repositories::test_concurrent_reservation_on_last_slot_has_one_winner[memory]`；内存适配器不模拟跨线程争抢，PG 对应用例在 143 项 PostgreSQL 子集中实际执行并通过。
+- 最近进程恢复 summary：`var/round8-process-recovery/run-01493a9f26/summary.json`。临时 `study_test_*` PG、Uvicorn 与 worker 子进程重启读回、截断响应同 key 回放、派发后强杀并转待对账全通过；确定性 fixture provider，无真实付费网络请求。
+- ECS 仅作只读 pgvector 可用性检查：`120.55.115.162` 为 PostgreSQL 16.15，仓库存在 `postgresql-16-pgvector 0.6.0-1` 候选包，但扩展本身未安装。本轮未安装软件、未执行生产 DDL、未发布 `0014-0017`；RLS、迁移权限和降级评测仍是第九轮工作。
+- 工作区尚未提交或推送。上传时需排除用户暂存的 `.agents/.codex/.serena` 集成文件与未跟踪工具目录，只提交项目实现、测试和本轮记录。
+
+## 2026-09-23 · R8-G 项目表单移动端复核
+
+- 在独立预览中重跑浏览器矩阵得到 `ROUND8_BROWSER_PASSED`，但截图复核发现项目创建成功后原生 `<details>` 仍保持展开，移动端表单占用首屏较大区域；当前状态转换尚未满足 R8-G 折叠目标。
+- 已移除浏览器脚本中一个并不存在于实际项目选择态的额外“创建项目”点击；真实入口是可键盘操作的“新建项目” disclosure。产品修复待测试先红后实现。
+- 回归断言先失败于创建成功后 `.project-form` 仍可见；将 `open` 状态提升至 React 并只在当前作用域下服务端确认成功时收起后，浏览器矩阵转绿：`ROUND8_BROWSER_PASSED`。移动端新截图 `var/round8-project-disclosure-green/workbench-mobile-plan.png` 确认创建表单收起，项目标题与引用正文正常折行。
+- 统一 gate 首次复跑因复用了独立浏览器测试后的同一个预览进程，第二账号注册触发持久限流；未调整限流逻辑。改用全新 8009 预览进程/数据目录后完整通过：全量 JUnit `924 tests: 923 passed, 1 skipped, 0 failures/errors`；PG `143 passed, 0 skipped`；Ruff、mypy（125 个源文件）、compileall、Node、三份契约、浏览器 `ROUND8_BROWSER_PASSED` 与进程恢复 `ROUND8_PROCESS_RECOVERY_PASSED` 均通过。日志有 11 条全量/7 条 PG 依赖弃用 warning，无失败。进程恢复报告：`var/round8-process-recovery/run-fdde79e893`。
+- 修复后的最终项目表单状态已纳入上述完整 gate；GitHub 提交/推送仍待完成，必须排除用户已暂存的 `.agents/.codex/.serena` 集成文件与未跟踪工具目录。

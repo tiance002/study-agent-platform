@@ -25,6 +25,7 @@ from app.core.hashing import canonical_json
 from app.core.ids import new_id
 from app.identity.models import Principal
 from app.knowledge.acquisition import AcquisitionRequest, SourceCandidate
+from app.knowledge.discovery import SearchResult
 from app.knowledge.fetch_policy import FetchPolicyError, validate_fetch_target
 from app.knowledge.models import MAX_DOCUMENT_BYTES, require_document_content
 from app.knowledge.retrieval import RANKING_VERSION
@@ -45,6 +46,10 @@ router = APIRouter()
 CONTENT_MAX_CHARS = 32_000
 TITLE_MAX_CHARS = 200
 GOAL_MAX_CHARS = 2000
+# Provider calls have a bounded per-account rate; this is independent of the
+# platform's monthly monetary budget, which remains uncapped.
+SOURCE_SEARCH_RATE_LIMIT = 20
+SOURCE_SEARCH_WINDOW_SECONDS = 600
 #: 资料标题上限。比会话标题宽松：文献标题常带编号与副标题，200 字容易不够。
 DOCUMENT_TITLE_MAX_CHARS = 300
 #: 查询串上限。单次检索的工作量 ≈ 查询项数 × 项目内片段数，两头都要有界。
@@ -166,6 +171,13 @@ class AcquisitionSelectBody(BaseModel):
     language: str = Field(default="zh", pattern=r"^[a-z]{2,3}(-[A-Za-z0-9]+)*$")
 
 
+class SourceSearchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=2000)
+    limit: int = Field(default=8, ge=1, le=10)
+
+
 class DiagnosisBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -189,9 +201,7 @@ class SubmissionBody(BaseModel):
 
 
 @router.post("/projects/{project_id}/conversations", status_code=201, response_model=None)
-def create_conversation(
-    request: Request, project_id: str, body: ConversationBody
-) -> dict | JSONResponse:
+def create_conversation(request: Request, project_id: str, body: ConversationBody) -> dict | JSONResponse:
     from app.api.http_idempotency import idempotent_write
 
     with idempotent_write(request, body) as guard:
@@ -249,9 +259,7 @@ def append_message(
 
 
 @router.get("/projects/{project_id}/conversations/{conversation_id}/messages")
-def list_messages(
-    request: Request, project_id: str, conversation_id: str
-) -> dict:
+def list_messages(request: Request, project_id: str, conversation_id: str) -> dict:
     state = _state(request)
     rows = state.products.list_messages(_actor(request), project_id, conversation_id)
     return {"messages": [m.to_dict() for m in rows]}
@@ -373,9 +381,7 @@ def _candidate_domain(url: str) -> str:
 
 
 @router.post("/projects/{project_id}/source-candidates", status_code=201, response_model=None)
-def create_source_candidate(
-    request: Request, project_id: str, body: CandidateBody
-) -> dict | JSONResponse:
+def create_source_candidate(request: Request, project_id: str, body: CandidateBody) -> dict | JSONResponse:
     """登记一个待用户确认的 URL 候选；这里不访问外网。"""
     from app.api.http_idempotency import idempotent_write
 
@@ -412,6 +418,87 @@ def list_source_candidates(request: Request, project_id: str) -> dict:
     return {"candidates": [row.to_dict() for row in rows]}
 
 
+@router.post("/projects/{project_id}/source-search", response_model=None)
+def search_source_candidates(
+    request: Request, project_id: str, body: SourceSearchBody
+) -> dict | JSONResponse:
+    """Discover bounded metadata candidates and persist them in project scope."""
+    from app.api.http_idempotency import idempotent_write
+
+    with idempotent_write(request, body) as guard:
+        if guard.replay:
+            return JSONResponse(
+                status_code=guard.cached_status_code,
+                content=guard.cached_body,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+        state = _state(request)
+        provider = state.source_search_provider
+        from app.core.errors import ErrorCode, PlatformError, deny
+
+        if provider is None:
+            raise deny(ErrorCode.SOURCE_SEARCH_DISABLED, "资料搜索尚未配置")
+
+        principal = guard.principal
+        rate_key = (
+            "source_search:"
+            + sha256(f"{principal.tenant_id}\0{principal.principal_id}".encode("utf-8")).hexdigest()
+        )
+        decision = state.rate_limiter.register(
+            rate_key,
+            now=state.clock.now(),
+            limit=SOURCE_SEARCH_RATE_LIMIT,
+            window_seconds=SOURCE_SEARCH_WINDOW_SECONDS,
+        )
+        if not decision.allowed:
+            raise PlatformError(
+                code=ErrorCode.RATE_LIMITED,
+                message="资料搜索过于频繁，请稍后再试",
+                retryable=True,
+                details={"retry_after_seconds": decision.retry_after_seconds},
+            )
+        try:
+            results: tuple[SearchResult, ...] = provider.search(body.query, limit=body.limit)
+        except (RuntimeError, ValueError) as exc:
+            from app.core.errors import ErrorCode, deny
+
+            del exc
+            error = deny(
+                ErrorCode.SOURCE_SEARCH_UNAVAILABLE,
+                "搜索结果暂时无法确认；再次搜索会发起新请求，可能产生额外费用",
+            )
+            payload = error.to_payload()
+            guard.complete(503, payload)
+            return JSONResponse(status_code=503, content=payload)
+
+        now = state.clock.now()
+        candidates: list[SourceCandidate] = []
+        seen_urls: set[str] = set()
+        for result in results:
+            try:
+                safe_url = CandidateBody(url=result.url, title=result.title, snippet=result.snippet).url
+                if safe_url in seen_urls:
+                    continue
+                seen_urls.add(safe_url)
+                candidate = SourceCandidate(
+                    candidate_id=new_id("cand"),
+                    tenant_id=guard.principal.tenant_id,
+                    project_id=project_id,
+                    url=safe_url,
+                    title=result.title[:300],
+                    snippet=result.snippet[:2000],
+                    source_domain=_candidate_domain(safe_url),
+                    discovered_at=now,
+                    expires_at=now + timedelta(days=7),
+                )
+                candidates.append(state.acquisition.create_candidate(guard.principal, project_id, candidate))
+            except (ValueError, FetchPolicyError):
+                continue
+        payload = {"candidates": [candidate.to_dict() for candidate in candidates]}
+        guard.complete(200, payload)
+        return payload
+
+
 @router.post(
     "/projects/{project_id}/source-candidates/{candidate_id}/select",
     status_code=202,
@@ -434,9 +521,7 @@ def select_source_candidate(
                 headers={"X-Idempotent-Replay": "true"},
             )
         state = _state(request)
-        candidate = state.acquisition.get_candidate(
-            guard.principal, project_id, candidate_id
-        )
+        candidate = state.acquisition.get_candidate(guard.principal, project_id, candidate_id)
         source = state.products.register_source(
             guard.principal,
             project_id,
@@ -466,9 +551,7 @@ def select_source_candidate(
             ),
         )
         result = {
-            "candidate": state.acquisition.get_candidate(
-                guard.principal, project_id, candidate_id
-            ).to_dict(),
+            "candidate": state.acquisition.get_candidate(guard.principal, project_id, candidate_id).to_dict(),
             "source": source.to_dict(),
             "acquisition": queued.to_dict(),
         }
@@ -597,9 +680,7 @@ class KnowledgeSearchBody(BaseModel):
 
 
 @router.post("/projects/{project_id}/knowledge/search")
-def search_knowledge(
-    request: Request, project_id: str, body: KnowledgeSearchBody
-) -> dict:
+def search_knowledge(request: Request, project_id: str, body: KnowledgeSearchBody) -> dict:
     """项目内中文关键词检索。返回候选、谱系引用与**保守的**证据判定。
 
     ⚠️ 这里的 POST 是"用请求体传查询条件"，不是命令：它**没有副作用**，
@@ -703,10 +784,7 @@ def _task_verified(events, task_id: str) -> bool:
         if event.task_id != task_id or event.kind is not EvidenceKind.LEARNING:
             continue
         for verdict in event.verdicts:
-            if (
-                verdict.assessment_validity is Validity.VALID
-                and verdict.direction is Direction.POSITIVE
-            ):
+            if verdict.assessment_validity is Validity.VALID and verdict.direction is Direction.POSITIVE:
                 return True
     return False
 
@@ -743,9 +821,7 @@ def transition_task(
         )
         result = {
             **task.to_dict(),
-            "verified": _task_verified(
-                state.evidence.events_for(guard.principal, project_id), task_id
-            ),
+            "verified": _task_verified(state.evidence.events_for(guard.principal, project_id), task_id),
         }
         guard.complete(200, result)
         return result
@@ -768,9 +844,7 @@ def _diagnosis_summary(body: DiagnosisBody) -> str:
 
 
 @router.post("/projects/{project_id}/diagnosis", status_code=201, response_model=None)
-def create_diagnosis(
-    request: Request, project_id: str, body: DiagnosisBody
-) -> dict | JSONResponse:
+def create_diagnosis(request: Request, project_id: str, body: DiagnosisBody) -> dict | JSONResponse:
     from app.api.http_idempotency import idempotent_write
 
     with idempotent_write(request, body) as guard:
@@ -821,26 +895,44 @@ def _generated_bundle(
         task_id = new_id("task")
         milestones.append(
             Milestone(
-                milestone_id, actor.tenant_id, project_id, plan_id,
-                order, milestone_title, "",
+                milestone_id,
+                actor.tenant_id,
+                project_id,
+                plan_id,
+                order,
+                milestone_title,
+                "",
             )
         )
         tasks.append(
             LearningTask(
-                task_id, actor.tenant_id, project_id, milestone_id,
-                0, task_title, TaskStatus.PENDING,
+                task_id,
+                actor.tenant_id,
+                project_id,
+                milestone_id,
+                0,
+                task_title,
+                TaskStatus.PENDING,
             )
         )
         assessments.append(
             TaskAssessment(
-                new_id("asm"), task_id, component,
-                "self-report/v1", "graph-v1/task-v1",
+                new_id("asm"),
+                task_id,
+                component,
+                "self-report/v1",
+                "graph-v1/task-v1",
             )
         )
     bundle = PlanBundle(
         LearningPlan(
-            plan_id, actor.tenant_id, project_id, 1, goal,
-            PlanStatus.ACTIVE, now,
+            plan_id,
+            actor.tenant_id,
+            project_id,
+            1,
+            goal,
+            PlanStatus.ACTIVE,
+            now,
         ),
         tuple(milestones),
         tuple(tasks),
@@ -849,9 +941,7 @@ def _generated_bundle(
 
 
 @router.post("/projects/{project_id}/plan/generate", status_code=201, response_model=None)
-def generate_plan(
-    request: Request, project_id: str, body: GeneratePlanBody
-) -> dict | JSONResponse:
+def generate_plan(request: Request, project_id: str, body: GeneratePlanBody) -> dict | JSONResponse:
     from app.api.http_idempotency import idempotent_write
     from app.core.errors import ErrorCode, deny
 
@@ -868,12 +958,13 @@ def generate_plan(
             raise deny(ErrorCode.PARAMS_INVALID, "请先完成基础诊断，再生成学习计划")
         project = state.membership.get(guard.principal, project_id)
         bundle, assessments = _generated_bundle(
-            guard.principal, project_id, project.goal, diagnosis.summary,
+            guard.principal,
+            project_id,
+            project.goal,
+            diagnosis.summary,
             now=state.clock.now(),
         )
-        saved = state.learning_loop.install_generated_plan(
-            guard.principal, project_id, bundle, assessments
-        )
+        saved = state.learning_loop.install_generated_plan(guard.principal, project_id, bundle, assessments)
         result = {
             "generator": "template/graph-v1",
             "plan": saved.plan.to_dict(),
@@ -889,9 +980,7 @@ def generate_plan(
     status_code=201,
     response_model=None,
 )
-def submit_task(
-    request: Request, project_id: str, task_id: str, body: SubmissionBody
-) -> dict | JSONResponse:
+def submit_task(request: Request, project_id: str, task_id: str, body: SubmissionBody) -> dict | JSONResponse:
     from app.api.http_idempotency import idempotent_write
 
     with idempotent_write(request, body) as guard:
@@ -925,7 +1014,5 @@ def submit_task(
 
 @router.get("/projects/{project_id}/tasks/{task_id}/submissions")
 def list_task_submissions(request: Request, project_id: str, task_id: str) -> dict:
-    rows = _state(request).learning_loop.submissions_for_task(
-        _actor(request), project_id, task_id
-    )
+    rows = _state(request).learning_loop.submissions_for_task(_actor(request), project_id, task_id)
     return {"submissions": [row.to_dict() for row in rows]}

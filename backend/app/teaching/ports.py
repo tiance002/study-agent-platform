@@ -22,6 +22,7 @@ from typing import Protocol, runtime_checkable
 
 from app.identity.models import Principal
 from app.teaching.models import ProviderRequest, ProviderResult, TokenUsage
+from app.teaching.routing import RoutingDecision
 from app.teaching.runs import Grounding, RunClaim, RunStatus, TeachingEvent, TeachingRun
 
 
@@ -36,6 +37,12 @@ class TeachingProvider(Protocol):
     """
 
     def generate(self, request: ProviderRequest) -> ProviderResult: ...
+
+
+class LocalQueryRewriter(Protocol):
+    """Optional local-only helper; its output may affect retrieval terms only."""
+
+    def rewrite(self, question: str) -> str: ...
 
 
 class TeachingRunRepository(Protocol):
@@ -115,6 +122,7 @@ class TeachingRunRepository(Protocol):
         estimated_input_tokens: int,
         estimated_output_tokens: int,
         request_payload: dict | None = None,
+        routing_decision: RoutingDecision | None = None,
     ) -> None:
         """派发前持久化：写 attempt 行 + 预算 held → in_flight。
 
@@ -173,9 +181,7 @@ class TeachingRunRepository(Protocol):
         """
         ...
 
-    def require_reconciliation(
-        self, claim: RunClaim, *, error_code: str, safe_detail: str
-    ) -> TeachingRun:
+    def require_reconciliation(self, claim: RunClaim, *, error_code: str, safe_detail: str) -> TeachingRun:
         """结果或费用未知：run → reconciliation_required，敞口原样保留。"""
         ...
 

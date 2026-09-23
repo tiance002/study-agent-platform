@@ -378,4 +378,45 @@ R4-05 之后写入的片段都经过"与持久化原文比对"，但**在此之�
 - “读取列清单”不能复用为“插入列清单”：`acquisition_jobs` 的完整 20 列返回集合与 queued 初始值只有 13 个，真实 PG 才暴露了 `INSERT has more target columns than expressions`。现在写入列与回读列分开命名。
 - acquisition 成功与摄取入队跨两个仓储事务，worker 可能在摄取提交后、acquisition settle 前崩溃。用 acquisition 派生的稳定 `document_id/job_id`，并让内存/PG 摄取路径能识别同一稳定写入，才能在重试时回读既有结果而不是生成第二版原文；这仍需要后续增加更完整的对账状态观察。
 - API 只允许无 DNS 的候选 URL 语法/私网字面量检查，worker 在真正连接前再次解析并校验 DNS/IP；否则 web 请求为了验证候选而访问外网，会把安全副作用放回请求线程。
+
+## 2026-09-23 · R9 路由与恢复复核
+
+- 本轮统一门禁实际完成 `924` 项全量测试（`923 passed, 1 skipped`），PostgreSQL 专项 `143 passed, 0 skipped`；Ruff、mypy（125 个源文件）、compileall、Node 语法、三份生成契约、Playwright 与 `git diff --check` 均通过。
+- 门禁最初唯一失败不是业务代码：LF 检查误扫本机 `.codex/.serena` 等工具运行时缓存。测试现用 `os.walk` 在遍历阶段剪枝工具目录，定向行尾测试 `3 passed`，全门禁重跑通过。
+- 第九轮当前实现已覆盖：HTML 原始 artifact/确定性解析与恢复、web 内容指纹去重、本地单次查询改写 + 云端答案、路由决策持久化。它不等于已完成 pgvector/hybrid retrieval、目标 ECS pgvector 评估、完整指标或生产发布。
+- 第八轮工作台计划仍明确要求 C1/C2/C3 逆序响应矩阵及真实 Uvicorn 子进程重启/中断恢复；现有 Playwright 主流程通过不能替代这些证据。本轮复核了作用域 guard 与 UI 脚本，但尚未执行该矩阵。
+- 全量门禁末尾保留 1 个既有非 PG 专项 skip；这不是 PostgreSQL 缺失，PG 专项独立强制 `0 skipped`。应继续记录 skip 的具体用例并确认其是否为已知 memory-only 并发语义限制。
+
+## 2026-09-23 · 工作台作用域竞态复验
+
+- C1/C2/C3 通过浏览器在网络层扣住已取得的真实 HTTP Response，再在项目、会话或账号切换后交给旧 Promise；钩子移除 AbortSignal，使测试直接证明 scope/epoch 防护，而非依赖 transport abort。
+- C1 证明 project A 的 plan、messages、completed run status 晚于切换到 project B 不会覆盖 B 计划/消息/运行视图；C2 证明会话一响应晚于切换到会话二不串消息；C3 证明用户一的消息与带 citations 的 completed run 晚于用户二登录才释放，不污染新用户的答案、引用入口、notice、run strip 或草稿。
+- 浏览器测试扩展中出现的“第二项目创建后界面不刷新”并非应用 bug：临时 gate 在未配置时把 `targets` 初始化成数组，GET 检查 `.has()` 同步抛错；更正为空 `Set` 后 POST+刷新正常。临时前端 console 诊断已撤销，没有为该测试问题改业务代码。
+- 新注册账号无默认项目属于现有产品语义；C3 按正常路径为第二用户创建项目和会话后再检查串号。
+
+## 2026-09-23 · 真实进程与网络中断恢复
+
+- 新的进程级验收必须直接连迁移后的 PostgreSQL 临时库，并让 app/worker 进程继承同一组临时 DSN；仅在父测试进程里重建 repository 仍证明不了 Uvicorn 导入、启动自检、Cookie 密钥共享、独立 worker 凭据或 OS 退出行为。
+- `tools/check_round8_process_recovery.py` 复用 `pg_support.create_test_database()` / `drop_test_database()`，破坏性 SQL 每次先校验 `study_test_*` 库名。真实 Cookie、web、worker、资料摄取和教学结果跨两进程重启可读回；provider 注入是本地确定性 fixture，不触发付费网络请求。
+- 丢响应代理确认上游已提交 `202` 后截断下游响应体。完全关闭 TCP 在当前环境被规范化成空 `502`，因此当前测试让客户端得到 HTTP 解析/读取失败；语义仍是请求已提交、响应不完整，再用相同幂等键验证回放。
+- 对已进入 provider.generate 的已派发 run 强杀 worker：新 worker 接管过期租约后依据 durable `provider_attempts=dispatched` 转 `unknown` 并将 run 标记 `reconciliation_required`，不会再次调用 provider；两类预算保留 `in_flight` 供人工对账。
+- 独立脚本首次失败暴露了“代理完全无响应被本机网络栈返回空 502”的环境行为；改为截断真实上游响应体后，`ROUND8_PROCESS_RECOVERY_PASSED`。此变更仅限验收工具，没有触碰业务状态机。
+
+## 2026-09-23 · HTML artifact 与 acquisition lease
+
+- 原始 HTML 不可直接成为引用原文：HTML markup offsets 和规范文本 offsets 不兼容。只将 HTML 作为 worker-only immutable artifact 保存，规范化 Markdown 才是可切块、可引用的 SourceDocument.content。
+- provenance 通过 fetch_attempt_id 组合外键关联 artifact；数据库同时约束 web 来源必须带原始类型与 sha256，上传资料则不得伪造抓取 provenance。历史回滚若已有 artifact 会拒绝删除式 downgrade。
+- 即使底层 HTTP 有 timeout，expired worker lease 仍可能无限重领。claim 次数必须作为 durable 状态机不变量，而非只靠 systemd 重启策略；三次上限耗尽后落到 unknown，保留原始 artifact 供后续诊断。
+- PostgreSQL 对 artifact 采用单独 worker 角色的 SELECT/INSERT，并拒绝 app role 读取；跨租户行隔离由 FORCE RLS + tenant/project transaction context 执行。
 - 全量测试第一次只报生成协议哈希漂移，说明路由新增后生成契约文件也是退出门的一部分；更新 `protocol.md` 后契约检查通过。浏览器验收未完成是本机 Playwright Chromium 未安装且下载无响应，不应把它记为应用通过。
+
+## 2026-09-23 · 首版检索与 R8 退出状态复核
+
+- 目标 ECS 只读探测：Ubuntu noble 上 PostgreSQL 16.15 正在运行；`postgresql-16-pgvector` 包候选为 `0.6.0-1`，但服务器没有 `vector.control`，即 pgvector 尚未安装。磁盘约 34 GiB 可用，RAM 约 3.5 GiB。未修改服务器。
+- 这只证明包仓库存在匹配主版本的候选包，不证明生产迁移可行：仍要核对 DBA/`study_migrator` 创建扩展的权限、RLS 与 ANN 查询计划、索引维护/回滚，以及关键词回退评测后才可决定是否启用。
+- 现有 `keyword/v1` 已实现 NFKC/小写归一、中文 2-gram、标题路径加权、全项目已授权片段兜底、确定性 tie-break 与精确引用；不应重复造同一词法排序。向量召回当前未实现。
+- R8-G 最终浏览器补验覆盖 390/768/1440 登录态全流程与人工截图；`run_round8_gate.py` 的全量/PG/静态/桌面键盘浏览器/进程恢复门通过，追加的移动端截图和长文本断言随后单独通过。
+- 唯一全量 skip 是内存适配器不模拟 PG 跨线程并发；PG 子集执行对应用例且 0 skip。之前进度中“C1/C2/C3 与真实进程恢复仍待完成”的段落是当时状态，由 `progress.md` 后续日期记录覆盖。
+- `<details>` 的默认折叠并不意味着提交后自动折叠；浏览器截图确认成功创建项目后仍展开。应由界面状态管理在创建确认成功后关闭，而不能把操作成功与 form disclosure 状态混为一谈。
+- 项目 disclosure 的状态由 React 控制，并在当前异步作用域仍有效、服务端确认创建成功后才重置为关闭；未知响应不关闭表单，以免妨碍原幂等请求恢复。Playwright 红灯与绿灯均已观察到。
+- 注册限流状态跨同一预览进程保留；单独浏览器验收之后不能直接复用该进程跑包含多账号注册的总 gate。干净 gate 要使用新预览进程和独立可写数据目录，不应通过放宽限流解决测试污染。

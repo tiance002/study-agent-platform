@@ -11,13 +11,20 @@ import argparse
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, Literal
 
 from app.core.errors import ErrorCode, PlatformError
 from app.identity.models import Principal
 from app.knowledge.acquisition import AcquisitionJob, DownloadStatus
+from app.knowledge.fetch_artifact import (
+    ACQUISITION_CONTENT_TYPES,
+    WEB_TEXT_PARSER_VERSION,
+    AcquisitionArtifact,
+)
 from app.knowledge.fetch_policy import FetchPolicy, FetchPolicyError
 from app.knowledge.fetcher import FetchResult, fetch_url
+from app.knowledge.html_parser import HTML_PARSER_VERSION, html_to_markdown
 from app.knowledge.models import (
     ACQUISITION_METHOD_WEB,
     MAX_DOCUMENT_BYTES,
@@ -46,27 +53,64 @@ class _FetchContractError(ValueError):
         self.detail = detail
 
 
-def _safe_fetch_content(job: AcquisitionJob, result: FetchResult) -> str:
+def _artifact_from_fetch(job: AcquisitionJob, result: FetchResult) -> AcquisitionArtifact:
     content_type = result.content_type.split(";", 1)[0].strip().lower()
-    if content_type and content_type != job.media_type:
+    if content_type not in ACQUISITION_CONTENT_TYPES:
+        raise _FetchContractError(
+            "FETCH_CONTENT_TYPE_UNSUPPORTED",
+            "来源内容类型不受支持，未写入资料库",
+        )
+    if content_type != job.media_type and not (
+        content_type == "text/html" and job.media_type == "text/markdown"
+    ):
         raise _FetchContractError(
             "FETCH_CONTENT_TYPE_MISMATCH",
             "来源内容类型与用户选择不一致，未写入资料库",
         )
     if len(result.content) > MAX_DOCUMENT_BYTES:
         raise _FetchContractError("FETCH_PAYLOAD_TOO_LARGE", "来源响应超过大小上限")
+    if not result.content:
+        raise _FetchContractError("FETCH_CONTENT_INVALID", "来源正文为空，未写入资料库")
+    parser_version = HTML_PARSER_VERSION if content_type == "text/html" else WEB_TEXT_PARSER_VERSION
+    return AcquisitionArtifact(
+        acquisition_id=job.acquisition_id,
+        tenant_id=job.tenant_id,
+        project_id=job.project_id,
+        content_type=content_type,
+        raw_content=result.content,
+        parser_version=parser_version,
+        fetched_at=datetime.now(timezone.utc),
+    )
+
+
+def _canonical_content(job: AcquisitionJob, artifact: AcquisitionArtifact) -> str:
+    if artifact.content_type != job.media_type and not (
+        artifact.content_type == "text/html" and job.media_type == "text/markdown"
+    ):
+        raise _FetchContractError(
+            "FETCH_CONTENT_TYPE_MISMATCH",
+            "来源内容类型与用户选择不一致，未写入资料库",
+        )
+    expected_parser = HTML_PARSER_VERSION if artifact.content_type == "text/html" else WEB_TEXT_PARSER_VERSION
+    if artifact.parser_version != expected_parser:
+        raise _FetchContractError(
+            "FETCH_PARSER_VERSION_UNSUPPORTED",
+            "已保存的来源解析器版本不受当前 worker 支持",
+        )
     try:
-        content = result.content.decode("utf-8")
+        decoded = artifact.raw_content.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise _FetchContractError(
             "FETCH_ENCODING_INVALID", "来源不是合法的 UTF-8 文本，未写入资料库"
         ) from exc
     try:
-        return require_document_content(content)
+        if artifact.content_type == "text/html":
+            content = html_to_markdown(decoded)
+        else:
+            content = require_document_content(decoded)
+        return content
     except ValueError as exc:
-        raise _FetchContractError(
-            "FETCH_CONTENT_INVALID", "来源正文不满足资料契约，未写入资料库"
-        ) from exc
+        raise _FetchContractError("FETCH_CONTENT_INVALID", "来源正文不满足资料契约，未写入资料库") from exc
 
 
 def _derived_ingestion_ids(acquisition_id: str) -> tuple[str, str]:
@@ -80,6 +124,7 @@ def _recovered_ingestion(
     document_id: str,
     ingestion_job_id: str,
     content: str,
+    artifact: AcquisitionArtifact,
 ) -> None:
     """Accept a prior enqueue after a worker died before acquisition settle."""
     actor = Principal(principal_id=job.requested_by, tenant_id=job.tenant_id)
@@ -91,7 +136,14 @@ def _recovered_ingestion(
             ErrorCode.INTERNAL_CONSISTENCY_ERROR,
             "下载结果已部分写入但无法恢复摄取任务",
         ) from exc
-    if document.document_id != document_id or document.content != content:
+    if (
+        document.document_id != document_id
+        or document.content != content
+        or document.fetch_attempt_id != artifact.acquisition_id
+        or document.source_content_type != artifact.content_type
+        or document.raw_content_hash != artifact.content_hash
+        or document.parser_version != artifact.parser_version
+    ):
         raise PlatformError(
             ErrorCode.INTERNAL_CONSISTENCY_ERROR,
             "下载结果与既有摄取任务不一致",
@@ -107,9 +159,7 @@ def run_once(
     policy: FetchPolicy | None = None,
 ) -> Outcome:
     """Claim and process one acquisition; no retry is generated here."""
-    job = platform.acquisition.claim_next(
-        worker_id=worker_id, lease_seconds=lease_seconds
-    )
+    job = platform.acquisition.claim_next(worker_id=worker_id, lease_seconds=lease_seconds)
     if job is None:
         return Outcome(kind="idle")
 
@@ -120,24 +170,27 @@ def run_once(
         )
     )
     try:
-        fetched = effective_fetcher(job.url)
-    except FetchPolicyError as exc:
-        status = DownloadStatus.UNKNOWN if exc.retryable else DownloadStatus.FAILED
-        platform.acquisition.settle(
-            job,
-            status=status,
-            error_code=exc.code,
-            safe_detail=exc.args[0] if exc.args else "来源请求未完成",
-            claim_token=job.claim_token,
-        )
-        return Outcome(
-            kind="unknown" if status is DownloadStatus.UNKNOWN else "failed",
-            acquisition_id=job.acquisition_id,
-            error_code=exc.code,
-        )
-
-    try:
-        content = _safe_fetch_content(job, fetched)
+        artifact = platform.acquisition.load_artifact(job)
+        if artifact is None:
+            try:
+                fetched = effective_fetcher(job.url)
+            except FetchPolicyError as exc:
+                status = DownloadStatus.UNKNOWN if exc.retryable else DownloadStatus.FAILED
+                platform.acquisition.settle(
+                    job,
+                    status=status,
+                    error_code=exc.code,
+                    safe_detail=exc.args[0] if exc.args else "来源请求未完成",
+                    claim_token=job.claim_token,
+                )
+                return Outcome(
+                    kind="unknown" if status is DownloadStatus.UNKNOWN else "failed",
+                    acquisition_id=job.acquisition_id,
+                    error_code=exc.code,
+                )
+            artifact = _artifact_from_fetch(job, fetched)
+            artifact = platform.acquisition.save_artifact(job, artifact, claim_token=job.claim_token)
+        content = _canonical_content(job, artifact)
         actor = Principal(principal_id=job.requested_by, tenant_id=job.tenant_id)
         document_id, ingestion_job_id = _derived_ingestion_ids(job.acquisition_id)
         try:
@@ -153,6 +206,10 @@ def run_once(
                 language=job.language,
                 acquisition_method=ACQUISITION_METHOD_WEB,
                 taint_sources=(TaintSource.WEB,),
+                parser_version=artifact.parser_version,
+                fetch_attempt_id=artifact.acquisition_id,
+                source_content_type=artifact.content_type,
+                raw_content_hash=artifact.content_hash,
             )
         except PlatformError as exc:
             if exc.code is not ErrorCode.VERSION_CONFLICT:
@@ -163,6 +220,7 @@ def run_once(
                 document_id=document_id,
                 ingestion_job_id=ingestion_job_id,
                 content=content,
+                artifact=artifact,
             )
     except _FetchContractError as exc:
         platform.acquisition.settle(
@@ -172,9 +230,7 @@ def run_once(
             safe_detail=exc.detail,
             claim_token=job.claim_token,
         )
-        return Outcome(
-            kind="failed", acquisition_id=job.acquisition_id, error_code=exc.code
-        )
+        return Outcome(kind="failed", acquisition_id=job.acquisition_id, error_code=exc.code)
 
     platform.acquisition.settle(
         job,
@@ -204,9 +260,7 @@ def main(argv: list[str] | None = None) -> int:
     worker_id = args.worker_id or new_id("acq-wk")
     while True:
         try:
-            outcome = run_once(
-                platform, worker_id=worker_id, lease_seconds=args.lease_seconds
-            )
+            outcome = run_once(platform, worker_id=worker_id, lease_seconds=args.lease_seconds)
         except Exception as exc:  # noqa: BLE001 - supervisor must see non-zero exit
             print(
                 f"[acquisition-worker {worker_id}] 任务未落定：{type(exc).__name__}",
@@ -214,9 +268,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         if outcome.kind != "idle":
-            print(
-                f"[acquisition-worker {worker_id}] {outcome.kind} {outcome.acquisition_id}"
-            )
+            print(f"[acquisition-worker {worker_id}] {outcome.kind} {outcome.acquisition_id}")
         if args.once or outcome.kind == "idle" and not args.daemon:
             return 0
         time.sleep(args.idle_sleep)

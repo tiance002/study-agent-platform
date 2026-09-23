@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:c0422bb87e76f57f70276475a813879bc17195d52094dd058036623f31579ff0, generated_at=2026-09-22T14:37:00Z -->
-> 生成时间：2026-09-22T14:37:00Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:184885e19bf0b5e8441fbd4aa72af73cb386682048e6886b6e22d090b35debed, generated_at=2026-09-23T08:11:42Z -->
+> 生成时间：2026-09-23T08:11:42Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -50,6 +50,7 @@
 | `/projects/{project_id}/source-candidates` | GET | List Source Candidates |
 | `/projects/{project_id}/source-candidates` | POST | Create Source Candidate |
 | `/projects/{project_id}/source-candidates/{candidate_id}/select` | POST | Select Source Candidate |
+| `/projects/{project_id}/source-search` | POST | Search Source Candidates |
 | `/projects/{project_id}/sources` | GET | List Sources |
 | `/projects/{project_id}/sources` | POST | Register Source |
 | `/projects/{project_id}/sources/{source_id}/content` | POST | Upload Source Content |
@@ -64,7 +65,7 @@
 
 ### 稳定错误码
 
-共 46 个，一经发布不得改变语义，只能追加。
+共 48 个，一经发布不得改变语义，只能追加。
 
 | 错误码 |
 |---|
@@ -104,6 +105,8 @@
 | `RATE_LIMITED` |
 | `RECONCILIATION_REQUIRED` |
 | `REGISTRATION_DISABLED` |
+| `SOURCE_SEARCH_DISABLED` |
+| `SOURCE_SEARCH_UNAVAILABLE` |
 | `TAINT_REQUIRES_ENDORSEMENT` |
 | `TEACHING_PROVIDER_DISABLED` |
 | `TENANT_CONTEXT_MISSING` |
