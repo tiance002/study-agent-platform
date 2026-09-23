@@ -789,4 +789,4 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - 已移除浏览器脚本中一个并不存在于实际项目选择态的额外“创建项目”点击；真实入口是可键盘操作的“新建项目” disclosure。产品修复待测试先红后实现。
 - 回归断言先失败于创建成功后 `.project-form` 仍可见；将 `open` 状态提升至 React 并只在当前作用域下服务端确认成功时收起后，浏览器矩阵转绿：`ROUND8_BROWSER_PASSED`。移动端新截图 `var/round8-project-disclosure-green/workbench-mobile-plan.png` 确认创建表单收起，项目标题与引用正文正常折行。
 - 统一 gate 首次复跑因复用了独立浏览器测试后的同一个预览进程，第二账号注册触发持久限流；未调整限流逻辑。改用全新 8009 预览进程/数据目录后完整通过：全量 JUnit `924 tests: 923 passed, 1 skipped, 0 failures/errors`；PG `143 passed, 0 skipped`；Ruff、mypy（125 个源文件）、compileall、Node、三份契约、浏览器 `ROUND8_BROWSER_PASSED` 与进程恢复 `ROUND8_PROCESS_RECOVERY_PASSED` 均通过。日志有 11 条全量/7 条 PG 依赖弃用 warning，无失败。进程恢复报告：`var/round8-process-recovery/run-fdde79e893`。
-- 修复后的最终项目表单状态已纳入上述完整 gate；GitHub 提交/推送仍待完成，必须排除用户已暂存的 `.agents/.codex/.serena` 集成文件与未跟踪工具目录。
+- GitHub 上传完成：提交 `750e5b6`（`feat: complete durable acquisition and routing slice`）已推送到 `origin/codex/round8-residual-20260922`。仅上传 54 个项目源码、迁移、测试和记录文件；用户暂存的 `.agents/.codex/.serena`、`.gitignore` 及未跟踪目录/`backend/tests/test_metrics.py` 均保留在本地，未纳入提交。
