@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -289,7 +290,12 @@ def _proxy_drop_one_response(base_url: str, path: str, payload: dict, headers: d
                 headers=headers,
                 timeout=5,
             )
-        except httpx.RemoteProtocolError:
+        except (httpx.RemoteProtocolError, httpx.ReadError):
+            # 这条请求的响应就是被代理故意丢掉的：Linux 上通常表现为
+            # RemoteProtocolError（FIN 截断，Content-Length 不符），
+            # Windows 上 shutdown(SHUT_RDWR) 提前关闭会以 RST 复位连接，
+            # 表现为 ReadError [WinError 10054]。两者都是"响应丢失"的
+            # 传输层表现，后续用同一幂等键重放才是被验证的产品行为。
             pass
         else:
             raise AssertionError(
@@ -651,6 +657,10 @@ def _controller(artifact_root: Path) -> int:
         print(f"ROUND8_PROCESS_RECOVERY_PASSED: {run_dir}")
         return 0
     except Exception as error:
+        traceback.print_exc()
+        (run_dir / "error.txt").write_text(
+            traceback.format_exc(), encoding="utf-8"
+        )
         print(f"ROUND8_PROCESS_RECOVERY_FAILED: {type(error).__name__}: {error}")
         print(f"PROCESS_ARTIFACTS: {run_dir}")
         return 1
