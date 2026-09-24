@@ -805,4 +805,4 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 
 - 对照七项计划逐项复核实现与验收证据：门禁 5 脚本 `node --check`、导入方向静态门、OpenAPI/契约一致、幂等与预算组件拆分、指标容量实测（TD-001 保留决定）、工具入口索引，均齐全；计划文档已勾选并附执行状态。
 - 两类改动分界入库：架构修复类（后端域修正、路由/前端/workflow 拆分、指标切片、组成根、文档）与工具集成类（`.codex`/`.serena`/`.agents` 技能、CI agent-skill 校验步骤）各自成组提交；`.planning/`、`.trae/mcp.json`、`INTEGRATION_SUMMARY.md`、`verify_components.py` 归属待确认，保持未跟踪。
-- 非阻断记录：TD-001 触发条件见 `docs/tech-debt.md`；PR #2（→ `codex/architecture-boundaries-20260922`）为堆叠中间 PR；新草稿 PR 基线为 `main`，origin/main 领先 1 提交、合并前需 rebase（本阶段不合并、不部署、不动 `var/`）。
+- 非阻断记录：TD-001 触发条件见 `docs/tech-debt.md`。PR 结构：`origin/main` 为孤立单提交历史（内容等价于本线 `7c5b63c` 的快照），与本分支无共同祖先，GitHub 拒绝创建指向 `main` 的 PR；PR #2（head 本分支 → base `codex/architecture-boundaries-20260922`）承载全部 21 个提交，已转草稿并等待 CI。合并入 main 需仓库层面先对齐历史（本阶段不合并、不部署、不动 `var/`）。
