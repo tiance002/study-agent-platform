@@ -33,8 +33,8 @@ from typing import TYPE_CHECKING, Literal
 from app.core.errors import ErrorCode, PlatformError
 from app.teaching.service import TeachingService
 
-if TYPE_CHECKING:  # 只在类型检查时导入：`app.main` 在导入期就会装配应用实例
-    from app.main import PlatformState
+if TYPE_CHECKING:  # 只在类型检查时导入：装配模块导入期无副作用，但保持延迟以省启动开销
+    from app.platform import PlatformState
 
 #: 租约时长（秒）。要大于一次"上下文构建 + provider 调用"的最坏耗时：
 #: 太短会让仍在调模型的 worker 被回收（两个 worker 同时处理一个运行），
@@ -165,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.once and args.daemon:
         parser.error("--once 与 --daemon 不能同时使用")
 
-    from app.main import build_platform
+    from app.platform import build_platform
 
     platform = build_platform()
     if platform.teaching_provider is None:

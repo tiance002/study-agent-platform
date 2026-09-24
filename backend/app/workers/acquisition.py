@@ -33,7 +33,7 @@ from app.knowledge.models import (
 from app.policy.taint import TaintSource
 
 if TYPE_CHECKING:
-    from app.main import PlatformState
+    from app.platform import PlatformState
 
 FetchCallable = Callable[[str], FetchResult]
 OutcomeKind = Literal["idle", "succeeded", "failed", "unknown"]
@@ -172,10 +172,19 @@ def run_once(
     try:
         artifact = platform.acquisition.load_artifact(job)
         if artifact is None:
+            platform.acquisition.start_fetch_observation(job)
+            fetch_started = time.monotonic()
             try:
                 fetched = effective_fetcher(job.url)
             except FetchPolicyError as exc:
+                duration_seconds = max(0.0, time.monotonic() - fetch_started)
                 status = DownloadStatus.UNKNOWN if exc.retryable else DownloadStatus.FAILED
+                platform.acquisition.finish_fetch_observation(
+                    job,
+                    outcome="unknown" if status is DownloadStatus.UNKNOWN else "failed",
+                    duration_seconds=duration_seconds,
+                    response_body_bytes=None,
+                )
                 platform.acquisition.settle(
                     job,
                     status=status,
@@ -187,6 +196,21 @@ def run_once(
                     kind="unknown" if status is DownloadStatus.UNKNOWN else "failed",
                     acquisition_id=job.acquisition_id,
                     error_code=exc.code,
+                )
+            except Exception:
+                platform.acquisition.finish_fetch_observation(
+                    job,
+                    outcome="unknown",
+                    duration_seconds=max(0.0, time.monotonic() - fetch_started),
+                    response_body_bytes=None,
+                )
+                raise
+            else:
+                platform.acquisition.finish_fetch_observation(
+                    job,
+                    outcome="succeeded",
+                    duration_seconds=max(0.0, time.monotonic() - fetch_started),
+                    response_body_bytes=len(fetched.content),
                 )
             artifact = _artifact_from_fetch(job, fetched)
             artifact = platform.acquisition.save_artifact(job, artifact, claim_token=job.claim_token)
@@ -254,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--once 与 --daemon 不能同时使用")
 
     from app.core.ids import new_id
-    from app.main import build_platform
+    from app.platform import build_platform
 
     platform = build_platform()
     worker_id = args.worker_id or new_id("acq-wk")

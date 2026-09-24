@@ -52,8 +52,8 @@ from app.core.ids import new_id
 from app.knowledge.models import IngestionJob
 from app.knowledge.processor import DocumentProcessor
 
-if TYPE_CHECKING:  # 只在类型检查时导入：`app.main` 在导入期就会装配一个应用实例
-    from app.main import PlatformState
+if TYPE_CHECKING:  # 只在类型检查时导入：保持延迟以省 worker 启动开销
+    from app.platform import PlatformState
 
 #: 租约时长（秒）。取值要**大于一次切块的最坏耗时**：太短会让仍在运行的 worker
 #: 被回收（于是同一个任务被两个进程同时处理），太长则崩溃后恢复得慢。
@@ -217,7 +217,7 @@ def main(argv: list[str] | None = None, *, platform_factory=None) -> int:
     """
     args = _parse_args(argv)
     if platform_factory is None:
-        from app.main import build_platform  # 延迟导入：导入期会装配一个应用实例
+        from app.platform import build_platform  # 延迟导入：按需装配平台实例
 
         platform_factory = build_platform
     platform = platform_factory()

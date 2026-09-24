@@ -55,8 +55,8 @@ from app.identity.passwords import (
     verify_password_diagnostic,
 )
 
-if TYPE_CHECKING:  # 类型标注用，运行时不导入（避免与 main 循环依赖）
-    from app.main import PlatformState
+if TYPE_CHECKING:  # 类型标注用，运行时不导入（避免与装配模块循环依赖）
+    from app.platform import PlatformState
 
 router = APIRouter()
 

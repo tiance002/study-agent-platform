@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from app.core.clock import FixedClock
+from app.core.clock import FixedClock, SystemClock
 from app.identity.models import Principal
 from app.knowledge.acquisition import (
     AcquisitionRequest,
@@ -24,6 +23,8 @@ ACTOR = Principal(principal_id=DEMO_PRINCIPAL, tenant_id=DEMO_TENANT)
 
 
 def _queue(platform, *, key: str = "worker-key", source_identity_hash: str | None = None):
+    if isinstance(platform.acquisition.clock, SystemClock):
+        platform.acquisition.clock = FixedClock(NOW)
     candidate = SourceCandidate(
         candidate_id=f"cand_{key}",
         tenant_id=DEMO_TENANT,
@@ -103,6 +104,67 @@ def test_worker_fetches_and_enqueues_ingestion(platform):
     document = platform.ingestion.load_document(ingestion_jobs[0])
     assert document.acquisition_method == "web_fetch"
     assert str(document.taint_sources[0]) == "web"
+
+
+def test_fetch_attempt_facts_count_real_fetches_and_exclude_artifact_recovery(platform, monkeypatch):
+    clock = FixedClock(NOW)
+    platform.acquisition.clock = clock
+    _queue(platform, key="metrics-recovery")
+    samples = iter((10.0, 10.25))
+    monkeypatch.setattr("app.workers.acquisition.time.monotonic", lambda: next(samples))
+    original_enqueue = platform.ingestion.enqueue
+
+    def crash_after_fetch(*_args, **_kwargs):
+        raise RuntimeError("controlled crash after artifact persistence")
+
+    platform.ingestion.enqueue = crash_after_fetch
+    with pytest.raises(RuntimeError, match="controlled crash"):
+        run_once(platform, worker_id="first-worker", lease_seconds=1, fetcher=lambda _url: _result())
+
+    facts = platform.acquisition.fetch_observations
+    assert len(facts) == 1
+    assert facts[0].attempt_number == 1
+    assert facts[0].outcome == "succeeded"
+    assert facts[0].duration_seconds == pytest.approx(0.25)
+    assert facts[0].response_body_bytes == len(_result().content)
+
+    platform.ingestion.enqueue = original_enqueue
+    clock.advance(seconds=2)
+    recovered = run_once(
+        platform,
+        worker_id="recovery-worker",
+        fetcher=lambda _url: pytest.fail("artifact recovery must not start a fetch observation"),
+    )
+    assert recovered.kind == "succeeded"
+    assert platform.acquisition.fetch_observations == facts
+
+
+def test_fetch_attempt_retry_records_each_claim_once_and_unknown_without_fabricated_bytes(platform, monkeypatch):
+    clock = FixedClock(NOW)
+    platform.acquisition.clock = clock
+    queued = _queue(platform, key="metrics-retry")
+    samples = iter((20.0, 20.5, 30.0, 31.0))
+    monkeypatch.setattr("app.workers.acquisition.time.monotonic", lambda: next(samples))
+    attempts = 0
+
+    def flaky_fetch(_url):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("unclassified transport failure")
+        return _result(b"second attempt body")
+
+    with pytest.raises(RuntimeError, match="unclassified transport failure"):
+        run_once(platform, worker_id="first-worker", lease_seconds=1, fetcher=flaky_fetch)
+    clock.advance(seconds=2)
+    assert run_once(platform, worker_id="second-worker", fetcher=flaky_fetch).kind == "succeeded"
+
+    facts = platform.acquisition.fetch_observations
+    assert [(fact.attempt_number, fact.outcome) for fact in facts] == [(1, "unknown"), (2, "succeeded")]
+    assert [fact.duration_seconds for fact in facts] == [0.5, 1.0]
+    assert facts[0].response_body_bytes is None
+    assert facts[1].response_body_bytes == len(b"second attempt body")
+    assert platform.acquisition.get_job(ACTOR, DEMO_PROJECT, queued.acquisition_id).attempt_count == 2
 
 
 def test_same_source_content_and_parser_reuses_existing_document(platform):
@@ -213,6 +275,8 @@ def test_html_acquisition_reaches_keyword_search_and_exact_citation_readback(pla
 
 
 def test_worker_reuses_saved_artifact_after_crash_without_refetching(platform):
+    clock = FixedClock(NOW)
+    platform.acquisition.clock = clock
     queued = _queue(platform, key="html-recovery")
     original_enqueue = platform.ingestion.enqueue
     fetch_calls = 0
@@ -239,7 +303,7 @@ def test_worker_reuses_saved_artifact_after_crash_without_refetching(platform):
 
     assert platform.acquisition.load_artifact(queued) is not None
     platform.ingestion.enqueue = original_enqueue
-    time.sleep(1.05)
+    clock.advance(seconds=2)
     outcome = run_once(
         platform,
         worker_id="recovery-worker",
