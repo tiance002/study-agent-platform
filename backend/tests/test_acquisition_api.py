@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 import pytest
+from app.core.clock import FixedClock
 from app.knowledge.discovery import SearchResult
 
 ORIGIN = {"Origin": "http://testserver"}
@@ -78,6 +80,25 @@ def test_user_can_create_candidate_select_it_and_read_durable_job(acquisition_pr
     assert status.status_code == 200
     assert status.json()["status"] == "queued"
     assert "error_detail" in status.json()
+
+
+def test_expired_candidate_selection_does_not_leave_orphan_source(acquisition_project, platform):
+    client, project_id = acquisition_project
+    candidate = client.post(
+        f"/projects/{project_id}/source-candidates",
+        json={"url": "https://example.com/expired", "title": "过期候选"},
+        headers=keyed("expired-candidate"),
+    ).json()
+    platform.acquisition.clock = FixedClock(datetime.fromisoformat(candidate["expires_at"]))
+
+    response = client.post(
+        f"/projects/{project_id}/source-candidates/{candidate['candidate_id']}/select",
+        json={"display_name": "过期候选", "media_type": "text/plain", "language": "zh"},
+        headers=keyed("expired-select"),
+    )
+
+    assert response.status_code == 403
+    assert client.get(f"/projects/{project_id}/sources").json()["sources"] == []
 
 
 def test_candidate_creation_rejects_private_target_before_persistence(acquisition_project):
