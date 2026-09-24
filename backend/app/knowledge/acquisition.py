@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 from urllib.parse import urlsplit
 
 from app.core.contracts import require_aware, require_id, require_non_negative, require_text
 from app.knowledge.models import TEXT_MEDIA_TYPES
 
 MAX_ACQUISITION_ATTEMPTS = 3
+FetchOutcome = Literal["succeeded", "failed", "unknown"]
 ACQUISITION_ATTEMPTS_EXHAUSTED = "ACQUISITION_ATTEMPTS_EXHAUSTED"
 ACQUISITION_ATTEMPTS_EXHAUSTED_DETAIL = "下载任务连续中断，已停止自动重试"
 
@@ -28,6 +31,32 @@ class DownloadStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class FetchAttemptObservation:
+    """Safe numeric outcome for one durable acquisition claim that entered fetch."""
+
+    attempt_number: int
+    outcome: FetchOutcome = "unknown"
+    duration_seconds: float | None = None
+    response_body_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.attempt_number < 1 or self.attempt_number > MAX_ACQUISITION_ATTEMPTS:
+            raise ValueError("fetch observation attempt_number 超出范围")
+        if self.outcome not in {"succeeded", "failed", "unknown"}:
+            raise ValueError("fetch observation outcome 不在闭合集合中")
+        if self.duration_seconds is not None and (
+            not math.isfinite(self.duration_seconds) or self.duration_seconds < 0
+        ):
+            raise ValueError("fetch observation duration_seconds 必须是有限非负数")
+        if self.response_body_bytes is not None and self.response_body_bytes < 0:
+            raise ValueError("fetch observation response_body_bytes 不能为负")
+        if self.duration_seconds is None and (
+            self.outcome != "unknown" or self.response_body_bytes is not None
+        ):
+            raise ValueError("未完成 fetch observation 只能是无耗时/bytes 的 unknown")
 
 
 def _require_source_url(url: str) -> str:

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from psycopg import errors as pg_errors
 
 from app.core.clock import Clock, SystemClock
 from app.core.contracts import require_text
 from app.core.errors import ErrorCode, PlatformError, deny
+from app.db.product_store import register_source_in_conn
 from app.db.session import tenant_transaction, worker_transaction
 from app.identity.models import Principal
 from app.identity.ports import MembershipRepository
@@ -18,10 +21,13 @@ from app.knowledge.acquisition import (
     AcquisitionRequest,
     CandidateStatus,
     DownloadStatus,
+    FetchAttemptObservation,
+    FetchOutcome,
     SourceCandidate,
 )
 from app.knowledge.acquisition_ports import AcquisitionRepository
 from app.knowledge.fetch_artifact import AcquisitionArtifact
+from app.product.models import SourceRecord
 from app.product.ports import ProductRepository
 
 _CANDIDATE_COLUMNS = (
@@ -231,73 +237,103 @@ class PostgresAcquisitionRepository(AcquisitionRepository):
 
         try:
             with tenant_transaction(tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn) as conn:
-                existing = conn.execute(
-                    "SELECT " + _JOB_COLUMNS + " FROM acquisition_jobs WHERE tenant_id = %s"
-                    " AND project_id = %s AND idempotency_key = %s",
-                    (actor.tenant_id, project_id, request.idempotency_key),
-                ).fetchone()
-                if existing is not None:
-                    return self._assert_idempotent_match(_job_from_row(existing), request)
-
-                candidate_row = conn.execute(
-                    "SELECT "
-                    + _CANDIDATE_COLUMNS
-                    + " FROM source_candidates WHERE candidate_id = %s FOR UPDATE",
-                    (request.candidate_id,),
-                ).fetchone()
-                if candidate_row is None:
-                    raise deny(ErrorCode.CROSS_TENANT_DENIED, "无权访问该项目")
-                candidate = _candidate_from_row(candidate_row)
-                if candidate.status is not CandidateStatus.DISCOVERED:
-                    raise deny(ErrorCode.ILLEGAL_STATE_TRANSITION, "候选资料已经处理")
-                if candidate.url != request.url or candidate.title != request.title:
-                    raise deny(ErrorCode.PARAMS_INVALID, "下载请求与候选资料不一致")
-
-                # The candidate row lock serializes first-use selection.  Re-read the
-                # idempotency key after waiting so a concurrent identical request
-                # returns the committed job instead of seeing only the selected state.
-                existing = conn.execute(
-                    "SELECT " + _JOB_COLUMNS + " FROM acquisition_jobs WHERE tenant_id = %s"
-                    " AND project_id = %s AND idempotency_key = %s",
-                    (actor.tenant_id, project_id, request.idempotency_key),
-                ).fetchone()
-                if existing is not None:
-                    return self._assert_idempotent_match(_job_from_row(existing), request)
-
-                row = conn.execute(
-                    "INSERT INTO acquisition_jobs ("
-                    + _JOB_INSERT_COLUMNS
-                    + ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-                    " RETURNING " + _JOB_COLUMNS,
-                    (
-                        request.acquisition_id,
-                        request.tenant_id,
-                        request.project_id,
-                        request.source_id,
-                        request.candidate_id,
-                        request.requested_by,
-                        request.url,
-                        request.title,
-                        request.media_type,
-                        request.language,
-                        request.idempotency_key,
-                        str(DownloadStatus.QUEUED),
-                        0,
-                    ),
-                ).fetchone()
-                conn.execute(
-                    "UPDATE source_candidates SET status = %s WHERE candidate_id = %s",
-                    (str(CandidateStatus.SELECTED), request.candidate_id),
-                )
-                if row is None:
-                    raise deny(ErrorCode.INTERNAL_CONSISTENCY_ERROR, "下载任务写入后无法回读")
-                return _job_from_row(row)
+                return self._select_in_conn(conn, actor, project_id, request)
         except pg_errors.UniqueViolation as exc:
             raise PlatformError(
                 ErrorCode.VERSION_CONFLICT,
                 "下载任务被并发创建；请使用原幂等键重试",
                 retryable=True,
             ) from exc
+
+    def select_with_source(
+        self,
+        actor: Principal,
+        project_id: str,
+        request: AcquisitionRequest,
+        *,
+        source_display_name: str,
+        source_identity_hash: str,
+        source_acquisition: dict,
+    ) -> tuple[SourceRecord, AcquisitionJob]:
+        self._require_membership(actor, project_id)
+        if (
+            request.tenant_id != actor.tenant_id
+            or request.project_id != project_id
+            or request.requested_by != actor.principal_id
+        ):
+            raise deny(ErrorCode.CROSS_TENANT_DENIED, "无权创建该下载任务")
+        try:
+            with tenant_transaction(tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn) as conn:
+                source = register_source_in_conn(
+                    conn, actor, project_id,
+                    source_id=request.source_id,
+                    display_name=source_display_name,
+                    media_type=request.media_type,
+                    identity_hash=source_identity_hash,
+                    acquisition=source_acquisition,
+                )
+                job = self._select_in_conn(
+                    conn, actor, project_id, replace(request, source_id=source.source_id)
+                )
+                return source, job
+        except pg_errors.UniqueViolation as exc:
+            raise PlatformError(
+                ErrorCode.VERSION_CONFLICT,
+                "下载任务被并发创建；请使用原幂等键重试",
+                retryable=True,
+            ) from exc
+
+    def _select_in_conn(self, conn, actor: Principal, project_id: str, request: AcquisitionRequest) -> AcquisitionJob:
+        existing = conn.execute(
+            "SELECT " + _JOB_COLUMNS + " FROM acquisition_jobs WHERE tenant_id = %s"
+            " AND project_id = %s AND idempotency_key = %s",
+            (actor.tenant_id, project_id, request.idempotency_key),
+        ).fetchone()
+        if existing is not None:
+            return self._assert_idempotent_match(_job_from_row(existing), request)
+
+        candidate_row = conn.execute(
+            "SELECT " + _CANDIDATE_COLUMNS
+            + " FROM source_candidates WHERE candidate_id = %s FOR UPDATE",
+            (request.candidate_id,),
+        ).fetchone()
+        if candidate_row is None:
+            raise deny(ErrorCode.CROSS_TENANT_DENIED, "无权访问该项目")
+        candidate = _candidate_from_row(candidate_row)
+        if candidate.status is not CandidateStatus.DISCOVERED:
+            raise deny(ErrorCode.ILLEGAL_STATE_TRANSITION, "候选资料已经处理")
+        if candidate.expires_at <= self.clock.now():
+            raise deny(ErrorCode.ILLEGAL_STATE_TRANSITION, "候选资料已过期")
+        if candidate.url != request.url or candidate.title != request.title:
+            raise deny(ErrorCode.PARAMS_INVALID, "下载请求与候选资料不一致")
+
+        # Re-read after the candidate lock to serialize concurrent selection.
+        existing = conn.execute(
+            "SELECT " + _JOB_COLUMNS + " FROM acquisition_jobs WHERE tenant_id = %s"
+            " AND project_id = %s AND idempotency_key = %s",
+            (actor.tenant_id, project_id, request.idempotency_key),
+        ).fetchone()
+        if existing is not None:
+            return self._assert_idempotent_match(_job_from_row(existing), request)
+
+        row = conn.execute(
+            "INSERT INTO acquisition_jobs (" + _JOB_INSERT_COLUMNS
+            + ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            " RETURNING " + _JOB_COLUMNS,
+            (
+                request.acquisition_id, request.tenant_id, request.project_id,
+                request.source_id, request.candidate_id, request.requested_by,
+                request.url, request.title, request.media_type, request.language,
+                request.idempotency_key, str(DownloadStatus.QUEUED), 0,
+            ),
+        ).fetchone()
+        conn.execute(
+            "UPDATE source_candidates SET status = %s WHERE candidate_id = %s",
+            (str(CandidateStatus.SELECTED), request.candidate_id),
+        )
+        if row is None:
+            raise deny(ErrorCode.INTERNAL_CONSISTENCY_ERROR, "下载任务写入后无法回读")
+        return _job_from_row(row)
 
     def get_job(self, actor: Principal, project_id: str, acquisition_id: str) -> AcquisitionJob:
         self._require_membership(actor, project_id)
@@ -344,6 +380,85 @@ class PostgresAcquisitionRepository(AcquisitionRepository):
         if row is None:
             raise deny(ErrorCode.INTERNAL_CONSISTENCY_ERROR, "下载任务认领后无法回读")
         return _job_from_row(row)
+
+    def start_fetch_observation(self, job: AcquisitionJob) -> None:
+        if job.attempt_count < 1:
+            raise ValueError("fetch observation requires a claimed attempt")
+        with worker_transaction(
+            tenant_id=job.tenant_id,
+            project_id=job.project_id,
+            dsn=self._worker_dsn,
+        ) as conn:
+            conn.execute("SELECT set_config('app.worker_id', %s, true)", (job.lease_owner,))
+            current = conn.execute(
+                "SELECT attempt_count FROM acquisition_jobs"
+                " WHERE acquisition_id = %s AND tenant_id = %s AND project_id = %s"
+                "   AND status = 'running' AND claim_token = %s AND lease_until > now()"
+                " FOR UPDATE",
+                (job.acquisition_id, job.tenant_id, job.project_id, job.claim_token),
+            ).fetchone()
+            if current is None or current[0] != job.attempt_count:
+                raise deny(ErrorCode.ILLEGAL_STATE_TRANSITION, "下载任务认领已经失效")
+            conn.execute(
+                "INSERT INTO acquisition_fetch_observations (tenant_id, project_id,"
+                " acquisition_id, attempt_number, outcome)"
+                " VALUES (%s, %s, %s, %s, 'unknown')"
+                " ON CONFLICT (tenant_id, project_id, acquisition_id, attempt_number) DO NOTHING",
+                (job.tenant_id, job.project_id, job.acquisition_id, job.attempt_count),
+            )
+
+    def finish_fetch_observation(
+        self,
+        job: AcquisitionJob,
+        *,
+        outcome: FetchOutcome,
+        duration_seconds: float,
+        response_body_bytes: int | None,
+    ) -> None:
+        fact = FetchAttemptObservation(
+            attempt_number=job.attempt_count,
+            outcome=outcome,
+            duration_seconds=duration_seconds,
+            response_body_bytes=response_body_bytes,
+        )
+        with worker_transaction(
+            tenant_id=job.tenant_id,
+            project_id=job.project_id,
+            dsn=self._worker_dsn,
+        ) as conn:
+            conn.execute("SELECT set_config('app.worker_id', %s, true)", (job.lease_owner,))
+            updated = conn.execute(
+                "UPDATE acquisition_fetch_observations"
+                " SET outcome = %s, duration_seconds = %s, response_body_bytes = %s"
+                " WHERE tenant_id = %s AND project_id = %s AND acquisition_id = %s"
+                "   AND attempt_number = %s AND duration_seconds IS NULL"
+                " RETURNING outcome, duration_seconds, response_body_bytes",
+                (
+                    fact.outcome,
+                    fact.duration_seconds,
+                    fact.response_body_bytes,
+                    job.tenant_id,
+                    job.project_id,
+                    job.acquisition_id,
+                    job.attempt_count,
+                ),
+            ).fetchone()
+            if updated is not None:
+                return
+            existing = conn.execute(
+                "SELECT outcome, duration_seconds, response_body_bytes"
+                " FROM acquisition_fetch_observations"
+                " WHERE tenant_id = %s AND project_id = %s AND acquisition_id = %s"
+                "   AND attempt_number = %s",
+                (job.tenant_id, job.project_id, job.acquisition_id, job.attempt_count),
+            ).fetchone()
+            if existing is not None and existing == (
+                fact.outcome,
+                fact.duration_seconds,
+                fact.response_body_bytes,
+            ):
+                return
+            raise deny(ErrorCode.ILLEGAL_STATE_TRANSITION, "fetch observation 缺失或不可覆盖")
 
     def load_artifact(self, job: AcquisitionJob) -> AcquisitionArtifact | None:
         with worker_transaction(

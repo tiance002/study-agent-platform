@@ -123,6 +123,7 @@ class TeachingRunRepository(Protocol):
         estimated_output_tokens: int,
         request_payload: dict | None = None,
         routing_decision: RoutingDecision | None = None,
+        provider_family: str = "unknown",
     ) -> None:
         """派发前持久化：写 attempt 行 + 预算 held → in_flight。
 

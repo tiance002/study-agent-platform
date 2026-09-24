@@ -333,6 +333,7 @@ class PostgresTeachingRepository:
         estimated_output_tokens: int,
         request_payload: dict | None = None,
         routing_decision: RoutingDecision | None = None,
+        provider_family: str = "unknown",
     ) -> None:
         with worker_transaction(
             tenant_id=claim.run.tenant_id,
@@ -375,13 +376,15 @@ class PostgresTeachingRepository:
                 )
             conn.execute(
                 "INSERT INTO provider_attempts (attempt_id, tenant_id, project_id,"
-                " run_id, status, request_payload) VALUES (%s, %s, %s, %s, 'dispatched', %s::jsonb)",
+                " run_id, status, request_payload, provider_family)"
+                " VALUES (%s, %s, %s, %s, 'dispatched', %s::jsonb, %s)",
                 (
                     attempt_id,
                     claim.run.tenant_id,
                     claim.run.project_id,
                     claim.run.run_id,
                     json.dumps(request_payload or {}, ensure_ascii=False),
+                    provider_family,
                 ),
             )
             self._insert_event(

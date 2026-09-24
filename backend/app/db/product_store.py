@@ -103,6 +103,39 @@ def _source_from_row(row: tuple) -> SourceRecord:
     )
 
 
+def register_source_in_conn(
+    conn,
+    actor: Principal,
+    project_id: str,
+    *,
+    source_id: str,
+    display_name: str,
+    media_type: str,
+    identity_hash: str,
+    acquisition: dict,
+) -> SourceRecord:
+    """Register or reuse a source inside the caller's project transaction."""
+    row = conn.execute(
+        "INSERT INTO sources (source_id, tenant_id, project_id,"
+        " display_name, media_type, identity_hash, acquisition)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s)"
+        " ON CONFLICT (project_id, identity_hash) DO NOTHING"
+        " RETURNING " + _SOURCE_COLUMNS,
+        (
+            source_id, actor.tenant_id, project_id, display_name, media_type,
+            identity_hash, _jsonb(acquisition),
+        ),
+    ).fetchone()
+    if row is None:
+        row = conn.execute(
+            "SELECT " + _SOURCE_COLUMNS
+            + " FROM sources WHERE project_id = %s AND identity_hash = %s",
+            (project_id, identity_hash),
+        ).fetchone()
+    assert row is not None
+    return _source_from_row(row)
+
+
 class PostgresProductRepository:
     """会话、消息、计划、资料的 PostgreSQL 实现。"""
 
@@ -396,31 +429,11 @@ class PostgresProductRepository:
         with tenant_transaction(
             tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
         ) as conn:
-            row = conn.execute(
-                "INSERT INTO sources (source_id, tenant_id, project_id,"
-                " display_name, media_type, identity_hash, acquisition)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s)"
-                " ON CONFLICT (project_id, identity_hash) DO NOTHING"
-                " RETURNING " + _SOURCE_COLUMNS,
-                (
-                    source_id,
-                    actor.tenant_id,
-                    project_id,
-                    display_name,
-                    media_type,
-                    identity_hash,
-                    _jsonb(acquisition),
-                ),
-            ).fetchone()
-            if row is None:
-                # 去重命中：返回**既有**记录 —— 上传重试是幂等成功。
-                row = conn.execute(
-                    "SELECT " + _SOURCE_COLUMNS
-                    + " FROM sources WHERE project_id = %s AND identity_hash = %s",
-                    (project_id, identity_hash),
-                ).fetchone()
-        assert row is not None
-        return _source_from_row(row)
+            return register_source_in_conn(
+                conn, actor, project_id,
+                source_id=source_id, display_name=display_name, media_type=media_type,
+                identity_hash=identity_hash, acquisition=acquisition,
+            )
 
     def list_sources(
         self, actor: Principal, project_id: str
@@ -566,4 +579,3 @@ def replace_milestone_plan_id(milestone: Milestone, plan_id: str) -> Milestone:
     from dataclasses import replace
 
     return replace(milestone, plan_id=plan_id)
-

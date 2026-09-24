@@ -9,9 +9,11 @@ from app.knowledge.acquisition import (
     AcquisitionJob,
     AcquisitionRequest,
     DownloadStatus,
+    FetchOutcome,
     SourceCandidate,
 )
 from app.knowledge.fetch_artifact import AcquisitionArtifact
+from app.product.models import SourceRecord
 
 
 class AcquisitionRepository(Protocol):
@@ -32,9 +34,31 @@ class AcquisitionRepository(Protocol):
         request: AcquisitionRequest,
     ) -> AcquisitionJob: ...
 
+    def select_with_source(
+        self,
+        actor: Principal,
+        project_id: str,
+        request: AcquisitionRequest,
+        *,
+        source_display_name: str,
+        source_identity_hash: str,
+        source_acquisition: dict,
+    ) -> tuple[SourceRecord, AcquisitionJob]: ...
+
     def get_job(self, actor: Principal, project_id: str, acquisition_id: str) -> AcquisitionJob: ...
 
     def claim_next(self, *, worker_id: str, lease_seconds: int) -> AcquisitionJob | None: ...
+
+    def start_fetch_observation(self, job: AcquisitionJob) -> None: ...
+
+    def finish_fetch_observation(
+        self,
+        job: AcquisitionJob,
+        *,
+        outcome: FetchOutcome,
+        duration_seconds: float,
+        response_body_bytes: int | None,
+    ) -> None: ...
 
     def load_artifact(self, job: AcquisitionJob) -> AcquisitionArtifact | None: ...
 

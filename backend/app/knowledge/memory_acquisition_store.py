@@ -19,12 +19,15 @@ from app.knowledge.acquisition import (
     AcquisitionRequest,
     CandidateStatus,
     DownloadStatus,
+    FetchAttemptObservation,
+    FetchOutcome,
     SourceCandidate,
     claim_download,
     transition_download,
 )
 from app.knowledge.acquisition_ports import AcquisitionRepository
 from app.knowledge.fetch_artifact import AcquisitionArtifact
+from app.product.models import SourceRecord
 from app.product.ports import ProductRepository
 
 
@@ -46,6 +49,7 @@ class InMemoryAcquisitionRepository(AcquisitionRepository):
         self._jobs: dict[str, AcquisitionJob] = {}
         self._artifacts: dict[str, AcquisitionArtifact] = {}
         self._idempotency: dict[tuple[str, str, str], str] = {}
+        self._fetch_observations: dict[tuple[str, int], FetchAttemptObservation] = {}
 
     def save_candidate(self, candidate: SourceCandidate) -> SourceCandidate:
         with self._lock:
@@ -120,6 +124,8 @@ class InMemoryAcquisitionRepository(AcquisitionRepository):
                 raise deny(ErrorCode.CROSS_TENANT_DENIED, "无权访问该项目")
             if candidate.status is not CandidateStatus.DISCOVERED:
                 raise deny(ErrorCode.ILLEGAL_STATE_TRANSITION, "候选资料已经处理")
+            if candidate.expires_at <= self.clock.now():
+                raise deny(ErrorCode.ILLEGAL_STATE_TRANSITION, "候选资料已过期")
             if candidate.url != request.url or candidate.title != request.title:
                 raise deny(ErrorCode.PARAMS_INVALID, "下载请求与候选资料不一致")
             job = request.to_queued_job()
@@ -127,6 +133,67 @@ class InMemoryAcquisitionRepository(AcquisitionRepository):
             self._jobs[job.acquisition_id] = job
             self._idempotency[key] = job.acquisition_id
             return job
+
+    def select_with_source(
+        self,
+        actor: Principal,
+        project_id: str,
+        request: AcquisitionRequest,
+        *,
+        source_display_name: str,
+        source_identity_hash: str,
+        source_acquisition: dict,
+    ) -> tuple[SourceRecord, AcquisitionJob]:
+        self.membership.get(actor, project_id)
+        if (
+            request.tenant_id != actor.tenant_id
+            or request.project_id != project_id
+            or request.requested_by != actor.principal_id
+        ):
+            raise deny(ErrorCode.CROSS_TENANT_DENIED, "无权创建该下载任务")
+        # Both memory repositories use RLocks. Holding the product lock first
+        # keeps source visibility and candidate/job transition atomic to readers.
+        product_lock = getattr(self.products, "_lock", self._lock)
+        with product_lock, self._lock:
+            key = (actor.tenant_id, project_id, request.idempotency_key)
+            existing_id = self._idempotency.get(key)
+            if existing_id is not None:
+                existing = self._jobs[existing_id]
+                source = self.products.get_source(actor, project_id, existing.source_id)
+                if (
+                    existing.candidate_id != request.candidate_id
+                    or existing.url != request.url
+                    or source.identity_hash != source_identity_hash
+                ):
+                    raise deny(ErrorCode.PARAMS_INVALID, "同一幂等键对应了不同下载请求")
+                return source, existing
+            candidate = self._candidates.get(request.candidate_id)
+            if (
+                candidate is None
+                or candidate.tenant_id != actor.tenant_id
+                or candidate.project_id != project_id
+            ):
+                raise deny(ErrorCode.CROSS_TENANT_DENIED, "无权访问该项目")
+            if candidate.status is not CandidateStatus.DISCOVERED:
+                raise deny(ErrorCode.ILLEGAL_STATE_TRANSITION, "候选资料已经处理")
+            if candidate.expires_at <= self.clock.now():
+                raise deny(ErrorCode.ILLEGAL_STATE_TRANSITION, "候选资料已过期")
+            if candidate.url != request.url or candidate.title != request.title:
+                raise deny(ErrorCode.PARAMS_INVALID, "下载请求与候选资料不一致")
+            source = self.products.register_source(
+                actor,
+                project_id,
+                source_id=request.source_id,
+                display_name=source_display_name,
+                media_type=request.media_type,
+                identity_hash=source_identity_hash,
+                acquisition=source_acquisition,
+            )
+            job = replace(request, source_id=source.source_id).to_queued_job()
+            self._candidates[candidate.candidate_id] = replace(candidate, status=CandidateStatus.SELECTED)
+            self._jobs[job.acquisition_id] = job
+            self._idempotency[key] = job.acquisition_id
+            return source, job
 
     def get_job(self, actor: Principal, project_id: str, acquisition_id: str) -> AcquisitionJob:
         self.membership.get(actor, project_id)
@@ -198,6 +265,57 @@ class InMemoryAcquisitionRepository(AcquisitionRepository):
         if artifact.tenant_id != job.tenant_id or artifact.project_id != job.project_id:
             raise deny(ErrorCode.CROSS_PROJECT_DENIED, "下载原文作用域与任务不一致")
         return artifact
+
+    @property
+    def fetch_observations(self) -> tuple[FetchAttemptObservation, ...]:
+        """Read-only deterministic view used by contract tests."""
+        with self._lock:
+            return tuple(
+                self._fetch_observations[key]
+                for key in sorted(self._fetch_observations)
+            )
+
+    def start_fetch_observation(self, job: AcquisitionJob) -> None:
+        with self._lock:
+            current = self._jobs.get(job.acquisition_id)
+            if (
+                current is None
+                or current.status is not DownloadStatus.RUNNING
+                or current.claim_token != job.claim_token
+                or current.attempt_count != job.attempt_count
+                or current.lease_until is None
+                or self.clock.now() >= current.lease_until
+            ):
+                raise deny(ErrorCode.ILLEGAL_STATE_TRANSITION, "下载任务认领已经失效")
+            key = (job.acquisition_id, job.attempt_count)
+            self._fetch_observations.setdefault(
+                key, FetchAttemptObservation(attempt_number=job.attempt_count)
+            )
+
+    def finish_fetch_observation(
+        self,
+        job: AcquisitionJob,
+        *,
+        outcome: FetchOutcome,
+        duration_seconds: float,
+        response_body_bytes: int | None,
+    ) -> None:
+        observation = FetchAttemptObservation(
+            attempt_number=job.attempt_count,
+            outcome=outcome,
+            duration_seconds=duration_seconds,
+            response_body_bytes=response_body_bytes,
+        )
+        key = (job.acquisition_id, job.attempt_count)
+        with self._lock:
+            current = self._fetch_observations.get(key)
+            if current is None:
+                raise deny(ErrorCode.ILLEGAL_STATE_TRANSITION, "fetch observation 未开始")
+            if current.duration_seconds is not None:
+                if current != observation:
+                    raise deny(ErrorCode.ILLEGAL_STATE_TRANSITION, "fetch observation 不可覆盖")
+                return
+            self._fetch_observations[key] = observation
 
     def save_artifact(
         self,

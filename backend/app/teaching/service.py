@@ -55,6 +55,7 @@ from app.teaching.models import (
     RawCitation,
     TokenUsage,
 )
+from app.teaching.openai_provider import OpenAIResponsesProvider
 from app.teaching.ports import LocalQueryRewriter, TeachingProvider, TeachingRunRepository
 from app.teaching.routing import RoutingDecision
 from app.teaching.runs import RunClaim
@@ -66,6 +67,11 @@ DEFAULT_PROVIDER_TIMEOUT_SECONDS = 60
 
 #: 执行结果的类别。worker 的返回值是它加上 "idle" / "stale"。
 Outcome = Literal["succeeded", "failed", "reconciliation_required"]
+
+
+def _provider_family_label(provider: object | None) -> Literal["openai", "unknown"]:
+    """Return a closed provider label; unrecognized adapters remain unknown."""
+    return "openai" if isinstance(provider, OpenAIResponsesProvider) else "unknown"
 
 #: 可以归为"确定性失败"的错误码集合：写终态是安全的，
 #: 因为同一个输入跑一百次也是同一个结果。
@@ -207,6 +213,7 @@ class TeachingService:
                 estimated_output_tokens=max_output_tokens,
                 request_payload=self._serialize_request(request) | {"routing_decision": route.to_dict()},
                 routing_decision=route,
+                provider_family=_provider_family_label(self.provider),
             )
         except PlatformError as exc:
             if platform_reservation_id is not None and platform_budget is not None:

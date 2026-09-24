@@ -52,11 +52,7 @@ def create_project(request: Request, body: ProjectCreateBody) -> dict | JSONResp
 
     with idempotent_write(request, body) as guard:
         if guard.replay:
-            return JSONResponse(
-                status_code=guard.cached_status_code,
-                content=guard.cached_body,
-                headers={"X-Idempotent-Replay": "true"},
-            )
+            return guard.replay_response()
         state = _state(request)
         project = state.membership.create_project_for(
             guard.principal,
@@ -100,11 +96,7 @@ def update_project(request: Request, project_id: str, body: ProjectUpdateBody) -
 
     with idempotent_write(request, body) as guard:
         if guard.replay:
-            return JSONResponse(
-                status_code=guard.cached_status_code,
-                content=guard.cached_body,
-                headers={"X-Idempotent-Replay": "true"},
-            )
+            return guard.replay_response()
         state = _state(request)
         updated = state.membership.update(
             guard.principal,

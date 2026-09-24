@@ -198,6 +198,7 @@ def _ingest(
     source_id: str,
     title: str,
     content: str,
+    document_id: str | None = None,
 ) -> str:
     """走**真实管线**入料：登记资料 → 入队 → 认领 → 切块 → 落定。
 
@@ -217,7 +218,7 @@ def _ingest(
         actor,
         project_id,
         source_id,
-        document_id=_unique("doc"),
+        document_id=document_id or _unique("doc"),
         job_id=_unique("job"),
         title=title,
         content=content,
@@ -681,6 +682,7 @@ def _fixture_env() -> tuple[Env, KnowledgeRepository, Principal, str, dict[str, 
             source_id=real_id,
             title=document["title"],
             content=document["content"],
+            document_id=f"doc_{real_id}",
         )
     return env, KnowledgeRepository(ingestion=ingestion), actor, project, mapping
 
@@ -693,6 +695,28 @@ def test_frozen_fixture_declares_the_current_ranking_version():
     这条断言让"改了但没重跑"变成一次**失败**，而不是一次没人注意到的召回漂移。
     """
     assert _fixture()["version"] == RANKING_VERSION
+
+
+@pytest.mark.invariant
+def test_frozen_fixture_expected_citations_pin_document_span_and_hash():
+    """评测答案必须固定到不可变文档与原文跨度，而不只是来源和 chunk 序号。"""
+    env, _knowledge, actor, project, mapping = _fixture_env()
+    stored = {
+        (chunk.source_id, chunk.chunk_index): chunk
+        for chunk in env.ingestion.stored_chunks(actor, project, latest_only=False)
+    }
+    required = {"source_id", "document_id", "chunk_index", "span", "content_hash"}
+    for case in _fixture()["cases"]:
+        for expected in case["expect"]:
+            assert required <= expected.keys(), (
+                f"{case['query']!r} 的预期引用缺少字段：{sorted(required - expected.keys())}"
+            )
+            assert len(expected["span"]) == 2 and expected["span"][0] < expected["span"][1]
+            assert expected["content_hash"].startswith("sha256:")
+            chunk = stored[(mapping[expected["source_id"]], expected["chunk_index"])]
+            assert expected["document_id"] == chunk.document_id
+            assert tuple(expected["span"]) == chunk.span
+            assert expected["content_hash"] == chunk.content_hash
 
 
 @pytest.mark.invariant

@@ -221,11 +221,7 @@ def ingest(request: Request, project_id: str, body: IngestBody) -> dict | JSONRe
     state = _state(request)
     with idempotent_write(request, body) as guard:
         if guard.replay:
-            return JSONResponse(
-                status_code=guard.cached_status_code,
-                content=guard.cached_body,
-                headers={"X-Idempotent-Replay": "true"},
-            )
+            return guard.replay_response()
         principal = guard.principal
         state.membership.get(principal, project_id)
         context = TenantContext(
@@ -276,11 +272,7 @@ def create_confirmation(request: Request, project_id: str, body: ConfirmationBod
     state = _state(request)
     with idempotent_write(request, body) as guard:
         if guard.replay:
-            return JSONResponse(
-                status_code=guard.cached_status_code,
-                content=guard.cached_body,
-                headers={"X-Idempotent-Replay": "true"},
-            )
+            return guard.replay_response()
         principal = guard.principal
         state.membership.get(principal, project_id)
         context = TenantContext(
@@ -348,11 +340,7 @@ def interact(request: Request, project_id: str, body: InteractionBody) -> dict |
     state = _state(request)
     with idempotent_write(request, body) as guard:
         if guard.replay:
-            return JSONResponse(
-                status_code=guard.cached_status_code,
-                content=guard.cached_body,
-                headers={"X-Idempotent-Replay": "true"},
-            )
+            return guard.replay_response()
         principal = guard.principal
         state.membership.get(principal, project_id)
         context = TenantContext(

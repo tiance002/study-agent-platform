@@ -62,6 +62,7 @@ class _Attempt:
     attempt_id: str
     run_id: str
     status: str  # dispatched / unknown / completed / failed
+    provider_family: str = "unknown"
     provider_request_id: str = ""
     payload: dict | None = None
     input_tokens: int | None = None
@@ -303,6 +304,7 @@ class InMemoryTeachingRepository:
         estimated_output_tokens: int,
         request_payload: dict | None = None,
         routing_decision: RoutingDecision | None = None,
+        provider_family: str = "unknown",
     ) -> None:
         with self._lock:
             current = self._require_live_claim(claim)
@@ -329,6 +331,7 @@ class InMemoryTeachingRepository:
                 attempt_id=attempt_id,
                 run_id=claim.run.run_id,
                 status="dispatched",
+                provider_family=provider_family,
                 request_payload=dict(request_payload or {}),
             )
             if routing_decision is not None:

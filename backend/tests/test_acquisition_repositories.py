@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from app.core.clock import FixedClock
 from app.core.errors import ErrorCode, PlatformError
 from app.identity.membership import MembershipStore
 from app.identity.models import Principal
@@ -33,6 +34,7 @@ def setup_repo() -> tuple[MembershipStore, InMemoryProductRepository, InMemoryAc
     repo = InMemoryAcquisitionRepository(
         membership=membership,
         products=products,
+        clock=FixedClock(NOW),
     )
     project_id = unique("proj")
     membership.create_project_for(ALICE, project_id=project_id, name="资料项目", goal="")
@@ -97,6 +99,29 @@ def test_select_is_explicit_idempotent_and_marks_candidate_selected() -> None:
     assert selected.acquisition_id == replay.acquisition_id
     assert selected.status is DownloadStatus.QUEUED
     assert repo.get_candidate(ALICE, project_id, item.candidate_id).status is CandidateStatus.SELECTED
+
+
+def test_expired_selection_does_not_register_source_or_job() -> None:
+    _membership, products, repo, project_id, _source_id = setup_repo()
+    item = candidate(project_id)
+    repo.save_candidate(item)
+    repo.clock = FixedClock(item.expires_at)
+    before = products.list_sources(ALICE, project_id)
+    source_id = unique("src")
+
+    with pytest.raises(PlatformError) as caught:
+        repo.select_with_source(
+            ALICE,
+            project_id,
+            request(project_id, source_id, item.candidate_id, "expired-selection"),
+            source_display_name="过期资料",
+            source_identity_hash="sha256:" + uuid.uuid4().hex,
+            source_acquisition={"kind": "web", "url": item.url},
+        )
+
+    assert caught.value.code is ErrorCode.ILLEGAL_STATE_TRANSITION
+    assert products.list_sources(ALICE, project_id) == before
+    assert repo.get_candidate(ALICE, project_id, item.candidate_id).status is CandidateStatus.DISCOVERED
 
 
 def test_selection_rejects_candidate_from_another_project() -> None:

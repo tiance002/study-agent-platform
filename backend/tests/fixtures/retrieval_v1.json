@@ -34,31 +34,373 @@
     }
   ],
   "cases": [
-    {"query": "回滚", "kind": "heading", "expect": [{"source_id": "src_tx", "chunk_index": 2}]},
-    {"query": "提交", "kind": "heading", "expect": [{"source_id": "src_tx", "chunk_index": 1}]},
-    {"query": "复合索引", "kind": "heading", "expect": [{"source_id": "src_index", "chunk_index": 1}]},
-    {"query": "复制延迟", "kind": "heading", "expect": [{"source_id": "src_repl", "chunk_index": 1}]},
-    {"query": "主从复制", "kind": "heading", "expect": [{"source_id": "src_repl", "chunk_index": 0}]},
-    {"query": "要么全部成功", "kind": "paragraph", "expect": [{"source_id": "src_tx", "chunk_index": 0}]},
-    {"query": "撤销本事务已经执行的全部修改", "kind": "paragraph", "expect": [{"source_id": "src_tx", "chunk_index": 2}]},
-    {"query": "列顺序", "kind": "paragraph", "expect": [{"source_id": "src_index", "chunk_index": 1}]},
-    {"query": "时间差", "kind": "paragraph", "expect": [{"source_id": "src_repl", "chunk_index": 1}]},
-    {"query": "不必扫描整张表", "kind": "paragraph", "expect": [{"source_id": "src_index", "chunk_index": 0}]},
-    {"query": "异步接收变更", "kind": "paragraph", "expect": [{"source_id": "src_repl", "chunk_index": 0}]},
-    {"query": "主库负责写入，从库异步接收变更。", "kind": "paragraph", "expect": [{"source_id": "src_repl", "chunk_index": 0}]},
-    {"query": "BEGIN", "kind": "code", "expect": [{"source_id": "src_tx", "chunk_index": 2}]},
-    {"query": "psql", "kind": "code", "expect": [{"source_id": "src_tx", "chunk_index": 2}]},
-    {"query": "shell 注释", "kind": "code", "expect": [{"source_id": "src_tx", "chunk_index": 2}]},
-    {"query": "读已提交", "kind": "table", "expect": [{"source_id": "src_tx", "chunk_index": 2}]},
-    {"query": "不可重复读", "kind": "table", "expect": [{"source_id": "src_tx", "chunk_index": 2}]},
-    {"query": "postgres", "kind": "latin", "expect": [{"source_id": "src_index", "chunk_index": 2}]},
-    {"query": "b-tree", "kind": "latin", "expect": [{"source_id": "src_index", "chunk_index": 2}]},
-    {"query": "ＰＯＳＴＧＲＥＳ", "kind": "normalization", "expect": [{"source_id": "src_index", "chunk_index": 2}]},
-    {"query": "事务 回滚", "kind": "multi_term", "expect": [{"source_id": "src_tx", "chunk_index": 2}]},
-    {"query": "索引结构", "kind": "paragraph", "expect": [{"source_id": "src_index", "chunk_index": 2}]},
-    {"query": "量子纠缠", "kind": "no_hit", "expect": []},
-    {"query": "咖啡机维修", "kind": "no_hit", "expect": []},
-    {"query": "zzzzqqqq", "kind": "no_hit", "expect": []}
+    {
+      "query": "回滚",
+      "kind": "heading",
+      "expect": [
+        {
+          "source_id": "src_tx",
+          "chunk_index": 2,
+          "document_id": "doc_src_tx_fx",
+          "span": [
+            51,
+            181
+          ],
+          "content_hash": "sha256:b751e5f2e9dbe02b50518251cae9299b80a1a140123fca8c9361bfee45cd33cd"
+        }
+      ]
+    },
+    {
+      "query": "提交",
+      "kind": "heading",
+      "expect": [
+        {
+          "source_id": "src_tx",
+          "chunk_index": 1,
+          "document_id": "doc_src_tx_fx",
+          "span": [
+            30,
+            49
+          ],
+          "content_hash": "sha256:91b8fcc949f874e28213b6b33df1ab048a45ae49ffa8169560907e0a0c39e234"
+        }
+      ]
+    },
+    {
+      "query": "复合索引",
+      "kind": "heading",
+      "expect": [
+        {
+          "source_id": "src_index",
+          "chunk_index": 1,
+          "document_id": "doc_src_index_fx",
+          "span": [
+            21,
+            49
+          ],
+          "content_hash": "sha256:d7af8d7287c226e2ba9f38153d3531804b3338eb387e3dc0fed1efc6e432e149"
+        }
+      ]
+    },
+    {
+      "query": "复制延迟",
+      "kind": "heading",
+      "expect": [
+        {
+          "source_id": "src_repl",
+          "chunk_index": 1,
+          "document_id": "doc_src_repl_fx",
+          "span": [
+            26,
+            52
+          ],
+          "content_hash": "sha256:fc2cf1ccd6f72c776f4016d9a6ebe3b6c1c198e1d27675740779744da4a67f8d"
+        }
+      ]
+    },
+    {
+      "query": "主从复制",
+      "kind": "heading",
+      "expect": [
+        {
+          "source_id": "src_repl",
+          "chunk_index": 0,
+          "document_id": "doc_src_repl_fx",
+          "span": [
+            0,
+            24
+          ],
+          "content_hash": "sha256:cc990b778f3d45d3600830fe7b450a4d0b8caf2762938c40dd575206cb5acb5b"
+        }
+      ]
+    },
+    {
+      "query": "要么全部成功",
+      "kind": "paragraph",
+      "expect": [
+        {
+          "source_id": "src_tx",
+          "chunk_index": 0,
+          "document_id": "doc_src_tx_fx",
+          "span": [
+            0,
+            28
+          ],
+          "content_hash": "sha256:7953d5aee24ae6e6571c68e67d792dd7bcca07d22d867e27c704e757fdf0c782"
+        }
+      ]
+    },
+    {
+      "query": "撤销本事务已经执行的全部修改",
+      "kind": "paragraph",
+      "expect": [
+        {
+          "source_id": "src_tx",
+          "chunk_index": 2,
+          "document_id": "doc_src_tx_fx",
+          "span": [
+            51,
+            181
+          ],
+          "content_hash": "sha256:b751e5f2e9dbe02b50518251cae9299b80a1a140123fca8c9361bfee45cd33cd"
+        }
+      ]
+    },
+    {
+      "query": "列顺序",
+      "kind": "paragraph",
+      "expect": [
+        {
+          "source_id": "src_index",
+          "chunk_index": 1,
+          "document_id": "doc_src_index_fx",
+          "span": [
+            21,
+            49
+          ],
+          "content_hash": "sha256:d7af8d7287c226e2ba9f38153d3531804b3338eb387e3dc0fed1efc6e432e149"
+        }
+      ]
+    },
+    {
+      "query": "时间差",
+      "kind": "paragraph",
+      "expect": [
+        {
+          "source_id": "src_repl",
+          "chunk_index": 1,
+          "document_id": "doc_src_repl_fx",
+          "span": [
+            26,
+            52
+          ],
+          "content_hash": "sha256:fc2cf1ccd6f72c776f4016d9a6ebe3b6c1c198e1d27675740779744da4a67f8d"
+        }
+      ]
+    },
+    {
+      "query": "不必扫描整张表",
+      "kind": "paragraph",
+      "expect": [
+        {
+          "source_id": "src_index",
+          "chunk_index": 0,
+          "document_id": "doc_src_index_fx",
+          "span": [
+            0,
+            19
+          ],
+          "content_hash": "sha256:8b3430ad68a82cd6983ef9f33ae15c43819446c6628148152c2677a84df37d92"
+        }
+      ]
+    },
+    {
+      "query": "异步接收变更",
+      "kind": "paragraph",
+      "expect": [
+        {
+          "source_id": "src_repl",
+          "chunk_index": 0,
+          "document_id": "doc_src_repl_fx",
+          "span": [
+            0,
+            24
+          ],
+          "content_hash": "sha256:cc990b778f3d45d3600830fe7b450a4d0b8caf2762938c40dd575206cb5acb5b"
+        }
+      ]
+    },
+    {
+      "query": "主库负责写入，从库异步接收变更。",
+      "kind": "paragraph",
+      "expect": [
+        {
+          "source_id": "src_repl",
+          "chunk_index": 0,
+          "document_id": "doc_src_repl_fx",
+          "span": [
+            0,
+            24
+          ],
+          "content_hash": "sha256:cc990b778f3d45d3600830fe7b450a4d0b8caf2762938c40dd575206cb5acb5b"
+        }
+      ]
+    },
+    {
+      "query": "BEGIN",
+      "kind": "code",
+      "expect": [
+        {
+          "source_id": "src_tx",
+          "chunk_index": 2,
+          "document_id": "doc_src_tx_fx",
+          "span": [
+            51,
+            181
+          ],
+          "content_hash": "sha256:b751e5f2e9dbe02b50518251cae9299b80a1a140123fca8c9361bfee45cd33cd"
+        }
+      ]
+    },
+    {
+      "query": "psql",
+      "kind": "code",
+      "expect": [
+        {
+          "source_id": "src_tx",
+          "chunk_index": 2,
+          "document_id": "doc_src_tx_fx",
+          "span": [
+            51,
+            181
+          ],
+          "content_hash": "sha256:b751e5f2e9dbe02b50518251cae9299b80a1a140123fca8c9361bfee45cd33cd"
+        }
+      ]
+    },
+    {
+      "query": "shell 注释",
+      "kind": "code",
+      "expect": [
+        {
+          "source_id": "src_tx",
+          "chunk_index": 2,
+          "document_id": "doc_src_tx_fx",
+          "span": [
+            51,
+            181
+          ],
+          "content_hash": "sha256:b751e5f2e9dbe02b50518251cae9299b80a1a140123fca8c9361bfee45cd33cd"
+        }
+      ]
+    },
+    {
+      "query": "读已提交",
+      "kind": "table",
+      "expect": [
+        {
+          "source_id": "src_tx",
+          "chunk_index": 2,
+          "document_id": "doc_src_tx_fx",
+          "span": [
+            51,
+            181
+          ],
+          "content_hash": "sha256:b751e5f2e9dbe02b50518251cae9299b80a1a140123fca8c9361bfee45cd33cd"
+        }
+      ]
+    },
+    {
+      "query": "不可重复读",
+      "kind": "table",
+      "expect": [
+        {
+          "source_id": "src_tx",
+          "chunk_index": 2,
+          "document_id": "doc_src_tx_fx",
+          "span": [
+            51,
+            181
+          ],
+          "content_hash": "sha256:b751e5f2e9dbe02b50518251cae9299b80a1a140123fca8c9361bfee45cd33cd"
+        }
+      ]
+    },
+    {
+      "query": "postgres",
+      "kind": "latin",
+      "expect": [
+        {
+          "source_id": "src_index",
+          "chunk_index": 2,
+          "document_id": "doc_src_index_fx",
+          "span": [
+            51,
+            90
+          ],
+          "content_hash": "sha256:713836781b00d5a14e1a5ea99705386cb9b67079b6ade97c469ff2ef7754e7d7"
+        }
+      ]
+    },
+    {
+      "query": "b-tree",
+      "kind": "latin",
+      "expect": [
+        {
+          "source_id": "src_index",
+          "chunk_index": 2,
+          "document_id": "doc_src_index_fx",
+          "span": [
+            51,
+            90
+          ],
+          "content_hash": "sha256:713836781b00d5a14e1a5ea99705386cb9b67079b6ade97c469ff2ef7754e7d7"
+        }
+      ]
+    },
+    {
+      "query": "ＰＯＳＴＧＲＥＳ",
+      "kind": "normalization",
+      "expect": [
+        {
+          "source_id": "src_index",
+          "chunk_index": 2,
+          "document_id": "doc_src_index_fx",
+          "span": [
+            51,
+            90
+          ],
+          "content_hash": "sha256:713836781b00d5a14e1a5ea99705386cb9b67079b6ade97c469ff2ef7754e7d7"
+        }
+      ]
+    },
+    {
+      "query": "事务 回滚",
+      "kind": "multi_term",
+      "expect": [
+        {
+          "source_id": "src_tx",
+          "chunk_index": 2,
+          "document_id": "doc_src_tx_fx",
+          "span": [
+            51,
+            181
+          ],
+          "content_hash": "sha256:b751e5f2e9dbe02b50518251cae9299b80a1a140123fca8c9361bfee45cd33cd"
+        }
+      ]
+    },
+    {
+      "query": "索引结构",
+      "kind": "paragraph",
+      "expect": [
+        {
+          "source_id": "src_index",
+          "chunk_index": 2,
+          "document_id": "doc_src_index_fx",
+          "span": [
+            51,
+            90
+          ],
+          "content_hash": "sha256:713836781b00d5a14e1a5ea99705386cb9b67079b6ade97c469ff2ef7754e7d7"
+        }
+      ]
+    },
+    {
+      "query": "量子纠缠",
+      "kind": "no_hit",
+      "expect": []
+    },
+    {
+      "query": "咖啡机维修",
+      "kind": "no_hit",
+      "expect": []
+    },
+    {
+      "query": "zzzzqqqq",
+      "kind": "no_hit",
+      "expect": []
+    }
   ],
   "baseline": {
     "recall_at_5": 1.0,

@@ -9,7 +9,8 @@ from types import SimpleNamespace
 import pg_support
 import psycopg
 import pytest
-from app.core.clock import SystemClock
+from app.core.clock import FixedClock, SystemClock
+from app.core.errors import ErrorCode, PlatformError
 from app.core.ids import new_id
 from app.db.acquisition_store import PostgresAcquisitionRepository
 from app.db.identity_store import PostgresMembershipRepository
@@ -74,7 +75,9 @@ def pg_env(pg_seed):
     actor = Principal(principal_id=ALICE, tenant_id=TENANT)
     membership = PostgresMembershipRepository()
     products = PostgresProductRepository(membership=membership)
-    repo = PostgresAcquisitionRepository(membership=membership, products=products)
+    repo = PostgresAcquisitionRepository(
+        membership=membership, products=products, clock=FixedClock(NOW)
+    )
     project_id = unique("proj")
     membership.create_project_for(actor, project_id=project_id, name="资料项目", goal="")
     source = products.register_source(
@@ -132,6 +135,69 @@ def test_postgres_selection_survives_repository_reconstruction(pg_env) -> None:
         safe_detail="测试清理",
         claim_token=claimed.claim_token,
     )
+
+
+def test_postgres_expired_selection_does_not_register_source(pg_env) -> None:
+    actor, repo, _membership, products, project_id, _source_id = pg_env
+    item = SourceCandidate(
+        candidate_id=unique("cand"),
+        tenant_id=actor.tenant_id,
+        project_id=project_id,
+        url="https://example.com/expired-pg",
+        title="Expired",
+        snippet="",
+        source_domain="example.com",
+        discovered_at=NOW,
+        expires_at=NOW + timedelta(hours=1),
+    )
+    repo.save_candidate(item)
+    repo.clock = FixedClock(item.expires_at)
+    before = products.list_sources(actor, project_id)
+    request = AcquisitionRequest(
+        acquisition_id=unique("acq"), tenant_id=actor.tenant_id,
+        project_id=project_id, source_id=unique("src"), candidate_id=item.candidate_id,
+        requested_by=actor.principal_id, url=item.url, title=item.title,
+        media_type="text/plain", language="en", idempotency_key=unique("key"),
+        requested_at=NOW,
+    )
+    with pytest.raises(PlatformError) as caught:
+        repo.select_with_source(
+            actor, project_id, request,
+            source_display_name="Expired",
+            source_identity_hash="sha256:" + uuid.uuid4().hex,
+            source_acquisition={"kind": "web", "url": item.url},
+        )
+    assert caught.value.code is ErrorCode.ILLEGAL_STATE_TRANSITION
+    assert products.list_sources(actor, project_id) == before
+
+
+def test_postgres_selection_rolls_back_source_on_candidate_mismatch(pg_env) -> None:
+    actor, repo, _membership, products, project_id, _source_id = pg_env
+    item = SourceCandidate(
+        candidate_id=unique("cand"), tenant_id=actor.tenant_id,
+        project_id=project_id, url="https://example.com/rollback-pg",
+        title="Expected", snippet="", source_domain="example.com",
+        discovered_at=NOW, expires_at=NOW + timedelta(hours=1),
+    )
+    repo.save_candidate(item)
+    before = products.list_sources(actor, project_id)
+    request = AcquisitionRequest(
+        acquisition_id=unique("acq"), tenant_id=actor.tenant_id,
+        project_id=project_id, source_id=unique("src"), candidate_id=item.candidate_id,
+        requested_by=actor.principal_id, url=item.url, title="Wrong",
+        media_type="text/plain", language="en", idempotency_key=unique("key"),
+        requested_at=NOW,
+    )
+    with pytest.raises(PlatformError) as caught:
+        repo.select_with_source(
+            actor, project_id, request,
+            source_display_name="Rollback",
+            source_identity_hash="sha256:" + uuid.uuid4().hex,
+            source_acquisition={"kind": "web", "url": item.url},
+        )
+    assert caught.value.code is ErrorCode.PARAMS_INVALID
+    assert products.list_sources(actor, project_id) == before
+    assert repo.get_candidate(actor, project_id, item.candidate_id).status.value == "discovered"
 
 
 def test_postgres_app_role_can_create_and_list_candidates(pg_env) -> None:
