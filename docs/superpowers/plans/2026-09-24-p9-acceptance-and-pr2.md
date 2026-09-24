@@ -103,8 +103,8 @@
 - [x] 用本地预览运行 `.venv/Scripts/python tools/run_round8_gate.py --base-url http://127.0.0.1:8008`，保存 full/PG JUnit 结果，核对跳过原因；预期 `ROUND8_GATE_PASSED`，PG 子集没有 skip。（2026-09-24 完成：`ROUND8_GATE_PASSED`；full 967 通过 / 1 跳过（`test_concurrent_reservation_on_last_slot_has_one_winner[memory]`：并发争抢只在 PG 双连接下有意义，内存锁天然串行——该场景由 PG 子集覆盖）；PG 子集 145 通过 / 0 跳过；JUnit 写入 `var/round8-gate/full.xml`、`postgres.xml`（gitignore，留本地）。）
 - [x] 运行 `.venv/Scripts/python tools/migrations/check_migrations.py --require-active`、`.venv/Scripts/python tools/security/scan_licenses.py`、`.venv/Scripts/python tools/security/scan_secrets.py`、`git diff --check`；核对三份契约由总门禁验证。（2026-09-24 完成：迁移 19 条单头 0019；许可扫描通过（2 个 MPL-2.0 弱 copyleft 提示，非阻断）；秘密扫描 370 文件通过；`git diff --check` 由总门禁执行通过；三份契约 `--check` 由总门禁执行通过。）
 - [x] `git fetch origin` 后确认远端没有新增提交、基底仍为 `codex/architecture-boundaries-20260922`、待推送文件与提交清单仅为预期范围。若远端前进，先重新审查差异，不使用强推。（2026-09-24 完成：远端 head 仍为 `1349352` 无新提交；PR #2 base 仍为 `codex/architecture-boundaries-20260922`；待推送 12 个提交 = P9 审查修复 4 + 验收（浏览器/性能/恢复夹具）3 + 计划与进度文档 1 + 本轮验收计划文档，均在本计划文件边界内。）
-- [ ] 上述证据齐备后，推送 `codex/round8-residual-20260922` 到原分支以更新 [PR #2](https://github.com/tiance002/study-agent-platform/pull/2)；更新 PR 描述，列出 0019、P9 修复、浏览器与容量证据，以及未完成的 pgvector/reranker 项。待新 head 的 GitHub CI 成功后再请求代码评审；保持 Draft，合并/部署另作决定。
-- [ ] 把实际命令、关键结果、跳过原因和新 PR head 记录到 `progress.md`；若门禁失败，只记录已完成的证据与阻断原因，不写“P9 全部完成”。
+- [x] 上述证据齐备后，推送 `codex/round8-residual-20260922` 到原分支以更新 [PR #2](https://github.com/tiance002/study-agent-platform/pull/2)；更新 PR 描述，列出 0019、P9 修复、浏览器与容量证据，以及未完成的 pgvector/reranker 项。待新 head 的 GitHub CI 成功后再请求代码评审；保持 Draft，合并/部署另作决定。（2026-09-24 完成：`1349352..c490cca` 推送 12 个提交；PR 描述追加「R9 混合检索与 P9 审查修复」「验收证据」「未完成项」三节，原架构四节保留；新 head `c490cca` 的 GitHub CI（gates）1m15s 通过；PR 保持 Draft，未请求评审。）
+- [x] 把实际命令、关键结果、跳过原因和新 PR head 记录到 `progress.md`；若门禁失败，只记录已完成的证据与阻断原因，不写“P9 全部完成”。（2026-09-24 完成：见 `progress.md`「2026-09-24 · P9 验收收口与 PR #2 同步」节。）
 
 ## 后续独立阶段：pgvector 与 reranker
 
