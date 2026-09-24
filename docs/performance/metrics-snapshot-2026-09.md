@@ -12,6 +12,10 @@
   acquisition_fetch_observations、teaching_runs 各扫描两次）预计只能降到约 350–400 ms，
   无法达标；达标需要增量汇总表，属于大 blast radius 改动（写路径 + 回填 + 并发 + 回滚 +
   一致性测试），记为技术债 `TD-001`。
+- **2026-09-24 更新（0019）**：迁移 0019 替换了快照函数（新增 retrieval_decision 聚合）。
+  用非空检索决策重测后，10 万事实规模 p95 = 28.5 ms 仍远低于 250 ms 目标；100 万规模
+  p95 恶化至 1099.2 ms（旧值 666.7 ms）。100 万本就在 TD-001 范畴内，本轮不新增升级
+  动作，详见下文「0019 重测」一节。
 
 ## 实验方法
 
@@ -110,6 +114,88 @@
 实施要求（与计划任务 6 一致）：回填、并发更新、回滚、与原 SQL 聚合一致性均需 PG
 测试；跨租户汇总权限（SECURITY DEFINER + REVOKE FROM PUBLIC）与封闭标签输出
 保持不变；/metrics 默认关闭、Bearer 令牌校验回归通过。
+
+## 0019 重测（2026-09-24，retrieval_decision 非空）
+
+### 背景
+
+迁移 0019 给 `teaching_runs` 增加 `retrieval_decision jsonb`（闭集 CHECK），并把
+`study_metrics_snapshot()` 整体替换为带 `retrieval_decisions` 聚合的新版（对
+`retrieval_decision` 做 GROUP BY jsonb）。上文的 0018 数据测的是**空 JSONB 分组**，
+不能作为 0019 的基准，故用非空决策数据重测。
+
+### 采样环境
+
+- 时间：2026-09-24 16:12–16:25（Asia/Shanghai，本地 Windows 11）。
+- PostgreSQL：`PostgreSQL 16.4, compiled by Visual C++ build 1940, 64-bit`（`SELECT version()`）。
+- 配置同上文环境表（shared_buffers 32 MB / work_mem 4 MB / effective_cache_size 4 GB /
+  block_size 8192 / max_parallel_workers_per_gather 2，均未调优）。
+- 三个规模在同一随机临时库（`study_test_2530b360ec0d`）内累计增长，每规模 repeat 20 次。
+
+### 种子断言（防止测到空分组）
+
+每条合成 `teaching_runs` 按确定性规则（按序号取模）写入合法 `retrieval_decision`：
+约 80% `keyword`（reason_code `''`，ranking_version `keyword/v1`）、约 10% `hybrid`
+（reason_code `''`，`hybrid-rrf/v1`）、约 10% `degraded`（reason_code
+`vector_index_unavailable`，`hybrid-rrf/v1`），policy_version 一律 `retrieval-route/v1`，
+全部通过 0019 CHECK。种子阶段断言非空决策数 == run 总数且三种模式齐全，失败即退出：
+
+| 累计规模 | 非空/总数 | keyword | hybrid | degraded |
+|---|---|---|---|---|
+| 10,000 | 1225/1225 | 975 | 125 | 125 |
+| 100,000 | 12475/12475 | 9975 | 1250 | 1250 |
+| 1,000,000 | 124975/124975 | 99975 | 12500 | 12500 |
+
+> 已知的种子保真度偏差（0018 基准同样存在，为保持可比未改动）：首阶段的
+> messages→conversations JOIN 存在既有 off-by-one（会话号为 `bench_conv1..k`，
+> JOIN 拼出 `bench_conv0..k-1`），首阶段序号 ≡1 (mod k) 的消息/run 被静默丢弃，
+> 故实际 runs 比名义少 0.02%（1M：124,975 vs 125,000；1万：1225 vs 1250）。
+
+### 快照整体延迟（应用角色连续调用，20 次）
+
+| 累计事实规模 | min | p50 | p95 | max | 0018 p95（参考） |
+|---|---|---|---|---|---|
+| 10,000 | 3.5 ms | 4.0 ms | 4.4 ms | 4.9 ms | 9.8 ms |
+| 100,000 | 8.5 ms | 23.8 ms | **28.5 ms** | 28.8 ms | 21.1 ms |
+| 1,000,000 | 766.1 ms | 913.1 ms | **1099.2 ms** | 1131.2 ms | 666.7 ms |
+
+### 函数内各聚合查询 EXPLAIN (ANALYZE, BUFFERS)（执行耗时 ms）
+
+| 查询 | 1万 | 10万 | 100万 | 100万 buffers (hit/read) |
+|---|---|---|---|---|
+| acquisition_jobs 状态总计 | 0.5 | 10.1 | 112.6 | 2274 / 0 |
+| acquisition_jobs 对账计数 | 0.2 | 4.7 | 73.5 | 2653 / 0 |
+| fetch_duration 直方图 | 1.5 | 29.1 | 106.1 | 490 / 0 |
+| fetch_bytes 直方图 | 1.4 | 53.6 | 111.2 | 1260 / 0 |
+| teaching 路由决策分组 | 0.9 | 31.2 | 86.2 | 14301 / 0 |
+| **teaching 检索决策分组（0019 新增）** | 0.9 | 25.1 | 88.0 | 14784 / 0 |
+| teaching 对账计数 | 0.2 | 3.4 | 140.7 | 6088 / 0 |
+| provider_attempts JOIN teaching_runs | 1.1 | 48.6 | 1194.9 | 6216 / 5916 |
+| **函数整体**（study_app 执行） | 3.3 | 24.9 | 940.5 | 13458 / 0 |
+
+检索决策聚合的计划形状（单独在 1 万规模临时库上验证）：
+`Seq Scan on teaching_runs`（Filter: retrieval_decision IS NOT NULL，actual rows=1225）
+→ `HashAggregate`（actual rows=3，即三个决策组）。`teaching_runs` 现有索引
+（pkey / user_message_id / 租户组合 / claim 部分索引 / scope）均不覆盖
+`retrieval_decision`，该聚合在所有规模下都是全表顺序扫描——与函数内其余聚合同构。
+
+### 与 0018 旧值对比及结论
+
+1. **10 万事实规模：达标。** p95 = 28.5 ms ≤ 250 ms 目标（0018 为 21.1 ms，+7.4 ms，
+   与新增一条 teaching_runs 全表聚合的量级一致）。断言确认测的是非空三模式分组，
+   **0019 基准成立**。
+2. **100 万事实规模：超标，维持 TD-001，不新增升级动作。** p95 = 1099.2 ms > 250 ms，
+   且比 0018 的 666.7 ms 高约 65%。拆解：
+   - 新增检索聚合本身在 100 万规模约 88 ms，不是主因；
+   - 主因是 `teaching_runs` 因新增 jsonb 列行宽增大（路由决策分组的 buffer 命中从
+     8947 块增至 14301 块，约 +60%），函数内所有 teaching_runs 扫描（路由/检索/
+     对账/provider JOIN）同步变贵，叠加本机 32 MB shared_buffers 的放大效应
+     （provider JOIN 仍出现 5916 块 shared read）。
+   - 按 TD-001 触发条件判断：真实数据量距 50 万行遥远；15 秒缓存下即使达到 100 万
+     规模，DB 占用约 1.1 s × 4/60 ≈ 7.3% 单核（0018 口径为 4.4%），仍未触发立即
+     优化。**但 0019 后的 100 万基线已是 ~1.1 s，若真实增长接近任一触发条件
+     （任一事实表近 50 万行 / /metrics DB p95 > 250 ms / 需要更低缓存 TTL），
+     应按新基线直接执行 TD-001 的增量汇总方案。**
 
 ## 复现
 

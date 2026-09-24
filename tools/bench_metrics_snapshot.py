@@ -16,8 +16,13 @@
 测量内容：
 - 每个规模先 ANALYZE，再以应用角色（study_app，走 SECURITY DEFINER 路径）
   连续调用 ``SELECT public.study_metrics_snapshot()``，记录每次延迟与 p95；
-- 对函数内读取四类事实表的聚合查询分别 ``EXPLAIN (ANALYZE, BUFFERS)``，
-  记录执行时间与 shared buffer 命中/读取。
+- 对函数内读取四类事实表的聚合查询（含 0019 新增的 retrieval_decision 分组）
+  分别 ``EXPLAIN (ANALYZE, BUFFERS)``，记录执行时间与 shared buffer 命中/读取。
+
+0019 基准要求：每条 teaching_runs 都带合法 ``retrieval_decision``
+（80% keyword / 10% hybrid / 10% degraded，满足迁移 CHECK 闭集），
+种子阶段断言非空决策数等于 run 总数且三种模式齐全，否则报错退出 ——
+防止在空 JSONB 分组上测出假阳性结论。
 """
 
 from __future__ import annotations
@@ -109,6 +114,12 @@ EXPLAIN_QUERIES: dict[str, str] = {
         FROM public.teaching_runs
         WHERE routing_decision IS NOT NULL
         GROUP BY routing_decision
+    """,
+    "teaching_retrieval_decisions": """
+        SELECT retrieval_decision, count(*)::bigint AS decision_count
+        FROM public.teaching_runs
+        WHERE retrieval_decision IS NOT NULL
+        GROUP BY retrieval_decision
     """,
     "teaching_reconciliation": """
         SELECT count(*)::bigint FROM public.teaching_runs WHERE status = 'reconciliation_required'
@@ -271,7 +282,8 @@ def seed_phase(conn: psycopg.Connection, delta: int, state: dict) -> dict[str, i
         conn.execute(
             "INSERT INTO teaching_runs (run_id, tenant_id, project_id, conversation_id,"
             " user_message_id, principal_id, question, status, attempt_count, model_id,"
-            " prompt_version, ranking_version, routing_decision, error_code, error_detail)"
+            " prompt_version, ranking_version, routing_decision, retrieval_decision,"
+            " error_code, error_detail)"
             " SELECT 'bench_run' || (g + %s), m.tenant_id, m.project_id, m.conversation_id,"
             " m.message_id, 'bench_u' || substring(m.tenant_id from 8),"
             " 'bench question ' || g,"
@@ -285,6 +297,14 @@ def seed_phase(conn: psycopg.Connection, delta: int, state: dict) -> dict[str, i
             "   'reason_code', CASE WHEN mod(g, 3) = 0 THEN 'local_not_configured'"
             "      WHEN mod(g, 3) = 1 THEN 'local_rewrite_accepted'"
             "      ELSE 'local_unavailable_or_invalid' END),"
+            " jsonb_build_object("
+            "   'policy_version', 'retrieval-route/v1',"
+            "   'mode', CASE WHEN mod(g, 10) = 0 THEN 'degraded'"
+            "      WHEN mod(g, 10) = 2 THEN 'hybrid' ELSE 'keyword' END,"
+            "   'reason_code', CASE WHEN mod(g, 10) = 0 THEN 'vector_index_unavailable'"
+            "      ELSE '' END,"
+            "   'ranking_version', CASE WHEN mod(g, 10) = 0 THEN 'hybrid-rrf/v1'"
+            "      WHEN mod(g, 10) = 2 THEN 'hybrid-rrf/v1' ELSE 'keyword/v1' END),"
             " CASE WHEN mod(g, 50) = 0 THEN 'RECONCILIATION_REQUIRED'"
             "      ELSE 'PROVIDER_TIMEOUT' END,"
             " 'bench'"
@@ -319,6 +339,31 @@ def seed_phase(conn: psycopg.Connection, delta: int, state: dict) -> dict[str, i
     state["pa"] += attempts
     state["tenants_total"] = tenants_total
     state["projects_total"] = projects_total
+
+    # 0019 前置断言：retrieval_decision 必须全量非空且三种模式齐全，
+    # 否则测到的是空 JSONB 分组，0019 容量结论不成立 —— 直接报错退出。
+    total_runs = conn.execute("SELECT count(*) FROM public.teaching_runs").fetchone()[0]
+    decided = conn.execute(
+        "SELECT count(*) FROM public.teaching_runs WHERE retrieval_decision IS NOT NULL"
+    ).fetchone()[0]
+    if decided != total_runs:
+        raise RuntimeError(
+            "种子断言失败：retrieval_decision 非空行数"
+            f" {decided} != teaching_runs 总数 {total_runs}"
+        )
+    distribution = dict(
+        conn.execute(
+            "SELECT retrieval_decision->>'mode', count(*) FROM public.teaching_runs"
+            " WHERE retrieval_decision IS NOT NULL GROUP BY 1"
+        ).fetchall()
+    )
+    missing = {"keyword", "hybrid", "degraded"} - set(distribution)
+    if missing:
+        raise RuntimeError(
+            f"种子断言失败：retrieval_decision 缺少模式 {sorted(missing)}"
+            f"（当前分布 {distribution}）"
+        )
+    print(f"# retrieval_decision 断言通过: 非空 {decided}/{total_runs} | 分布 {distribution}")
     return {
         "jobs": jobs,
         "observations": observations,
