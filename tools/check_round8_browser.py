@@ -609,6 +609,13 @@ def main() -> int:
 
         second_user = "r8scope" + uuid.uuid4().hex[:7]
         second_page = browser.new_page(viewport={"width": 390, "height": 844})
+        second_page_errors: list[str] = []
+        second_page_console: list[str] = []
+        second_page.on("pageerror", lambda error: second_page_errors.append(str(error)))
+        second_page.on(
+            "console",
+            lambda message: second_page_console.append(f"{message.type}: {message.text}"),
+        )
         second_page.goto(args.base_url, wait_until="networkidle")
         second_page.get_by_role("tab", name="注册账号").click()
         second_page.get_by_label("用户名").fill(second_user)
@@ -664,6 +671,27 @@ def main() -> int:
         expect(page.get_by_label("输入问题")).to_have_value("")
 
         assert not errors, errors
+
+        def genuine_console_errors(messages: list[str]) -> list[str]:
+            # "Failed to load resource" 是网络层日志：回归本身会故意触发
+            # 401/404/503（幂等重试、登出后迟到响应）。这里只保留真正的
+            # JavaScript 控制台错误。
+            return [
+                message
+                for message in messages
+                if message.startswith("error:") and "Failed to load resource" not in message
+            ]
+
+        console_errors = genuine_console_errors(console_messages)
+        assert not console_errors, {"console_errors": console_errors, "console": console_messages}
+        keyboard_page_errors = [event for event in keyboard_events if event.startswith("PAGEERROR")]
+        assert not keyboard_page_errors, keyboard_page_errors
+        assert not second_page_errors, second_page_errors
+        second_page_console_errors = genuine_console_errors(second_page_console)
+        assert not second_page_console_errors, {
+            "console_errors": second_page_console_errors,
+            "console": second_page_console,
+        }
         browser.close()
     print("ROUND8_BROWSER_PASSED")
     return 0
