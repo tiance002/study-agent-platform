@@ -814,3 +814,14 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - 检索模式存证与观测（R9 任务 6）：0019 迁移给 `teaching_runs` 加 `retrieval_decision jsonb`（闭集 CHECK，同 0017 模式）并整体替换 `study_metrics_snapshot()` 加入 `retrieval_decisions` 聚合；downgrade 有数据拒绝、无数据恢复 0018 版函数体（自包含，不 import 0018 模块）。`render_metrics` 白名单渲染 `study_teaching_retrieval_modes_total` / `study_teaching_retrieval_degraded_total`。`EXPECTED_SCHEMA_VERSION` 升至 0019，sql-schema 契约已重新生成。
 - 教学回答展示检索模式：run 响应（`to_dict`）输出 `retrieval_decision`；前端证据栏显示 关键词/混合/降级（含降级原因中文文案）。`mark_dispatched` 在内存与 PG 两个适配器上原子持久化 `retrieval_decision`（契约测试扩展覆盖）。
 - 验证：新增 `test_hybrid_retrieval.py`（索引键身份、RRF 确定性、三种降级、keyword 基线等价、冻结评测不回归）与 0019 迁移结构断言 + PG 往返测试（升级带 retrieval_decisions、降级恢复 0018 函数体可用、再升级还原）；冻结评测 keyword/v1 recall@5=1.0 / MRR=1.0 保持。ruff/mypy/契约/迁移校验/许可/秘密扫描全通过。pgvector ECS 项保持未勾：只读复核确认候选包存在但扩展未安装，安装属生产变更须用户确认。前端证据栏为带空值守卫的增量标签（旧 run 无 retrieval_decision 时显示不变），`node --check` 通过；完整浏览器矩阵未随本轮重跑。
+
+## 2026-09-24 · P9 审查修复（推送 PR #2 前置条件）
+
+- P1 指标行污染：`render_metrics` 的检索模式计数改为只统计**合法整行标签组合**（非降级行 reason_code 必须为空串、降级行必须在闭集内）——此前 1 条合法降级行加 99 条未知原因行会被渲染成 degraded=100，掩盖真实降级比例。测试改整行精确比较（子串断言 `...} 1` 会误匹配 `...} 100`）并加"模式总数=各合法原因之和"闭环不变量；HELP 注明口径（已派发运行，非全部检索尝试）。
+- P1 0019 CHECK 类型约束：四个字段补 `jsonb_typeof(...) = 'string'` —— `->>` 比较对 JSON null/数值静默通过（NULL = 'x' 为 NULL，CHECK 视为满足），`RetrievalDecision.from_dict` 随后会拒绝这类值，造成"写入成功但读取失败"。新增真实 PG 反例锁：非法 JSON（null reason_code / 数值 ranking_version / 数组 mode）插入被拒、合法决策可写、有存证时降级被拒、study_app 可执行快照函数。0019 未发布，直接改本地迁移（无需前向修复迁移）。
+- P2 索引故障降级：`search_hybrid` 统一捕获 `index.has()`/`index.search()` 异常映射到 `vector_index_unavailable`（与"向量不可用时保留关键词答案"的退出门一致），补故障注入测试。
+- P2 索引键作用域隔离：`EmbeddingIndexKey` 增加 `scope`（`embedding_scope(tenant_id, project_id)`，`\x1e` 拼接），`input_hash = sha256(scope|content_hash|parser_version|model_revision)` —— 兑现计划不变量"跨项目不能命中、读回或复用缓存"。同文不同片段改为 `input_hash → list[chunks]` 映射，向量命中按稳定顺序展开为连续排名，不再丢掉存储顺序靠后的片段。补跨项目同文（A 项目索引对 B 项目等于不存在）与同文双片段（全部拿到 keyword+vector）测试。
+- P2 快照版本冻结：`build_context` 的快照 `ranking_version` 改用本次检索实际版本（`hits.ranking_version`），不再照抄 run 行建行时的预期 —— 混合模式下重放与归因以实际版本为准；补聚焦测试（run 行 keyword/v1、实际检索 hybrid-rrf/v1）。
+- P2 前端文案：查询改写降级改称"查询改写不可用 · 云端教学回答"（不再与检索降级混称"关键词检索降级"），disabled 态简化为"云端教学回答"；向量回退文案固定为"向量检索不可用，已回退关键词检索（…）"，未知原因用固定中文兜底"检索组件异常"，不透出原始码。
+- 测试补充：两个本地改写测试断言最终 `retrieval_decision`（keyword 基线、reason 为空）及其事件 payload。
+- 已知遗留（不阻断本轮）：浏览器矩阵回归未跑（需完整预览栈，归入下一验收轮）；0019 指标快照性能需按新版 JSONB 分组复测；sql-schema 契约不覆盖 CHECK 谓词（契约门禁通过不等于约束正确，由 PG 反例测试锁）。
