@@ -84,6 +84,13 @@ def _snapshot() -> dict:
     }
 
 
+def _metric_value(lines: set[str], prefix: str) -> int:
+    """从整行集合里取 `prefix value` 的数值；缺失或重复都直接失败。"""
+    matches = [line for line in lines if line.startswith(prefix + " ")]
+    assert len(matches) == 1, f"expected exactly one line for {prefix!r}, got {matches}"
+    return int(matches[0].split()[-1])
+
+
 def test_metrics_store_reuses_recent_snapshot_and_refreshes_after_ttl(monkeypatch) -> None:
     from app.db import metrics_store
 
@@ -134,15 +141,40 @@ def test_render_metrics_emits_fixed_names_units_and_closed_labels_only() -> None
         'reason_code="local_unavailable_or_invalid",answer_route="cloud"} 1'
     ) in exposition
     assert 'study_teaching_fallbacks_total{reason_code="local_unavailable_or_invalid"} 1' in exposition
-    assert 'study_teaching_retrieval_modes_total{mode="keyword"} 3' in exposition
-    assert 'study_teaching_retrieval_modes_total{mode="hybrid"} 2' in exposition
-    assert 'study_teaching_retrieval_modes_total{mode="degraded"} 1' in exposition
+    # 整行精确比较：子串断言会让 `...} 1` 误匹配 `...} 100`。
+    exposition_lines = set(exposition.splitlines())
+    assert 'study_teaching_retrieval_modes_total{mode="keyword"} 3' in exposition_lines
+    assert 'study_teaching_retrieval_modes_total{mode="hybrid"} 2' in exposition_lines
+    assert 'study_teaching_retrieval_modes_total{mode="degraded"} 1' in exposition_lines
     assert (
         'study_teaching_retrieval_degraded_total{reason_code="vector_index_unavailable"} 1'
-        in exposition
+        in exposition_lines
     )
-    assert 'study_teaching_retrieval_degraded_total{reason_code="embedding_provider_failed"} 0' in exposition
+    assert (
+        'study_teaching_retrieval_degraded_total{reason_code="embedding_provider_failed"} 0'
+        in exposition_lines
+    )
+    assert (
+        'study_teaching_retrieval_degraded_total{reason_code="embedding_model_version_mismatch"} 0'
+        in exposition_lines
+    )
     assert "private retrieval sentinel" not in exposition
+    # 闭环不变量：模式总数 == 各合法原因之和（污染行不得抬高降级计数）。
+    degraded_mode_total = _metric_value(
+        exposition_lines, 'study_teaching_retrieval_modes_total{mode="degraded"}'
+    )
+    degraded_reason_sum = sum(
+        _metric_value(
+            exposition_lines,
+            f'study_teaching_retrieval_degraded_total{{reason_code="{reason}"}}',
+        )
+        for reason in (
+            "embedding_provider_failed",
+            "vector_index_unavailable",
+            "embedding_model_version_mismatch",
+        )
+    )
+    assert degraded_mode_total == degraded_reason_sum
     assert 'study_provider_attempts_total{provider="openai",outcome="timeout"} 1' in exposition
     assert 'study_provider_tokens_total{provider="openai",direction="input"} 42' in exposition
     assert 'study_provider_usage_total{provider="openai",state="missing"} 1' in exposition
@@ -236,6 +268,9 @@ def test_retrieval_decision_migration_is_closed_self_contained_and_guarded() -> 
     assert 'down_revision = "0018"' in sql
     # 列 + 闭集 CHECK：模式三元、降级原因三闭集、非降级原因必须为空串。
     assert "add column retrieval_decision jsonb" in sql
+    # 字段类型约束：null / 数值型字段在 `->>` 比较下会静默通过，必须显式 typeof。
+    assert "jsonb_typeof(retrieval_decision->'reason_code') = 'string'" in sql
+    assert "jsonb_typeof(retrieval_decision->'ranking_version') = 'string'" in sql
     assert "retrieval_decision->>'mode' in ('keyword', 'hybrid', 'degraded')" in sql
     assert "'embedding_model_version_mismatch'" in sql
     assert "retrieval_decision->>'ranking_version' <> ''" in sql
@@ -251,7 +286,7 @@ def test_retrieval_decision_migration_is_closed_self_contained_and_guarded() -> 
     assert "'retrieval_decisions'" in sql
 
 
-def _run_alembic(dsn: str, *arguments: str) -> None:
+def _run_alembic(dsn: str, *arguments: str, check: bool = True) -> subprocess.CompletedProcess:
     result = subprocess.run(
         [sys.executable, "-m", "alembic", *arguments],
         cwd=ROOT,
@@ -259,8 +294,9 @@ def _run_alembic(dsn: str, *arguments: str) -> None:
         capture_output=True,
         text=True,
     )
-    if result.returncode != 0:
+    if check and result.returncode != 0:
         raise AssertionError((result.stdout or "") + (result.stderr or ""))
+    return result
 
 
 @PG_ONLY
@@ -293,6 +329,105 @@ def test_retrieval_decision_migration_round_trips_and_restores_0018_function() -
                 "SELECT public.study_metrics_snapshot()"
             ).fetchone()[0]
         assert restored["retrieval_decisions"] == []
+
+
+def _seed_teaching_run(dsn: str, suffix: str, retrieval_decision) -> None:
+    """造一条带 retrieval_decision 的 teaching_runs（含最小父链）。"""
+    tenant = f"t_r19_{suffix}"
+    with psycopg.connect(dsn) as conn, conn.transaction():
+        conn.execute(
+            "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)", (tenant, tenant)
+        )
+        conn.execute(
+            "INSERT INTO principals (principal_id, tenant_id) VALUES (%s, %s)",
+            (f"u_r19_{suffix}", tenant),
+        )
+        conn.execute(
+            "INSERT INTO projects (project_id, tenant_id, name) VALUES (%s, %s, %s)",
+            (f"proj_r19_{suffix}", tenant, "r19"),
+        )
+        conn.execute(
+            "INSERT INTO conversations (conversation_id, tenant_id, project_id, title)"
+            " VALUES (%s, %s, %s, %s)",
+            (f"conv_r19_{suffix}", tenant, f"proj_r19_{suffix}", "r19"),
+        )
+        conn.execute(
+            "INSERT INTO messages (message_id, tenant_id, project_id, conversation_id,"
+            " seq, role, content) VALUES (%s, %s, %s, %s, 1, 'user', 'q')",
+            (
+                f"msg_r19_{suffix}",
+                tenant,
+                f"proj_r19_{suffix}",
+                f"conv_r19_{suffix}",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO teaching_runs (run_id, tenant_id, project_id, conversation_id,"
+            " user_message_id, principal_id, answer_seq, question, status, model_id,"
+            " prompt_version, ranking_version, retrieval_decision)"
+            " VALUES (%s, %s, %s, %s, %s, %s, 2, 'q', 'queued', 'm', 'p', 'keyword/v1', %s)",
+            (
+                f"run_r19_{suffix}",
+                tenant,
+                f"proj_r19_{suffix}",
+                f"conv_r19_{suffix}",
+                f"msg_r19_{suffix}",
+                f"u_r19_{suffix}",
+                psycopg.types.json.Json(retrieval_decision) if retrieval_decision is not None else None,
+            ),
+        )
+
+
+_VALID_DECISION = {
+    "policy_version": "retrieval-route/v1",
+    "mode": "degraded",
+    "reason_code": "vector_index_unavailable",
+    "ranking_version": "hybrid-rrf/v1",
+}
+
+
+@PG_ONLY
+def test_retrieval_decision_check_rejects_malformed_json_and_guards_downgrade() -> None:
+    """CHECK 必须拒绝字段类型错误的 JSON；有存证时降级必须失败；应用角色可读快照。
+
+    `->>'x' = '...'` 对 JSON null / 数值会得到 NULL（CHECK 视为通过），
+    所以 typeof 约束不是冗余 —— 这条测试就是它的反例锁。
+    """
+    from psycopg import errors as pg_errors
+
+    with pg_support.temp_test_database() as database:
+        dsn = database.migration_dsn
+
+        # 合法决策可写入（对照组：不是约束过严把合法值也拦了）。
+        _seed_teaching_run(dsn, "ok", _VALID_DECISION)
+
+        # 字段类型非法的变体必须被 CHECK 拒绝。
+        for index, override in enumerate(
+            [
+                {"reason_code": None},  # JSON null
+                {"ranking_version": 1},  # 数值型
+                {"mode": ["degraded"]},  # 数组
+            ]
+        ):
+            malformed = {**_VALID_DECISION, **override}
+            with pytest.raises(pg_errors.CheckViolation):
+                _seed_teaching_run(dsn, f"bad{index}", malformed)
+
+        # 有存证时降级必须拒绝（先清掉合法行再降级才能成功 —— 这里只验证拒绝）。
+        result = _run_alembic(dsn, "downgrade", "0018", check=False)
+        assert result.returncode != 0
+        assert "cannot downgrade after retrieval decisions were recorded" in (
+            result.stdout + result.stderr
+        )
+
+        # 应用角色（study_app）能执行快照函数并看到聚合行 —— 无需表级 SELECT。
+        with psycopg.connect(database.app_dsn) as conn:
+            snapshot = conn.execute(
+                "SELECT public.study_metrics_snapshot()"
+            ).fetchone()[0]
+        assert snapshot["retrieval_decisions"] == [
+            {"mode": "degraded", "reason_code": "vector_index_unavailable", "count": 1}
+        ]
 
 
 def test_postgres_metrics_store_reads_only_the_aggregate_snapshot(monkeypatch) -> None:

@@ -288,16 +288,20 @@ def upgrade() -> None:
 ALTER TABLE teaching_runs
     ADD CONSTRAINT teaching_runs_retrieval_decision_check
     CHECK (
-        retrieval_decision IS NULL
-        OR (
-            jsonb_typeof(retrieval_decision) = 'object'
-            AND retrieval_decision ?& ARRAY[
-                'policy_version', 'mode', 'reason_code', 'ranking_version'
-            ]
-            AND retrieval_decision - ARRAY[
-                'policy_version', 'mode', 'reason_code', 'ranking_version'
-            ] = '{}'::jsonb
-            AND retrieval_decision->>'policy_version' = 'retrieval-route/v1'
+            retrieval_decision IS NULL
+            OR (
+                jsonb_typeof(retrieval_decision) = 'object'
+                AND retrieval_decision ?& ARRAY[
+                    'policy_version', 'mode', 'reason_code', 'ranking_version'
+                ]
+                AND retrieval_decision - ARRAY[
+                    'policy_version', 'mode', 'reason_code', 'ranking_version'
+                ] = '{}'::jsonb
+                AND jsonb_typeof(retrieval_decision->'policy_version') = 'string'
+                AND jsonb_typeof(retrieval_decision->'mode') = 'string'
+                AND jsonb_typeof(retrieval_decision->'reason_code') = 'string'
+                AND jsonb_typeof(retrieval_decision->'ranking_version') = 'string'
+                AND retrieval_decision->>'policy_version' = 'retrieval-route/v1'
             AND retrieval_decision->>'mode' IN ('keyword', 'hybrid', 'degraded')
             AND (
                 (

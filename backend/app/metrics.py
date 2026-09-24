@@ -181,11 +181,23 @@ def render_metrics(snapshot: Mapping[str, Any]) -> str:
             "# TYPE study_teaching_fallbacks_total counter",
             "study_teaching_fallbacks_total{reason_code=\"local_unavailable_or_invalid\"} "
             f"{fallback_count}",
-            "# HELP study_teaching_retrieval_modes_total Durable teaching retrieval modes.",
+            "# HELP study_teaching_retrieval_modes_total Durable teaching retrieval modes (persisted decisions of dispatched runs, not every retrieval attempt).",
             "# TYPE study_teaching_retrieval_modes_total counter",
         ]
     )
-    retrieval_rows = _rows(snapshot.get("retrieval_decisions"))
+    retrieval_rows = [
+        row
+        for row in _rows(snapshot.get("retrieval_decisions"))
+        # 模式计数只认**合法的整行标签组合**：非降级行必须 reason_code 为空串，
+        # 降级行的 reason_code 必须在闭集内 —— 否则一条未知原因的污染行会把
+        # "降级 1 次"渲染成"降级 100 次"，掩盖真实降级比例。
+        if row.get("mode") in RETRIEVAL_MODE_LABELS
+        and (
+            row.get("reason_code") in RETRIEVAL_DEGRADED_LABELS
+            if row.get("mode") == "degraded"
+            else row.get("reason_code") == ""
+        )
+    ]
     for mode in RETRIEVAL_MODE_LABELS:
         count = _row_count(retrieval_rows, {"mode": mode})
         lines.append(f'study_teaching_retrieval_modes_total{{mode="{mode}"}} {count}')
