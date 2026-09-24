@@ -402,7 +402,10 @@ def main() -> int:
         page.get_by_role("button", name="用同一请求重试", exact=True).click()
         expect(page.get_by_text("回答已准备好", exact=True)).to_be_visible(timeout=15000)
         expect(page.get_by_text("阅读资料后给出可执行的学习解释。", exact=True)).to_be_visible(timeout=15000)
-        expect(page.get_by_text("关键词检索 · 云端教学回答", exact=True)).to_be_visible()
+        # P9 把检索模式与路由状态拆成两个独立标签：本地预览未配置查询改写，
+        # 路由标签为"云端教学回答"，检索标签为"关键词检索"。
+        expect(page.get_by_text("云端教学回答", exact=True)).to_be_visible()
+        expect(page.get_by_text("关键词检索", exact=True)).to_be_visible()
         assert len(teaching_requests) == 2
         assert teaching_requests[0] == teaching_requests[1]
         page.unroute("**/teaching-runs", degrade_first_teaching_response)

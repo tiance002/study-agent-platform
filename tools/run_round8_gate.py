@@ -72,6 +72,8 @@ def main() -> int:
         ["node", "--check", "frontend/app.js"],
         [python, "tools/skills/gen_contracts.py", "--all", "--check"],
         [python, "tools/check_round8_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts, "--invite", args.invite],
+        # P9 证据栏浏览器回归：验证检索/路由标签与窄屏布局（复用同一预览）。
+        [python, "tools/check_p9_evidence_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts],
         [python, "tools/check_round8_process_recovery.py"],
     ]
     for command in commands:
