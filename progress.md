@@ -825,3 +825,14 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - P2 前端文案：查询改写降级改称"查询改写不可用 · 云端教学回答"（不再与检索降级混称"关键词检索降级"），disabled 态简化为"云端教学回答"；向量回退文案固定为"向量检索不可用，已回退关键词检索（…）"，未知原因用固定中文兜底"检索组件异常"，不透出原始码。
 - 测试补充：两个本地改写测试断言最终 `retrieval_decision`（keyword 基线、reason 为空）及其事件 payload。
 - 已知遗留（不阻断本轮）：浏览器矩阵回归未跑（需完整预览栈，归入下一验收轮）；0019 指标快照性能需按新版 JSONB 分组复测；sql-schema 契约不覆盖 CHECK 谓词（契约门禁通过不等于约束正确，由 PG 反例测试锁）。
+
+## 2026-09-24 · P9 验收收口与 PR #2 同步
+
+按 `docs/superpowers/plans/2026-09-24-p9-acceptance-and-pr2.md` 执行，两个验收缺口已闭合：
+
+- **证据栏浏览器回归**：新增 `tools/check_p9_evidence_browser.py`（挂载真实 `window.StudyViews.EvidenceRail`，11 个场景按完整 DOM 文本精确断言：旧 run 无标签、keyword/hybrid、三个闭集降级原因中文文案、未知原因兜底不泄露原始码、改写降级与向量回退不混称、检索/路由标签并存；390px 无横向溢出 + 截图 + pageerror 收集）。接入 `run_round8_gate.py`；`check_round8_browser.py` 过时的合并文案断言拆为两条独立标签断言。双脚本输出 `P9_EVIDENCE_BROWSER_PASSED` / `ROUND8_BROWSER_PASSED`（提交 `47809b4`）。
+- **0019 指标快照容量重测**：`bench_metrics_snapshot.py` 种子给每条 teaching_runs 写合法 `retrieval_decision`（80/10/10 确定性分配，断言非空数=run 数且三模式齐全，杜绝空 JSONB 分组假阳性）；EXPLAIN 集新增 retrieval 聚合。实测（PG 16.4 本地，repeat 20）：10 万事实 p95=28.5ms 达标（250ms 目标）；100 万 p95=1099.2ms 超标（0018 为 666.7ms），主因 jsonb 列使 teaching_runs 行宽 +60% 拖慢函数内全部该表扫描（新增聚合本身约 88ms），按 TD-001 新基线维持不优化。报告见 `docs/performance/metrics-snapshot-2026-09.md`「0019 重测」节（提交 `afb349d`）。
+- **进程恢复检查修复**：门禁首跑在 `check_round8_process_recovery.py` 失败（`ReadError [WinError 10054]`）。traceback 落盘定位：失败点是响应丢弃代理的**外层** POST —— 代理故意截断响应，Windows 的 `shutdown(SHUT_RDWR)` 以 RST 复位连接，harness 只接受 Linux 风格的 `RemoteProtocolError`。修复为两种传输表现都接受（被测的幂等重放断言在其后不变）；失败 traceback 同时落盘到 run 产物目录便于今后诊断。复测通过（提交 `9b40e81`）。
+- **未跟踪文件归属**：`.planning/`（三轮工作底稿，正式结论已在 progress.md/计划文档）、`.trae/mcp.json`（机器绝对路径）、`INTEGRATION_SUMMARY.md`（安装状态待复核）、`verify_components.py`（Trae 工具验证）均维持未跟踪；跟踪文件 370 个秘密扫描通过，未跟踪文件定向凭据模式扫描无命中。
+- **发布前总门禁**：`ROUND8_GATE_PASSED`（2026-09-24）。full 967 通过 / 1 跳过（并发争抢用例的 memory 参数化：内存锁天然串行，PG 场景由 PG 子集覆盖）；PG 子集 145 通过 / 0 跳过；ruff/mypy(137 文件)/compileall/5 个前端脚本 `node --check`/三份契约 `--check` 通过；迁移校验 19 条单头 0019；许可扫描通过（2 个 MPL-2.0 弱 copyleft 提示，非阻断）；`git diff --check` 通过。JUnit 证据在 `var/round8-gate/`（gitignore）。
+- **PR #2 同步**：门禁全绿后推送本分支更新 PR #2（Draft 保持），PR 描述补 0019/P9 修复/浏览器与容量证据及 pgvector/reranker 未完成项；等待新 head 的 GitHub CI 结果，绿色前不请求评审。
