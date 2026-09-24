@@ -8,14 +8,15 @@ embedding 也未接入。因此这里冻结的是**契约**——结构与协议
 加上一个确定性的进程内实现供管线测试。谁实现了 `EmbeddingProvider`，
 混合检索就能用谁；实现缺席时检索退回 `keyword/v1` 基线（见 `store.py`）。
 
-## 版本化索引键：四个字段共同决定缓存身份
+## 版本化索引键：五个字段共同决定缓存身份
 
 R9 计划要求：content hash、parser/chunker version、embedding model
 revision、最终 input hash **共同**决定一条向量缓存的身份。前三个是
-"输入是什么"，第四个是"把前三者绑定后的指纹"：
+"输入是什么"，第四个是"把前三者与**作用域**绑定后的指纹"：
 
 ```text
-input_hash = sha256(content_hash | parser_version | model_revision)
+input_hash = sha256(scope | content_hash | parser_version | model_revision)
+scope       = tenant_id \x1f project_id
 ```
 
 任何一项变化（重新切块、换 embedding 模型、内容更新）都会产生新的
@@ -23,6 +24,11 @@ input_hash = sha256(content_hash | parser_version | model_revision)
 把 model revision 烙进键里，是为了杜绝最隐蔽的一类错：换了 embedding
 模型后继续读旧模型的向量，相似度比较在两个语义空间之间做，结果看似
 正常、实则无意义，而且没有任何报错。
+
+把 scope 烙进键里是计划不变量的要求：**跨项目不能命中、读回或复用
+缓存**。同内容的片段在不同项目派生不同的键 —— 即使向量本身是内容
+的确定性函数（复用不会算错），键上的隔离也杜绝"一个项目的索引存量
+影响另一个项目的缓存身份"这类跨租户推理面。
 
 ## `HashingEmbeddingProvider` 的诚实声明
 
@@ -56,43 +62,63 @@ HASHING_EMBEDDING_DIMENSIONS = 64
 class EmbeddingIndexKey:
     """一条向量缓存条目的**完整身份**。
 
-    `input_hash` 是派生属性（构造时由前三个字段算出），因此
+    `input_hash` 是派生属性（构造时由其余四个字段算出），因此
     "键与它的组成部分不一致"在类型上不可表达 —— 与
-    `SourceDocument.content_hash` 同一条设计理由。
+    `SourceDocument.content_hash` 同一条设计理由。`scope`
+    （`embedding_scope()` 的产物）把租户/项目烙进缓存身份，
+    跨项目同内容不共用键。
     """
 
     content_hash: str
     parser_version: str
     model_revision: str
+    scope: str
     input_hash: str
 
     def __post_init__(self) -> None:
         if not self.content_hash or not self.parser_version or not self.model_revision:
             raise ValueError("索引键的三个组成部分都不能为空")
-        expected = _input_hash(self.content_hash, self.parser_version, self.model_revision)
+        if not self.scope:
+            raise ValueError("索引键的 scope 不能为空（用 embedding_scope() 构造）")
+        expected = _input_hash(
+            self.scope, self.content_hash, self.parser_version, self.model_revision
+        )
         if self.input_hash != expected:
             raise ValueError(
-                "input_hash 与 (content_hash, parser_version, model_revision) 不一致；"
-                "索引键必须由 embedding_index_key() 构造"
+                "input_hash 与 (scope, content_hash, parser_version, model_revision)"
+                " 不一致；索引键必须由 embedding_index_key() 构造"
             )
 
 
-def _input_hash(content_hash: str, parser_version: str, model_revision: str) -> str:
-    """把键的三个组成部分绑成一个指纹。分隔符用 `\\x1f`（单元分隔符）：
+def embedding_scope(tenant_id: str, project_id: str) -> str:
+    """把租户/项目绑定成键的作用域组件。
+
+    分隔符用 `\x1e`（记录分隔符）：系统生成的标识符里不会出现控制
+    字符，它只负责让 `(tenant, project)` 与 `(tenant', project')` 的
+    拼接无歧义。
+    """
+    if not tenant_id or not project_id:
+        raise ValueError("scope 需要非空的 tenant_id 与 project_id")
+    return tenant_id + "\x1e" + project_id
+
+
+def _input_hash(scope: str, content_hash: str, parser_version: str, model_revision: str) -> str:
+    """把键的四个组成部分绑成一个指纹。分隔符用 `\\x1f`（单元分隔符）：
     出现在正常文本里的概率为零，杜绝 `a|bc` 与 `ab|c` 拼出同一指纹。"""
-    joined = "\x1f".join((content_hash, parser_version, model_revision))
+    joined = "\x1f".join((scope, content_hash, parser_version, model_revision))
     return "sha256:" + hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
 def embedding_index_key(
-    *, content_hash: str, parser_version: str, model_revision: str
+    *, content_hash: str, parser_version: str, model_revision: str, scope: str
 ) -> EmbeddingIndexKey:
     """索引键的**唯一**构造出口。"""
     return EmbeddingIndexKey(
         content_hash=content_hash,
         parser_version=parser_version,
         model_revision=model_revision,
-        input_hash=_input_hash(content_hash, parser_version, model_revision),
+        scope=scope,
+        input_hash=_input_hash(scope, content_hash, parser_version, model_revision),
     )
 
 
@@ -262,13 +288,18 @@ def _norm(vector: tuple[float, ...]) -> float:
 
 
 def embed_chunk_key(
-    *, chunk_content_hash: str, chunk_parser_version: str, model_revision: str
+    *,
+    chunk_content_hash: str,
+    chunk_parser_version: str,
+    model_revision: str,
+    scope: str,
 ) -> EmbeddingIndexKey:
     """从片段派生索引键的便捷出口（`content_hash` 参数名区分于模块函数）。"""
     return embedding_index_key(
         content_hash=chunk_content_hash,
         parser_version=chunk_parser_version,
         model_revision=model_revision,
+        scope=scope,
     )
 
 
@@ -282,5 +313,6 @@ __all__ = [
     "VectorIndex",
     "VectorMatch",
     "embedding_index_key",
+    "embedding_scope",
     "embed_chunk_key",
 ]

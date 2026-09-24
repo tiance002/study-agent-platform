@@ -161,7 +161,10 @@ def build_context(
         project_id,
         knowledge=knowledge,
         hits=hits.hits,
-        ranking_version=run.ranking_version,
+        # 快照冻结**本次检索实际使用**的排序版本（keyword/v1 或
+        # hybrid-rrf/v1），而不是 run 行建行时的预期 —— 混合模式下
+        # 两者可能不同，重放与归因都要以实际版本为准。
+        ranking_version=hits.ranking_version,
     )
     messages = build_messages(
         question=run.question,

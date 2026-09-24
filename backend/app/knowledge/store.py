@@ -41,6 +41,7 @@ from app.knowledge.embedding import (
     EmbeddingProvider,
     VectorIndex,
     embed_chunk_key,
+    embedding_scope,
 )
 from app.knowledge.evidence_state import (
     RetrievalHealth,
@@ -268,8 +269,10 @@ class KnowledgeRepository:
         1. provider 的 `model_revision` 与索引的 revision 不一致
            → `embedding_model_version_mismatch`（换模型后旧索引整体失效）；
         2. provider 调用抛任何异常（超时、网络、限流）→ `embedding_provider_failed`；
-        3. 作用域内**没有任何**片段在索引中有向量 → `vector_index_unavailable`
-           （索引整体未建；部分缺失只是该片段不进向量候选，不触发降级）。
+        3. 作用域内**没有任何**片段在索引中有向量，或索引本身的
+           `has` / `search` 抛异常 → `vector_index_unavailable`
+           （索引整体未建或不可用；部分缺失只是该片段不进向量候选，
+           不触发降级）。
 
         向量组件未注入时返回 `keyword` 模式 —— 基线是正常状态，不是降级。
 
@@ -278,6 +281,8 @@ class KnowledgeRepository:
         向量候选与关键词候选来自**同一个** `stored_chunks` 收窄结果：
         租户 / 项目 / 最新版本过滤发生在 SQL / RLS 边界内（02 号规格 §7），
         索引只对已收窄的键排序，不存在"向量路径绕过 RLS"的第二条入口。
+        索引键还把 `(tenant_id, project_id)` 烙进 `input_hash` ——
+        跨项目同内容不共用缓存身份（计划不变量：跨项目不能复用缓存）。
         """
         # 默认就是最新版本（`latest_only=True`）：这是**检索**该有的语义，
         # 历史版本由引用按 `document_id` 精确回读，不经检索。
@@ -316,28 +321,40 @@ class KnowledgeRepository:
         except Exception:  # noqa: BLE001 - 任何 provider 失败都降级，绝不上抛
             return _degraded("embedding_provider_failed")
 
-        # 键按 `stored_chunks` 的稳定顺序（document_id, chunk_index）派生：
-        # 同一 input_hash 对应多个片段时（同内容不同 chunk），取顺序在前的。
+        # 键按 `stored_chunks` 的稳定顺序（document_id, chunk_index）派生。
+        # 同 input_hash 可能对应多个片段（同内容不同 chunk）：向量命中按
+        # 稳定顺序**展开**为连续排名，而不是只保留顺序在前的那个 ——
+        # 否则同内容的第二、三个片段永远拿不到向量候选，RRF 得分
+        # 被存储顺序单方面决定。
+        scope = embedding_scope(actor.tenant_id, project_id)
         index_keys: list = []
-        chunk_by_input_hash: dict[str, StoredChunk] = {}
+        chunks_by_input_hash: dict[str, list[StoredChunk]] = {}
         for chunk in scoped:
             key = embed_chunk_key(
                 chunk_content_hash=chunk.content_hash,
                 chunk_parser_version=chunk.parser_version,
                 model_revision=provider.model_revision,
+                scope=scope,
             )
             index_keys.append(key)
-            chunk_by_input_hash.setdefault(key.input_hash, chunk)
+            chunks_by_input_hash.setdefault(key.input_hash, []).append(chunk)
 
-        if not any(index.has(key) for key in index_keys):
+        try:
+            indexed = any(index.has(key) for key in index_keys)
+        except Exception:  # noqa: BLE001 - 索引故障视同不可用，不让它弄丢答案
+            return _degraded("vector_index_unavailable")
+        if not indexed:
             return _degraded("vector_index_unavailable")
 
-        matches = index.search(tuple(index_keys), query_embedding, limit=limit)
-        vector_hits = tuple(
-            (chunk_by_input_hash[match.key.input_hash], position)
-            for position, match in enumerate(matches, start=1)
-        )
-        fused = fuse_rrf(keyword_hits, vector_hits, limit=limit)
+        try:
+            matches = index.search(tuple(index_keys), query_embedding, limit=limit)
+        except Exception:  # noqa: BLE001 - 同上：索引故障 = 降级，不上抛
+            return _degraded("vector_index_unavailable")
+        vector_hits: list[tuple[StoredChunk, int]] = []
+        for match in matches:
+            for chunk in chunks_by_input_hash[match.key.input_hash]:
+                vector_hits.append((chunk, len(vector_hits) + 1))
+        fused = fuse_rrf(keyword_hits, tuple(vector_hits), limit=limit)
         recall_sources = tuple(
             (candidate.chunk.chunk_id, "+".join(candidate.recalled_from))
             for candidate in fused

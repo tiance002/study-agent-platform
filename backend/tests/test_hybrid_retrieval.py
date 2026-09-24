@@ -1,15 +1,18 @@
 """R9 任务 3：混合检索增量 —— embedding 端口、RRF 融合与降级路径。
 
-守三件**分开**的事：
+守四件**分开**的事：
 
-1. **版本化索引键**：content hash / parser version / model revision /
-   input hash 四者共同决定缓存身份；任何一项变化都必须产生新键，
-   旧向量"对不上号"而不是"碰巧还被读"。
+1. **版本化索引键**：scope / content hash / parser version / model
+   revision 共同决定 input hash（缓存身份）；任何一项变化都必须产生
+   新键，旧向量"对不上号"而不是"碰巧还被读"。scope 把租户/项目烙进
+   键里 —— 跨项目同内容不共用缓存。
 2. **确定性融合**：同两个候选列表必须得到逐位相同的融合结果
    （精确有理数分数 + 稳定 tie-break）。
-3. **降级不丢答案**：provider 失败、索引缺失、版本不匹配时回退
-   关键词结果并携带闭集原因 —— 向量路径的任何失败都不许让
+3. **降级不丢答案**：provider 失败、索引缺失或故障、版本不匹配时
+   回退关键词结果并携带闭集原因 —— 向量路径的任何失败都不许让
    关键词路径已经拿到的候选消失。
+4. **同文不同片段**：同内容的多个片段共享向量键，向量命中按稳定
+   顺序展开为连续排名，每个片段都拿得到向量候选。
 
 keyword/v1 基线的回归由 `test_knowledge_search.py` 的冻结夹具守着；
 本文件只测**新增**的混合路径，未注入向量组件时 `search_hybrid`
@@ -33,6 +36,7 @@ from app.knowledge.embedding import (
     InMemoryVectorIndex,
     embed_chunk_key,
     embedding_index_key,
+    embedding_scope,
 )
 from app.knowledge.fusion import (
     HYBRID_RANKING_VERSION,
@@ -48,6 +52,7 @@ from app.product.memory_store import InMemoryProductRepository
 EVENT_TIME = datetime(2026, 9, 24, tzinfo=timezone.utc)
 TENANT = "t_hybrid"
 ACTOR_ID = "u_hybrid_alice"
+SCOPE = embedding_scope(TENANT, "p_hybrid")
 
 
 def _unique(prefix: str) -> str:
@@ -85,7 +90,7 @@ def _scored(chunk: StoredChunk, score: int = 1) -> ScoredChunk:
 
 @pytest.mark.invariant
 def test_index_key_binds_all_identity_parts():
-    """三个组成部分里**任何一项**变化都必须产生新的 `input_hash`。
+    """组成部分里**任何一项**变化都必须产生新的 `input_hash`。
 
     少绑一项，那一项的变化就会复用旧向量：换切块器后按旧切分检索、
     换 embedding 模型后在两个语义空间之间比相似度 —— 两者都没有报错。
@@ -94,29 +99,76 @@ def test_index_key_binds_all_identity_parts():
         content_hash="sha256:" + "a" * 64,
         parser_version="structure/v1",
         model_revision="hashing-embedding/v1",
+        scope=SCOPE,
     )
     same = embedding_index_key(
         content_hash="sha256:" + "a" * 64,
         parser_version="structure/v1",
         model_revision="hashing-embedding/v1",
+        scope=SCOPE,
     )
     assert base.input_hash == same.input_hash
     changed_content = embedding_index_key(
         content_hash="sha256:" + "b" * 64,
         parser_version="structure/v1",
         model_revision="hashing-embedding/v1",
+        scope=SCOPE,
     )
     changed_parser = embedding_index_key(
         content_hash="sha256:" + "a" * 64,
         parser_version="structure/v2",
         model_revision="hashing-embedding/v1",
+        scope=SCOPE,
     )
     changed_model = embedding_index_key(
         content_hash="sha256:" + "a" * 64,
         parser_version="structure/v1",
         model_revision="hashing-embedding/v2",
+        scope=SCOPE,
     )
-    assert len({base.input_hash, changed_content.input_hash, changed_parser.input_hash, changed_model.input_hash}) == 4
+    changed_scope = embedding_index_key(
+        content_hash="sha256:" + "a" * 64,
+        parser_version="structure/v1",
+        model_revision="hashing-embedding/v1",
+        scope=embedding_scope(TENANT, "p_other"),
+    )
+    assert len(
+        {
+            base.input_hash,
+            changed_content.input_hash,
+            changed_parser.input_hash,
+            changed_model.input_hash,
+            changed_scope.input_hash,
+        }
+    ) == 5
+
+
+@pytest.mark.invariant
+def test_index_key_scope_isolates_projects_and_tenants():
+    """跨项目 / 跨租户的同内容片段必须派生**不同**的缓存身份。
+
+    计划不变量：跨项目不能命中、读回或复用缓存。向量本身是内容的
+    确定性函数（复用不会算错），但键上的隔离杜绝一个项目的索引存量
+    影响另一个项目的缓存身份。
+    """
+    same_tenant_other_project = embedding_scope(TENANT, "p_other")
+    other_tenant = embedding_scope("t_other", "p_hybrid")
+    assert same_tenant_other_project != SCOPE
+    assert other_tenant != SCOPE
+    parts = dict(
+        content_hash="sha256:" + "a" * 64,
+        parser_version="structure/v1",
+        model_revision="hashing-embedding/v1",
+    )
+    key_here = embedding_index_key(scope=SCOPE, **parts)
+    key_other_project = embedding_index_key(scope=same_tenant_other_project, **parts)
+    key_other_tenant = embedding_index_key(scope=other_tenant, **parts)
+    assert len({key_here.input_hash, key_other_project.input_hash, key_other_tenant.input_hash}) == 3
+    # 空 scope / 空标识在构造期拒绝。
+    with pytest.raises(ValueError):
+        embedding_scope("", "p_hybrid")
+    with pytest.raises(ValueError):
+        embedding_scope(TENANT, "")
 
 
 @pytest.mark.invariant
@@ -127,6 +179,7 @@ def test_index_key_rejects_inconsistent_input_hash():
             content_hash="sha256:" + "a" * 64,
             parser_version="structure/v1",
             model_revision="hashing-embedding/v1",
+            scope=SCOPE,
             input_hash="sha256:" + "0" * 64,
         )
 
@@ -154,6 +207,7 @@ def test_in_memory_index_rejects_foreign_revision_and_upserts_idempotently():
         content_hash="sha256:" + "a" * 64,
         parser_version="structure/v1",
         model_revision=HASHING_EMBEDDING_REVISION,
+        scope=SCOPE,
     )
     vector = provider.embed_texts(("文本",))[0]
     index.upsert(key, vector)
@@ -164,6 +218,7 @@ def test_in_memory_index_rejects_foreign_revision_and_upserts_idempotently():
         content_hash="sha256:" + "a" * 64,
         parser_version="structure/v1",
         model_revision="hashing-embedding/v2",
+        scope=SCOPE,
     )
     with pytest.raises(ValueError, match="revision"):
         index.upsert(foreign, vector)
@@ -182,6 +237,7 @@ def test_index_search_ranks_exact_match_first_and_skips_unindexed_keys():
                 content_hash="sha256:" + text[:64].ljust(64, "0"),
                 parser_version="structure/v1",
                 model_revision=HASHING_EMBEDDING_REVISION,
+                scope=SCOPE,
             ),
             provider.embed_texts((text,))[0],
         )
@@ -191,6 +247,7 @@ def test_index_search_ranks_exact_match_first_and_skips_unindexed_keys():
             content_hash="sha256:" + text[:64].ljust(64, "0"),
             parser_version="structure/v1",
             model_revision=HASHING_EMBEDDING_REVISION,
+            scope=SCOPE,
         )
         for text in (target_text, other_text)
     ) + (
@@ -199,6 +256,7 @@ def test_index_search_ranks_exact_match_first_and_skips_unindexed_keys():
             content_hash="sha256:" + "c" * 64,
             parser_version="structure/v1",
             model_revision=HASHING_EMBEDDING_REVISION,
+            scope=SCOPE,
         ),
     )
     matches = index.search(keys, query, limit=5)
@@ -342,15 +400,21 @@ def _project_id(repo: KnowledgeRepository) -> str:
     return project_id
 
 
-def _build_index(repo: KnowledgeRepository, actor: Principal, project_id: str) -> InMemoryVectorIndex:
+def _build_index(
+    repo: KnowledgeRepository,
+    actor: Principal,
+    project_id: str,
+) -> InMemoryVectorIndex:
     """用与生产路径完全相同的键规则为已收窄片段建向量索引。"""
     provider = HashingEmbeddingProvider()
     index = InMemoryVectorIndex(model_revision=provider.model_revision)
+    scope = embedding_scope(actor.tenant_id, project_id)
     for chunk in repo._ingestion.stored_chunks(actor, project_id, latest_only=True):  # noqa: SLF001
         key = embed_chunk_key(
             chunk_content_hash=chunk.content_hash,
             chunk_parser_version=chunk.parser_version,
             model_revision=provider.model_revision,
+            scope=scope,
         )
         index.upsert(key, provider.embed_texts((chunk.content,))[0])
     return index
@@ -486,6 +550,7 @@ def test_search_hybrid_degrades_when_index_has_no_vectors(repo: KnowledgeReposit
             chunk_content_hash=first.content_hash,
             chunk_parser_version=first.parser_version,
             model_revision=provider.model_revision,
+            scope=embedding_scope(actor.tenant_id, project_id),
         ),
         provider.embed_texts((first.content,))[0],
     )
@@ -519,3 +584,148 @@ def test_degraded_reasons_match_closed_set():
         "vector_index_unavailable",
         "embedding_model_version_mismatch",
     }
+
+
+def test_search_hybrid_degrades_on_index_failure(repo: KnowledgeRepository):
+    """索引 `has()` / `search()` 抛异常 → `vector_index_unavailable`，关键词答案不丢。
+
+    索引故障（存储不可用、损坏、超时）与"索引未建"对调用方是同一件事：
+    向量路径不可用，回退关键词。异常上抛会让一次向量索引故障
+    弄丢整条检索路径 —— 这正是降级闭集要挡住的场景。
+    """
+
+    class _ExplodingHasIndex(InMemoryVectorIndex):
+        def has(self, key):
+            raise RuntimeError("index storage unavailable")
+
+    class _ExplodingSearchIndex(InMemoryVectorIndex):
+        def search(self, keys, embedding, *, limit):
+            raise TimeoutError("index search timeout")
+
+    actor = _actor()
+    project_id = _project_id(repo)
+    _ingest(repo, actor, project_id, DOCUMENT)
+    baseline = repo.search_hybrid(actor, project_id, "回滚", limit=5)
+
+    for broken in (_ExplodingHasIndex, _ExplodingSearchIndex):
+        # 先注入正常索引保证降级发生在对应环节（有向量可查）。
+        working = _build_index(repo, actor, project_id)
+        broken_index = broken(model_revision=working.model_revision)
+        if broken is _ExplodingSearchIndex:
+            broken_index._vectors = dict(working._vectors)  # noqa: SLF001 - 故障注入前置状态
+        hybrid_repo = KnowledgeRepository(
+            ingestion=repo._ingestion,  # noqa: SLF001
+            embedding_provider=HashingEmbeddingProvider(),
+            vector_index=broken_index,
+        )
+        result = hybrid_repo.search_hybrid(actor, project_id, "回滚", limit=5)
+        assert result.mode == "degraded", broken.__name__
+        assert result.degraded_reason == "vector_index_unavailable", broken.__name__
+        assert result.hits == baseline.hits, "索引故障同样不允许弄丢关键词候选"
+
+
+def test_search_hybrid_gives_every_same_content_chunk_a_vector_rank(repo: KnowledgeRepository):
+    """同内容不同片段共享向量键：向量命中必须**展开**到每个片段。
+
+    只保留顺序在前的片段会让其余同文片段永远拿不到向量候选，
+    RRF 得分被 `stored_chunks` 的存储顺序单方面决定。
+    """
+    actor = _actor()
+    project_id = _project_id(repo)
+    # 两个来源、同一段内容 → 两个片段、同一个 content_hash / input_hash。
+    _ingest(repo, actor, project_id, "回滚撤销本事务已经执行的全部修改")
+    _ingest(repo, actor, project_id, "回滚撤销本事务已经执行的全部修改")
+    scoped = repo._ingestion.stored_chunks(actor, project_id, latest_only=True)  # noqa: SLF001
+    hashes = {chunk.content_hash for chunk in scoped}
+    assert len(hashes) == 1, "测试前提：两个片段内容相同、共享 content_hash"
+    assert len(scoped) == 2
+
+    provider = HashingEmbeddingProvider()
+    index = _build_index(repo, actor, project_id)
+    hybrid_repo = KnowledgeRepository(
+        ingestion=repo._ingestion,  # noqa: SLF001
+        embedding_provider=provider,
+        vector_index=index,
+    )
+    result = hybrid_repo.search_hybrid(actor, project_id, "回滚撤销本事务已经执行的全部修改", limit=5)
+    assert result.mode == "hybrid"
+    # 每个片段都必须从向量路召回（与关键词共同形成 keyword+vector）。
+    sources = dict(result.recall_sources)
+    for chunk in scoped:
+        assert sources.get(chunk.chunk_id) == "keyword+vector", (
+            "同文片段必须拿到向量候选，而不是只有存储顺序在前的那个"
+        )
+
+
+def test_search_hybrid_does_not_reuse_cross_project_vectors(repo: KnowledgeRepository):
+    """跨项目同内容：A 项目的索引存量对 B 项目等于不存在（键上有 scope）。
+
+    B 项目未建索引时必须整体降级，而不是"碰巧命中"A 项目写入的
+    同内容向量 —— 计划不变量：跨项目不能命中、读回或复用缓存。
+    """
+    actor = _actor()
+    project_a = _project_id(repo)
+    project_b = _project_id(repo)
+    _ingest(repo, actor, project_a, "回滚撤销本事务已经执行的全部修改")
+    _ingest(repo, actor, project_b, "回滚撤销本事务已经执行的全部修改")
+
+    # 只为 A 项目建索引（键含 A 的 scope）。
+    index = _build_index(repo, actor, project_a)
+    hybrid_repo = KnowledgeRepository(
+        ingestion=repo._ingestion,  # noqa: SLF001
+        embedding_provider=HashingEmbeddingProvider(),
+        vector_index=index,
+    )
+    result_a = hybrid_repo.search_hybrid(actor, project_a, "回滚", limit=5)
+    assert result_a.mode == "hybrid", "A 项目自己建了索引，必须正常混合"
+
+    result_b = hybrid_repo.search_hybrid(actor, project_b, "回滚", limit=5)
+    assert result_b.mode == "degraded"
+    assert result_b.degraded_reason == "vector_index_unavailable"
+    assert result_b.hits, "B 项目降级后关键词候选仍然在场"
+
+
+def test_build_context_freezes_actual_retrieval_ranking_version(repo: KnowledgeRepository):
+    """教学快照冻结**本次检索实际使用**的排序版本，而不是 run 行的预期。
+
+    run 行建行时写的是 keyword/v1（当时的预期）；本次检索如果走了
+    混合路径，快照必须是 hybrid-rrf/v1 —— 重放与归因都以实际版本为准。
+    """
+    from app.teaching.context import build_context
+    from app.teaching.runs import RunStatus, TeachingRun
+
+    actor = _actor()
+    project_id = _project_id(repo)
+    _ingest(repo, actor, project_id, DOCUMENT)
+    hybrid_repo = KnowledgeRepository(
+        ingestion=repo._ingestion,  # noqa: SLF001
+        embedding_provider=HashingEmbeddingProvider(),
+        vector_index=_build_index(repo, actor, project_id),
+    )
+    run = TeachingRun(
+        run_id=_unique("run"),
+        tenant_id=TENANT,
+        project_id=project_id,
+        conversation_id=_unique("conv"),
+        user_message_id=_unique("msg"),
+        principal_id=ACTOR_ID,
+        answer_message_id=None,
+        question="回滚撤销本事务已经执行的全部修改",
+        status=RunStatus.QUEUED,
+        attempt_count=0,
+        model_id="scripted",
+        prompt_version="teaching/v1",
+        ranking_version=RANKING_VERSION,  # 建行时的预期：keyword/v1
+        grounding=None,
+        error_code="",
+        error_detail="",
+        created_at=EVENT_TIME,
+        updated_at=EVENT_TIME,
+    )
+
+    context = build_context(run, actor, project_id, knowledge=hybrid_repo, history=())
+    assert context.retrieval.mode == "hybrid"
+    assert context.retrieval.ranking_version == HYBRID_RANKING_VERSION
+    assert context.snapshot.ranking_version == HYBRID_RANKING_VERSION, (
+        "快照必须记录实际检索版本，而不是 run 行建行时的预期"
+    )
