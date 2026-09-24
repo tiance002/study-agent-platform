@@ -400,7 +400,7 @@ def _controller(artifact_root: Path) -> int:
             worker_id="round8-before-restart",
         )
         headers = {"Idempotency-Key": "r8-process-" + uuid.uuid4().hex}
-        password = "Round8-process-password-123"
+        password = "Round8-process-password-123-dev-only"
         username = "r8p" + uuid.uuid4().hex[:9]
 
         with httpx.Client(

@@ -7,6 +7,8 @@
 - **不依赖外部工具**，因此 CI 里不需要额外安装，也不会因工具版本漂移而失效。
 - **白名单是显式的**：占位值（`dev-only-*`、`change-me`、`placeholder`、`example` 等）
   被允许，其余一律报错。宁可偶尔误报，也不要漏报。
+- **变量引用不是字面密钥**：`$VAR` / `${VAR}` 形式的 shell/环境变量引用
+  （如部署脚本把密码经变量拼进 DSN）在仓库中不含任何秘密内容，不按泄露处理。
 - 扫描器**跳过自身**：它的规则定义里必然出现 "password" 之类的词。
 
 用法：
@@ -65,12 +67,14 @@ PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "Credential Assignment",
         re.compile(
             r"(?i)\b(?:password|passwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token)\b"
-            r"\s*[:=]\s*['\"][^'\"]{8,}['\"]"
+            r"\s*[:=]\s*['\"](?!\$)[^'\"]{8,}['\"]"
         ),
     ),
     (
         "Connection String With Password",
-        re.compile(r"\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^:\s/]+:[^@\s/]+@"),
+        re.compile(
+            r"\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^:\s/]+:(?!\$)[^@\s/]+@"
+        ),
     ),
 )
 

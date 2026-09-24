@@ -26,7 +26,7 @@ def test_tavily_search_requests_only_bounded_metadata() -> None:
             }
         ).encode()
 
-    provider = TavilySearchProvider(api_key="search-secret", transport=transport)
+    provider = TavilySearchProvider(api_key="search-secret-dev-only", transport=transport)
     results = provider.search("事务隔离", limit=10)
 
     assert results == (
@@ -37,7 +37,7 @@ def test_tavily_search_requests_only_bounded_metadata() -> None:
         ),
     )
     payload, key = requests[0]
-    assert key == "search-secret"
+    assert key == "search-secret-dev-only"
     assert payload["query"] == "事务隔离"
     assert payload["max_results"] == 10
     assert payload["include_answer"] is False
@@ -47,7 +47,7 @@ def test_tavily_search_requests_only_bounded_metadata() -> None:
 @pytest.mark.parametrize("status", [401, 429, 500])
 def test_tavily_search_returns_closed_error_without_provider_body(status: int) -> None:
     provider = TavilySearchProvider(
-        api_key="search-secret",
+        api_key="search-secret-dev-only",
         transport=lambda _payload, _key: (status, b"private provider diagnostic"),
     )
 
@@ -59,7 +59,7 @@ def test_tavily_search_returns_closed_error_without_provider_body(status: int) -
 
 def test_tavily_search_rejects_malformed_response() -> None:
     provider = TavilySearchProvider(
-        api_key="search-secret", transport=lambda _payload, _key: (200, b"[]")
+        api_key="search-secret-dev-only", transport=lambda _payload, _key: (200, b"[]")
     )
 
     with pytest.raises(RuntimeError, match="格式"):

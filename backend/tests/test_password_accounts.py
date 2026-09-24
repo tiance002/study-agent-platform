@@ -77,7 +77,7 @@ def test_password_length_is_checked_as_original_codepoints(password):
 
 
 def test_password_hash_uses_argon2id_and_frozen_parameters():
-    password = "correct horse battery staple"
+    password = "correct horse battery staple dev-only"
     encoded = hash_password(password)
     assert encoded.startswith("$argon2id$")
     assert ARGON2_PARAMETERS == {
@@ -113,7 +113,7 @@ def test_verify_password_uses_dummy_hash_for_missing_or_malformed_hash(monkeypat
 
 
 def test_password_preserves_leading_trailing_space_and_unicode_codepoints():
-    password = "  密码密码abcd  "
+    password = "  密码密码abcd dev-only  "
     encoded = hash_password(password)
     assert verify_password(password, encoded) is True
     assert verify_password(password.strip(), encoded) is False
@@ -126,9 +126,9 @@ def test_needs_rehash_exposes_argon2_check():
 
 
 def test_registration_takes_username_and_password_only_and_copies_display_name():
-    account = register_account(username="Alice_1", password="password-123")
+    account = register_account(username="Alice_1", password="password-123-dev-only")
     assert account.username_original == "Alice_1"
     assert account.username_normalized == "alice_1"
     assert account.display_name == "Alice_1"
     with pytest.raises(TypeError):
-        register_account(username="Alice_1", password="password-123", display_name="other")
+        register_account(username="Alice_1", password="password-123-dev-only", display_name="other")
