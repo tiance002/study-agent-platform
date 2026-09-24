@@ -420,3 +420,7 @@ R4-05 之后写入的片段都经过"与持久化原文比对"，但**在此之�
 - `<details>` 的默认折叠并不意味着提交后自动折叠；浏览器截图确认成功创建项目后仍展开。应由界面状态管理在创建确认成功后关闭，而不能把操作成功与 form disclosure 状态混为一谈。
 - 项目 disclosure 的状态由 React 控制，并在当前异步作用域仍有效、服务端确认创建成功后才重置为关闭；未知响应不关闭表单，以免妨碍原幂等请求恢复。Playwright 红灯与绿灯均已观察到。
 - 注册限流状态跨同一预览进程保留；单独浏览器验收之后不能直接复用该进程跑包含多账号注册的总 gate。干净 gate 要使用新预览进程和独立可写数据目录，不应通过放宽限流解决测试污染。
+- 混合检索必须延续现有安全顺序：`stored_chunks(actor, project_id, latest_only=True)` 先在仓储/RLS 内隔离，再执行 `keyword/v1`。向量召回不得把跨项目或历史版本片段先拉入应用层后再过滤。
+- `retrieval_v1.json` 的 25 样本基线（22 命中、3 无命中）只度量小语料关键词路径；R9 写在计划里的同义、历史版本、跨项目同名与提示注入样本需分别核实，不能从当前 1.0 recall/MRR 推断已覆盖。
+- 2026-09-23 只读检查 ECS：PostgreSQL 16.15；`study_platform` 仅安装默认 `plpgsql`，`vector` 未启用；Ubuntu noble 镜像候选 `postgresql-16-pgvector` 为 0.6.0-1。未修改服务器。官方 [pgvector README](https://github.com/pgvector/pgvector) 当前说明 HNSW 查询的过滤在 ANN 扫描后执行，多租户共享近似索引会影响召回/性能；在现有小规模项目下先用 RLS 条件约束的精确距离排序，避免为了尚未证明的规模预先引入 ANN 风险。
+- 当前 25 条关键词评测的预期定位只含 `source_id + chunk_index`；独立测试能验证返回引用可回读，但无法防止评测答案本身指向同来源/同切块索引的另一文档版本。应让冻结期望包含稳定 fixture document id、span 与 content hash。

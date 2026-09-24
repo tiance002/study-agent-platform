@@ -790,3 +790,19 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - 回归断言先失败于创建成功后 `.project-form` 仍可见；将 `open` 状态提升至 React 并只在当前作用域下服务端确认成功时收起后，浏览器矩阵转绿：`ROUND8_BROWSER_PASSED`。移动端新截图 `var/round8-project-disclosure-green/workbench-mobile-plan.png` 确认创建表单收起，项目标题与引用正文正常折行。
 - 统一 gate 首次复跑因复用了独立浏览器测试后的同一个预览进程，第二账号注册触发持久限流；未调整限流逻辑。改用全新 8009 预览进程/数据目录后完整通过：全量 JUnit `924 tests: 923 passed, 1 skipped, 0 failures/errors`；PG `143 passed, 0 skipped`；Ruff、mypy（125 个源文件）、compileall、Node、三份契约、浏览器 `ROUND8_BROWSER_PASSED` 与进程恢复 `ROUND8_PROCESS_RECOVERY_PASSED` 均通过。日志有 11 条全量/7 条 PG 依赖弃用 warning，无失败。进程恢复报告：`var/round8-process-recovery/run-fdde79e893`。
 - GitHub 上传完成：提交 `750e5b6`（`feat: complete durable acquisition and routing slice`）已推送到 `origin/codex/round8-residual-20260922`。仅上传 54 个项目源码、迁移、测试和记录文件；用户暂存的 `.agents/.codex/.serena`、`.gitignore` 及未跟踪目录/`backend/tests/test_metrics.py` 均保留在本地，未纳入提交。
+
+## 2026-09-23 · R9 混合检索现状核对
+
+- 当前生产检索唯一实现为 `keyword/v1`：仓储先按租户/项目与最新成功版本收窄，再执行纯函数确定性排序；未找到 embedding port、向量索引或 RRF 实现。
+- 冻结 fixture `backend/tests/fixtures/retrieval_v1.json` 有 25 个样本（22 个命中、3 个无命中），当前 recall@5 与 MRR 都是 1.0；语料以单项目小型讲义为主，不能据此证明跨项目隔离、历史引用、提示注入或同义查询已作为 retrieval eval 覆盖。
+- 设计约束：向量候选必须在数据库/RLS 边界内先按 tenant/project/latest-version 收窄；provider/index 缺失或版本不匹配须回退现有关键词结果；本地与生产在验证 pgvector 前都不加硬依赖。目标 ECS 的最新只读结果与方案待复核。
+- ECS 只读复核完成：PostgreSQL `16.15`，`study_platform` 仅启用 `plpgsql`，向量扩展未启用；Ubuntu noble 仓库的 `postgresql-16-pgvector` 候选为 `0.6.0-1`。未安装软件、未执行 DDL。
+- 官方上游 README 当前标示 `v0.8.6`；其文档指出 HNSW 的 WHERE 过滤发生在近邻扫描后，共享近似索引会影响多租户查询的召回/性能。当前首版数据规模优先评估 RLS 下精确距离排序，ANN 留待基准证明需要时再启用。
+- SSH 首次只读 SQL 查询受 PowerShell/远端 shell 嵌套引号剥离影响，PostgreSQL 将版本/扩展名当作标识符报错；改用 `SHOW server_version` 和无字符串字面量扩展清单查询后成功。数据库与服务器没有发生写操作。
+- 现有检索边界测试已覆盖跨项目拒绝、历史版本保留/只检索最新版本、同 span 两版本精确回读和 hash 校验；不过冻结评测 fixture 每条 query 仅记录 `source_id + chunk_index`，缺预期 document/span/hash，Task 0 不能整体打勾。
+
+## 2026-09-24 · 最终集成审查与入库
+
+- 对照七项计划逐项复核实现与验收证据：门禁 5 脚本 `node --check`、导入方向静态门、OpenAPI/契约一致、幂等与预算组件拆分、指标容量实测（TD-001 保留决定）、工具入口索引，均齐全；计划文档已勾选并附执行状态。
+- 两类改动分界入库：架构修复类（后端域修正、路由/前端/workflow 拆分、指标切片、组成根、文档）与工具集成类（`.codex`/`.serena`/`.agents` 技能、CI agent-skill 校验步骤）各自成组提交；`.planning/`、`.trae/mcp.json`、`INTEGRATION_SUMMARY.md`、`verify_components.py` 归属待确认，保持未跟踪。
+- 非阻断记录：TD-001 触发条件见 `docs/tech-debt.md`；PR #2（→ `codex/architecture-boundaries-20260922`）为堆叠中间 PR；新草稿 PR 基线为 `main`，origin/main 领先 1 提交、合并前需 rebase（本阶段不合并、不部署、不动 `var/`）。
