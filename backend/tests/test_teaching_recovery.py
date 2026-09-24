@@ -280,12 +280,17 @@ def test_local_query_rewrite_changes_retrieval_only_and_is_persisted():
     assert fresh.routing_decision is not None
     assert fresh.routing_decision.query_rewrite_status == "applied"
     assert question in world.provider.calls[0].messages[-1].content
+    # 检索决策同样持久化：未注入向量组件 → keyword 基线（不是降级）。
+    assert fresh.retrieval_decision is not None
+    assert fresh.retrieval_decision.mode == "keyword"
+    assert fresh.retrieval_decision.reason_code == ""
     dispatched = [
         event
         for event in world.teaching.list_events(world.actor, world.project_id, run.run_id)
         if event.event_type == "run.dispatched"
     ]
     assert dispatched[0].payload["routing_decision"] == fresh.routing_decision.to_dict()
+    assert dispatched[0].payload["retrieval_decision"] == fresh.retrieval_decision.to_dict()
 
 
 def test_local_query_rewrite_failure_falls_back_to_original_keyword_search():
@@ -316,6 +321,10 @@ def test_local_query_rewrite_failure_falls_back_to_original_keyword_search():
     assert fresh.routing_decision is not None
     assert fresh.routing_decision.query_rewrite_status == "fallback"
     assert fresh.routing_decision.reason_code == "local_unavailable_or_invalid"
+    # 改写降级不影响检索模式：检索仍走 keyword 基线，reason 为空。
+    assert fresh.retrieval_decision is not None
+    assert fresh.retrieval_decision.mode == "keyword"
+    assert fresh.retrieval_decision.reason_code == ""
 
 
 # ------------------------------------------------------------ 矩阵

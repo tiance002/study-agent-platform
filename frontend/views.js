@@ -171,12 +171,14 @@
         ? "需要对账"
         : "运行状态";
     const rewriteStatus = activeRun?.routing_decision?.query_rewrite_status;
+    // 注意：这是**查询改写**的路由标签，不是检索模式 —— 检索模式由
+    // 下方的 retrievalLabel 单独展示，两者是不同的降级概念。
     const routeLabel = rewriteStatus === "applied"
       ? "本地查询改写 · 云端教学回答"
       : rewriteStatus === "fallback"
-        ? "关键词检索降级 · 云端教学回答"
+        ? "查询改写不可用 · 云端教学回答"
         : rewriteStatus === "disabled"
-          ? "关键词检索 · 云端教学回答"
+          ? "云端教学回答"
           : "";
     const degradedReasonLabels = {
       embedding_provider_failed: "向量服务不可用",
@@ -188,7 +190,7 @@
       ? retrieval.mode === "hybrid"
         ? "混合检索（关键词 + 向量）"
         : retrieval.mode === "degraded"
-          ? `混合检索不可用，已回退关键词（${degradedReasonLabels[retrieval.reason_code] || retrieval.reason_code}）`
+          ? `向量检索不可用，已回退关键词检索（${degradedReasonLabels[retrieval.reason_code] || "检索组件异常"}）`
           : "关键词检索"
       : "";
     const evidence = activeRun
