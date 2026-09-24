@@ -178,10 +178,24 @@
         : rewriteStatus === "disabled"
           ? "关键词检索 · 云端教学回答"
           : "";
+    const degradedReasonLabels = {
+      embedding_provider_failed: "向量服务不可用",
+      vector_index_unavailable: "向量索引未就绪",
+      embedding_model_version_mismatch: "向量模型版本不一致",
+    };
+    const retrieval = activeRun?.retrieval_decision;
+    const retrievalLabel = retrieval
+      ? retrieval.mode === "hybrid"
+        ? "混合检索（关键词 + 向量）"
+        : retrieval.mode === "degraded"
+          ? `混合检索不可用，已回退关键词（${degradedReasonLabels[retrieval.reason_code] || retrieval.reason_code}）`
+          : "关键词检索"
+      : "";
     const evidence = activeRun
       ? h(React.Fragment, null,
         h("div", { className: "evidence-status" }, h(StatusDot, { status: activeRun.status }), h("strong", null, statusLabel)),
         routeLabel && h("p", { className: "routing-mode" }, routeLabel),
+        retrievalLabel && h("p", { className: "routing-mode" }, retrievalLabel),
         activeRun.grounding && h("p", { className: "grounding" }, activeRun.grounding === "sourced" ? "回答含有已核验来源" : "回答没有通过核验的来源"),
         activeRun.citations?.length
           ? h("div", { className: "citation-list" }, activeRun.citations.map((citation, index) => {
