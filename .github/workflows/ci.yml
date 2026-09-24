@@ -4,7 +4,7 @@ name: ci
 #   1. 不变量测试（含 import 方向门、工具重叠门、预算与审计门、PostgreSQL 适配器组）
 #   2. 静态检查（ruff）—— 只启用能发现真实缺陷的规则集
 #   3. 类型检查（mypy）
-#   4. 设计知识索引校验（结构 / 依赖方向 / 体积预算 / 到期复审）
+#   4. 设计知识索引与项目 Agent skill 校验（结构 / 依赖方向 / 体积预算 / 到期复审 / 本地引用）
 #   5. 契约生成区一致性（重新渲染比对内容，不只比哈希）
 #   6. 数据库迁移校验（--require-active：Alembic 已引入，跳过即失败）
 #   7. 依赖许可证扫描（copyleft 阻塞 / 弱 copyleft 提示 / 无法判定阻塞）
@@ -86,6 +86,9 @@ jobs:
 
       - name: 设计知识索引校验
         run: python tools/skills/check_manifest.py docs/skills/manifest.yaml
+
+      - name: 项目 Agent skill 校验
+        run: python tools/skills/check_agent_skills.py
 
       - name: 契约生成区一致性
         run: |

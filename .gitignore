@@ -35,6 +35,12 @@ node_modules/
 dist/
 .vite/
 
+# ===== Codex project-local integration state =====
+# Keep Serena state and all generated Codex runtime data out of Git.
+/.serena/runtime/
+/.codex/runtime/
+/.playwright-mcp/
+
 # ===== 本地工作记忆 =====
 # 含内部讨论日志与决策过程，不属于产品仓库内容。
 # 若希望公开这部分记录，删掉下面这行即可。
