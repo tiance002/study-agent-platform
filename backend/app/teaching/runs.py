@@ -18,6 +18,7 @@ from app.core.contracts import (
     require_positive,
     require_text,
 )
+from app.knowledge.store import RetrievalDecision
 from app.teaching.routing import RoutingDecision
 
 
@@ -88,6 +89,9 @@ class TeachingRun:
     #: 被拒绝的 provider 引用及稳定原因，不把原始 provider payload 暴露给用户。
     citation_rejections: tuple[dict, ...] = ()
     routing_decision: RoutingDecision | None = None
+    #: 检索模式存证（keyword / hybrid / degraded + 降级原因）。与
+    #: `routing_decision` 平行：一个是"问题怎么路由"，一个是"资料怎么检索"。
+    retrieval_decision: RetrievalDecision | None = None
 
     def __post_init__(self) -> None:
         require_text(self.run_id, "run_id")
@@ -119,6 +123,10 @@ class TeachingRun:
             raise ValueError("citation_rejections 必须是 dict 元组")
         if self.routing_decision is not None and not isinstance(self.routing_decision, RoutingDecision):
             raise ValueError("routing_decision 必须是 RoutingDecision 或 None")
+        if self.retrieval_decision is not None and not isinstance(
+            self.retrieval_decision, RetrievalDecision
+        ):
+            raise ValueError("retrieval_decision 必须是 RetrievalDecision 或 None")
         require_aware(self.created_at, "created_at")
         require_aware(self.updated_at, "updated_at")
         # 状态 ↔ 附属事实的一致性（与 0010 的 CHECK 同一条规则）。
@@ -147,6 +155,7 @@ class TeachingRun:
             "citations": [dict(item) for item in self.citations],
             "citation_rejections": [dict(item) for item in self.citation_rejections],
             "routing_decision": (self.routing_decision.to_dict() if self.routing_decision else None),
+            "retrieval_decision": (self.retrieval_decision.to_dict() if self.retrieval_decision else None),
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }

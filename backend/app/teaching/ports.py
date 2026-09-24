@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from app.identity.models import Principal
+from app.knowledge.store import RetrievalDecision
 from app.teaching.models import ProviderRequest, ProviderResult, TokenUsage
 from app.teaching.routing import RoutingDecision
 from app.teaching.runs import Grounding, RunClaim, RunStatus, TeachingEvent, TeachingRun
@@ -123,6 +124,7 @@ class TeachingRunRepository(Protocol):
         estimated_output_tokens: int,
         request_payload: dict | None = None,
         routing_decision: RoutingDecision | None = None,
+        retrieval_decision: RetrievalDecision | None = None,
         provider_family: str = "unknown",
     ) -> None:
         """派发前持久化：写 attempt 行 + 预算 held → in_flight。

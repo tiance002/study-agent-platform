@@ -7,13 +7,13 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:d1b092db0ba1fd82e34ff132d76bfba3993aab202ee3f6f1c5b8f5d84c5bf6e5, generated_at=2026-09-23T13:19:23Z -->
-> 生成时间：2026-09-23T13:19:23Z
+<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:4782e8c2dfd5f318bfa13073c8d6f85070ba329a5693a36ee0f47acd256744ce, generated_at=2026-09-24T06:28:30Z -->
+> 生成时间：2026-09-24T06:28:30Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
 
-当前 head：`0018`
+当前 head：`0019`
 
 ### 表总览
 
@@ -48,7 +48,7 @@
 | `teaching_budgets` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 11 |
 | `teaching_events` | 0010 | 租户+项目 | SELECT, INSERT | SELECT, INSERT | 7 |
 | `teaching_reservations` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 12 |
-| `teaching_runs` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 23 |
+| `teaching_runs` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 24 |
 | `teaching_tenant_budgets` | 0010 | 租户 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 8 |
 | `tenants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 3 |
 | `user_sessions` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE, DELETE | — | 6 |
@@ -359,6 +359,7 @@
 | `teaching_runs` | `created_at` | `timestamptz` |
 | `teaching_runs` | `updated_at` | `timestamptz` |
 | `teaching_runs` | `routing_decision` | `jsonb` |
+| `teaching_runs` | `retrieval_decision` | `jsonb` |
 | `teaching_tenant_budgets` | `tenant_id` | `text` |
 | `teaching_tenant_budgets` | `total_micro` | `bigint` |
 | `teaching_tenant_budgets` | `reserved_micro` | `bigint` |

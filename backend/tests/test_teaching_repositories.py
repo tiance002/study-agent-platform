@@ -20,6 +20,8 @@ import psycopg
 import pytest
 from app.core.errors import ErrorCode, PlatformError
 from app.identity.models import Principal
+from app.knowledge.fusion import HYBRID_RANKING_VERSION
+from app.knowledge.store import RetrievalDecision
 from app.teaching.models import TokenUsage
 from app.teaching.routing import RoutingDecision
 from app.teaching.runs import Grounding, RunStatus
@@ -227,6 +229,11 @@ def test_routing_decision_persists_atomically_with_dispatch_in_both_adapters(env
         query_rewrite_status="fallback",
         reason_code="local_unavailable_or_invalid",
     )
+    retrieval = RetrievalDecision(
+        mode="degraded",
+        reason_code="vector_index_unavailable",
+        ranking_version=HYBRID_RANKING_VERSION,
+    )
     attempt_id = _unique("att")
 
     env.teaching.mark_dispatched(
@@ -234,14 +241,20 @@ def test_routing_decision_persists_atomically_with_dispatch_in_both_adapters(env
         attempt_id=attempt_id,
         estimated_input_tokens=100,
         estimated_output_tokens=50,
-        request_payload={"routing_decision": decision.to_dict()},
+        request_payload={
+            "routing_decision": decision.to_dict(),
+            "retrieval_decision": retrieval.to_dict(),
+        },
         routing_decision=decision,
+        retrieval_decision=retrieval,
     )
 
     stored = env.teaching.get_run(actor, project_id, run.run_id)
     events = env.teaching.list_events(actor, project_id, run.run_id)
     assert stored.routing_decision == decision
+    assert stored.retrieval_decision == retrieval
     assert events[-1].payload["routing_decision"] == decision.to_dict()
+    assert events[-1].payload["retrieval_decision"] == retrieval.to_dict()
 
 
 @pytest.mark.invariant

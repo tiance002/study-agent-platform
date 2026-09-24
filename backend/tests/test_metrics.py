@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
+import pg_support
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
+
+ROOT = Path(__file__).resolve().parents[2]
+
+PG_ONLY = pytest.mark.skipif(
+    not pg_support.reachable(), reason="本地 PostgreSQL 未运行（scripts\\pg_start.cmd）"
+)
 
 
 def _snapshot() -> dict:
@@ -47,6 +58,12 @@ def _snapshot() -> dict:
             {"query_rewrite_status": "applied", "reason_code": "local_rewrite_accepted", "count": 2},
             {"query_rewrite_status": "fallback", "reason_code": "local_unavailable_or_invalid", "count": 1},
             {"query_rewrite_status": "fallback", "reason_code": "private prompt sentinel", "count": 99},
+        ],
+        "retrieval_decisions": [
+            {"mode": "keyword", "reason_code": "", "count": 3},
+            {"mode": "hybrid", "reason_code": "", "count": 2},
+            {"mode": "degraded", "reason_code": "vector_index_unavailable", "count": 1},
+            {"mode": "degraded", "reason_code": "private retrieval sentinel", "count": 99},
         ],
         "provider_attempts": [
             {"provider": "openai", "outcome": "completed", "count": 1},
@@ -117,6 +134,15 @@ def test_render_metrics_emits_fixed_names_units_and_closed_labels_only() -> None
         'reason_code="local_unavailable_or_invalid",answer_route="cloud"} 1'
     ) in exposition
     assert 'study_teaching_fallbacks_total{reason_code="local_unavailable_or_invalid"} 1' in exposition
+    assert 'study_teaching_retrieval_modes_total{mode="keyword"} 3' in exposition
+    assert 'study_teaching_retrieval_modes_total{mode="hybrid"} 2' in exposition
+    assert 'study_teaching_retrieval_modes_total{mode="degraded"} 1' in exposition
+    assert (
+        'study_teaching_retrieval_degraded_total{reason_code="vector_index_unavailable"} 1'
+        in exposition
+    )
+    assert 'study_teaching_retrieval_degraded_total{reason_code="embedding_provider_failed"} 0' in exposition
+    assert "private retrieval sentinel" not in exposition
     assert 'study_provider_attempts_total{provider="openai",outcome="timeout"} 1' in exposition
     assert 'study_provider_tokens_total{provider="openai",direction="input"} 42' in exposition
     assert 'study_provider_usage_total{provider="openai",state="missing"} 1' in exposition
@@ -193,6 +219,80 @@ def test_metrics_migration_uses_closed_facts_and_restricted_aggregate_function()
     assert "revoke all on function public.study_metrics_snapshot() from public" in sql
     assert "grant execute on function public.study_metrics_snapshot() to study_app" in sql
     assert "grant select on acquisition_fetch_observations to study_app" not in sql
+
+
+def test_retrieval_decision_migration_is_closed_self_contained_and_guarded() -> None:
+    """0019：闭集 CHECK、自包含的两版函数体、有数据时拒绝降级。"""
+    migration = (
+        Path(__file__).resolve().parents[2]
+        / "alembic"
+        / "versions"
+        / "0019_retrieval_decision_metrics.py"
+    )
+    assert migration.is_file(), "retrieval decision migration is not implemented yet"
+    sql = migration.read_text(encoding="utf-8").lower()
+
+    assert 'revision = "0019"' in sql
+    assert 'down_revision = "0018"' in sql
+    # 列 + 闭集 CHECK：模式三元、降级原因三闭集、非降级原因必须为空串。
+    assert "add column retrieval_decision jsonb" in sql
+    assert "retrieval_decision->>'mode' in ('keyword', 'hybrid', 'degraded')" in sql
+    assert "'embedding_model_version_mismatch'" in sql
+    assert "retrieval_decision->>'ranking_version' <> ''" in sql
+    # 降级守卫：有存证就不许降级。
+    assert "cannot downgrade after retrieval decisions were recorded" in sql
+    # 两版函数体都由本迁移生成（自包含原则：不 import 0018 的模块）：
+    # 模板只写一份，upgrade/downgrade 各调一次不同旗标。
+    assert "_metrics_function_sql(*, with_retrieval: bool)" in sql
+    assert "create or replace function public.study_metrics_snapshot()" in sql
+    assert "_metrics_function_sql(with_retrieval=true)" in sql
+    # 降级必须恢复 0018 版函数体（否则 /metrics 引用被删列直接 500）。
+    assert "_metrics_function_sql(with_retrieval=false)" in sql
+    assert "'retrieval_decisions'" in sql
+
+
+def _run_alembic(dsn: str, *arguments: str) -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", *arguments],
+        cwd=ROOT,
+        env={**os.environ, "STUDY_PLATFORM_MIGRATION_DSN": dsn},
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError((result.stdout or "") + (result.stderr or ""))
+
+
+@PG_ONLY
+def test_retrieval_decision_migration_round_trips_and_restores_0018_function() -> None:
+    """0019 往返：升级版 snapshot 带 retrieval_decisions；降级后 0018 函数体仍可用。
+
+    这是对 `_metrics_function_sql` 两版拼接 SQL 的真实语法验证 ——
+    升级路径已由测试库夹具隐式覆盖，这里补的是**降级恢复**路径。
+    """
+    with pg_support.temp_test_database() as database:
+        dsn = database.migration_dsn
+        with psycopg.connect(dsn) as conn:
+            upgraded = conn.execute(
+                "SELECT public.study_metrics_snapshot()"
+            ).fetchone()[0]
+        assert "retrieval_decisions" in upgraded
+        assert upgraded["retrieval_decisions"] == []
+
+        _run_alembic(dsn, "downgrade", "0018")
+        with psycopg.connect(dsn) as conn:
+            downgraded = conn.execute(
+                "SELECT public.study_metrics_snapshot()"
+            ).fetchone()[0]
+        assert "retrieval_decisions" not in downgraded
+        assert "route_decisions" in downgraded  # 0018 版函数体完整可用
+
+        _run_alembic(dsn, "upgrade", "head")
+        with psycopg.connect(dsn) as conn:
+            restored = conn.execute(
+                "SELECT public.study_metrics_snapshot()"
+            ).fetchone()[0]
+        assert restored["retrieval_decisions"] == []
 
 
 def test_postgres_metrics_store_reads_only_the_aggregate_snapshot(monkeypatch) -> None:

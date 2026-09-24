@@ -23,6 +23,14 @@ REWRITE_DECISIONS = (
     ("applied", "local_rewrite_accepted"),
     ("fallback", "local_unavailable_or_invalid"),
 )
+#: 检索模式与降级原因的闭集（与 `knowledge.store` 的常量同源；
+#: 渲染层声明自己的元组，避免渲染模块反向依赖领域层）。
+RETRIEVAL_MODE_LABELS = ("keyword", "hybrid", "degraded")
+RETRIEVAL_DEGRADED_LABELS = (
+    "embedding_provider_failed",
+    "vector_index_unavailable",
+    "embedding_model_version_mismatch",
+)
 DURATION_BUCKETS = ("0.1", "0.25", "0.5", "1", "2.5", "5", "10", "30", "+Inf")
 BODY_BYTES_BUCKETS = ("1024", "4096", "16384", "65536", "262144", "1048576", "+Inf")
 
@@ -173,6 +181,32 @@ def render_metrics(snapshot: Mapping[str, Any]) -> str:
             "# TYPE study_teaching_fallbacks_total counter",
             "study_teaching_fallbacks_total{reason_code=\"local_unavailable_or_invalid\"} "
             f"{fallback_count}",
+            "# HELP study_teaching_retrieval_modes_total Durable teaching retrieval modes.",
+            "# TYPE study_teaching_retrieval_modes_total counter",
+        ]
+    )
+    retrieval_rows = _rows(snapshot.get("retrieval_decisions"))
+    for mode in RETRIEVAL_MODE_LABELS:
+        count = _row_count(retrieval_rows, {"mode": mode})
+        lines.append(f'study_teaching_retrieval_modes_total{{mode="{mode}"}} {count}')
+
+    lines.extend(
+        [
+            "# HELP study_teaching_retrieval_degraded_total Durable degraded retrievals by closed reason.",
+            "# TYPE study_teaching_retrieval_degraded_total counter",
+        ]
+    )
+    for reason_code in RETRIEVAL_DEGRADED_LABELS:
+        count = _row_count(
+            retrieval_rows, {"mode": "degraded", "reason_code": reason_code}
+        )
+        lines.append(
+            "study_teaching_retrieval_degraded_total{"
+            f'reason_code="{reason_code}"}} {count}'
+        )
+
+    lines.extend(
+        [
             "# HELP study_provider_attempts_total Durable provider attempts by closed outcome.",
             "# TYPE study_provider_attempts_total counter",
         ]

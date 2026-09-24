@@ -211,8 +211,13 @@ class TeachingService:
                 attempt_id=attempt_id,
                 estimated_input_tokens=est_input,
                 estimated_output_tokens=max_output_tokens,
-                request_payload=self._serialize_request(request) | {"routing_decision": route.to_dict()},
+                request_payload=self._serialize_request(request)
+                | {
+                    "routing_decision": route.to_dict(),
+                    "retrieval_decision": context.retrieval.as_decision().to_dict(),
+                },
                 routing_decision=route,
+                retrieval_decision=context.retrieval.as_decision(),
                 provider_family=_provider_family_label(self.provider),
             )
         except PlatformError as exc:
@@ -442,6 +447,8 @@ class TeachingService:
             "provider_status": str(result.status),
             "attempt_id": payload_attempt_id,
             "ranking_version": context.snapshot.ranking_version,
+            "retrieval_mode": context.retrieval.mode,
+            "retrieval_degraded_reason": context.retrieval.degraded_reason,
             "answer_markdown": result.answer_text,
             "citations": [
                 {

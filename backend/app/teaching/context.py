@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from app.core.errors import ErrorCode, PlatformError
 from app.identity.models import Principal
 from app.knowledge.retrieval import ScoredChunk
-from app.knowledge.store import KnowledgeRepository
+from app.knowledge.store import HybridSearchResult, KnowledgeRepository
 from app.product.models import Message
 from app.teaching.models import MaterialSnippet, PromptMessage
 from app.teaching.prompts import build_messages
@@ -71,6 +71,10 @@ class TeachingContext:
     run: TeachingRun
     snapshot: RetrievalSnapshot
     messages: tuple[PromptMessage, ...]
+    #: 检索过程事实（模式 / 降级原因 / 排序规则版本）。它随 run 存证：
+    #: "这次回答的资料是怎么检索的"与候选本身同样是回答的一部分 ——
+    #: 用户看到"关键词"结果时，必须能区分它是基线还是降级。
+    retrieval: HybridSearchResult
 
 
 def build_snapshot(
@@ -146,7 +150,7 @@ def build_context(
             ErrorCode.PARAMS_INVALID,
             f"问题超过 {MAX_QUESTION_CHARS} 字符上限；请拆分后再问",
         )
-    hits = knowledge.search(
+    hits = knowledge.search_hybrid(
         actor,
         project_id,
         retrieval_query or run.question,
@@ -156,7 +160,7 @@ def build_context(
         actor,
         project_id,
         knowledge=knowledge,
-        hits=hits,
+        hits=hits.hits,
         ranking_version=run.ranking_version,
     )
     messages = build_messages(
@@ -164,4 +168,9 @@ def build_context(
         history=history_window(history),
         materials=snapshot.items,
     )
-    return TeachingContext(run=run, snapshot=snapshot, messages=messages)
+    return TeachingContext(
+        run=run,
+        snapshot=snapshot,
+        messages=messages,
+        retrieval=hits,
+    )

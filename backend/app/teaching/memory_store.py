@@ -33,6 +33,7 @@ from app.core.clock import Clock, SystemClock
 from app.core.errors import ErrorCode, PlatformError, deny
 from app.identity.models import Principal
 from app.identity.ports import MembershipRepository
+from app.knowledge.store import RetrievalDecision
 from app.product.memory_store import InMemoryProductRepository
 from app.product.models import MessageRole
 from app.teaching.models import TokenUsage
@@ -304,6 +305,7 @@ class InMemoryTeachingRepository:
         estimated_output_tokens: int,
         request_payload: dict | None = None,
         routing_decision: RoutingDecision | None = None,
+        retrieval_decision: RetrievalDecision | None = None,
         provider_family: str = "unknown",
     ) -> None:
         with self._lock:
@@ -335,7 +337,11 @@ class InMemoryTeachingRepository:
                 request_payload=dict(request_payload or {}),
             )
             if routing_decision is not None:
-                self._runs[claim.run.run_id] = replace(current, routing_decision=routing_decision)
+                current = replace(current, routing_decision=routing_decision)
+            if retrieval_decision is not None:
+                current = replace(current, retrieval_decision=retrieval_decision)
+            if routing_decision is not None or retrieval_decision is not None:
+                self._runs[claim.run.run_id] = current
             self._touch(claim)
             self._append_event(
                 claim.run.run_id,
@@ -345,6 +351,11 @@ class InMemoryTeachingRepository:
                     **(
                         {"routing_decision": routing_decision.to_dict()}
                         if routing_decision is not None
+                        else {}
+                    ),
+                    **(
+                        {"retrieval_decision": retrieval_decision.to_dict()}
+                        if retrieval_decision is not None
                         else {}
                     ),
                 },

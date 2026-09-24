@@ -45,6 +45,7 @@ from app.db import budget_store
 from app.db.session import full_transaction, tenant_transaction, worker_transaction
 from app.identity.models import Principal
 from app.identity.ports import MembershipRepository
+from app.knowledge.store import RetrievalDecision
 from app.teaching.models import TokenUsage
 from app.teaching.routing import RoutingDecision
 from app.teaching.runs import Grounding, RunClaim, RunStatus, TeachingEvent, TeachingRun
@@ -53,7 +54,8 @@ _RUN_COLUMNS = (
     "run_id, tenant_id, project_id, conversation_id, user_message_id,"
     " principal_id, answer_message_id, answer_seq, question, status,"
     " attempt_count, model_id, prompt_version, ranking_version, grounding,"
-    " error_code, error_detail, created_at, updated_at, routing_decision"
+    " error_code, error_detail, created_at, updated_at, routing_decision,"
+    " retrieval_decision"
 )
 
 _LEASE_EXPIRED_SQL = "(status = 'running' AND lease_until IS NOT NULL AND lease_until < now())"
@@ -81,6 +83,7 @@ def _run_from_row(row: tuple) -> TeachingRun:
         created_at=row[17],
         updated_at=row[18],
         routing_decision=(RoutingDecision.from_dict(row[19]) if row[19] is not None else None),
+        retrieval_decision=(RetrievalDecision.from_dict(row[20]) if row[20] is not None else None),
     )
 
 
@@ -228,7 +231,7 @@ class PostgresTeachingRepository:
             ).fetchone()
         if row is None:
             raise deny(ErrorCode.CROSS_TENANT_DENIED, "资源不存在", run_id=run_id)
-        return replace_run_metadata(_run_from_row(row[:20]), row[20], row[21])
+        return replace_run_metadata(_run_from_row(row[:21]), row[21], row[22])
 
     def list_events(
         self, actor: Principal, project_id: str, run_id: str, *, after_seq: int = 0
@@ -316,11 +319,11 @@ class PostgresTeachingRepository:
                 (worker_id, float(lease_seconds), selected[0]),
             ).fetchone()
         assert row is not None, "刚被本事务锁住并选中的行不可能在 UPDATE 时消失"
-        run = _run_from_row(row[:20])
+        run = _run_from_row(row[:21])
         return RunClaim(
             run=run,
             # RETURNING 拿到的就是本次生成的 token（同一事务内读回）。
-            claim_token=str(row[20]),
+            claim_token=str(row[21]),
             worker_id=worker_id,
         )
 
@@ -333,6 +336,7 @@ class PostgresTeachingRepository:
         estimated_output_tokens: int,
         request_payload: dict | None = None,
         routing_decision: RoutingDecision | None = None,
+        retrieval_decision: RetrievalDecision | None = None,
         provider_family: str = "unknown",
     ) -> None:
         with worker_transaction(
@@ -374,6 +378,14 @@ class PostgresTeachingRepository:
                         claim.run.run_id,
                     ),
                 )
+            if retrieval_decision is not None:
+                conn.execute(
+                    "UPDATE teaching_runs SET retrieval_decision = %s::jsonb WHERE run_id = %s",
+                    (
+                        json.dumps(retrieval_decision.to_dict(), ensure_ascii=False),
+                        claim.run.run_id,
+                    ),
+                )
             conn.execute(
                 "INSERT INTO provider_attempts (attempt_id, tenant_id, project_id,"
                 " run_id, status, request_payload, provider_family)"
@@ -396,6 +408,11 @@ class PostgresTeachingRepository:
                     **(
                         {"routing_decision": routing_decision.to_dict()}
                         if routing_decision is not None
+                        else {}
+                    ),
+                    **(
+                        {"retrieval_decision": retrieval_decision.to_dict()}
+                        if retrieval_decision is not None
                         else {}
                     ),
                 },

@@ -249,17 +249,17 @@ def test_local_query_rewrite_changes_retrieval_only_and_is_persisted():
     question = "这些性质各代表什么？"
     rewritten = "ACID 事务四个性质"
     searched: list[str] = []
-    original_search = world.knowledge.search
+    original_hybrid = world.knowledge.search_hybrid
 
     def record_search(actor, project_id, query, *, limit=5):
         searched.append(query)
-        return original_search(actor, project_id, query, limit=limit)
+        return original_hybrid(actor, project_id, query, limit=limit)
 
     class Rewriter:
         def rewrite(self, _question: str) -> str:
             return rewritten
 
-    world.knowledge.search = record_search
+    world.knowledge.search_hybrid = record_search
     world.platform.local_query_rewriter = Rewriter()
     citation = {
         "source_id": world.chunk.source_id,
@@ -292,17 +292,17 @@ def test_local_query_rewrite_failure_falls_back_to_original_keyword_search():
     world = _world(provider_script=[])
     question = "什么是 ACID？"
     searched: list[str] = []
-    original_search = world.knowledge.search
+    original_hybrid = world.knowledge.search_hybrid
 
     def record_search(actor, project_id, query, *, limit=5):
         searched.append(query)
-        return original_search(actor, project_id, query, limit=limit)
+        return original_hybrid(actor, project_id, query, limit=limit)
 
     class BrokenRewriter:
         def rewrite(self, _question: str) -> str:
             raise TimeoutError("private local model detail")
 
-    world.knowledge.search = record_search
+    world.knowledge.search_hybrid = record_search
     world.platform.local_query_rewriter = BrokenRewriter()
     world.platform.teaching_provider = world.provider = ScriptedProvider(
         [_answer_json("ACID 是事务的四个性质。", "[]")]
