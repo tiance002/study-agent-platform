@@ -806,3 +806,11 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - 对照七项计划逐项复核实现与验收证据：门禁 5 脚本 `node --check`、导入方向静态门、OpenAPI/契约一致、幂等与预算组件拆分、指标容量实测（TD-001 保留决定）、工具入口索引，均齐全；计划文档已勾选并附执行状态。
 - 两类改动分界入库：架构修复类（后端域修正、路由/前端/workflow 拆分、指标切片、组成根、文档）与工具集成类（`.codex`/`.serena`/`.agents` 技能、CI agent-skill 校验步骤）各自成组提交；`.planning/`、`.trae/mcp.json`、`INTEGRATION_SUMMARY.md`、`verify_components.py` 归属待确认，保持未跟踪。
 - 非阻断记录：TD-001 触发条件见 `docs/tech-debt.md`。PR 结构：`origin/main` 为孤立单提交历史（内容等价于本线 `7c5b63c` 的快照），与本分支无共同祖先，GitHub 拒绝创建指向 `main` 的 PR；PR #2（head 本分支 → base `codex/architecture-boundaries-20260922`）承载全部 21 个提交，已转草稿并等待 CI。合并入 main 需仓库层面先对齐历史（本阶段不合并、不部署、不动 `var/`）。
+
+## 2026-09-24 · R9 混合检索增量与检索模式指标
+
+- 混合检索（R9 任务 3）：`knowledge/embedding.py` 定义四元组 `EmbeddingIndexKey`（content_hash + parser_version + model_revision + input_hash 共同决定缓存身份）、`EmbeddingProvider`/`VectorIndex` 端口与 `HashingEmbeddingProvider`/`InMemoryVectorIndex` 测试实现；`knowledge/fusion.py` 实现确定性 RRF（`Fraction` 精确得分、k=60、`(source_id, chunk_index)` tie-break、`recalled_from` 保留双路召回来源）。
+- `knowledge/store.py`：新增 `search_hybrid()`（`search()` 保持原签名成为薄封装）；三种降级（provider 异常 / 作用域内无已索引片段 / model revision 不匹配）一律回退关键词结果并携带闭集原因；向量候选与关键词候选同源于 `stored_chunks(latest_only=True)` 的 RLS 内收窄。生产装配不注入向量组件 —— 恒 keyword 基线，pgvector 不进生产依赖。
+- 检索模式存证与观测（R9 任务 6）：0019 迁移给 `teaching_runs` 加 `retrieval_decision jsonb`（闭集 CHECK，同 0017 模式）并整体替换 `study_metrics_snapshot()` 加入 `retrieval_decisions` 聚合；downgrade 有数据拒绝、无数据恢复 0018 版函数体（自包含，不 import 0018 模块）。`render_metrics` 白名单渲染 `study_teaching_retrieval_modes_total` / `study_teaching_retrieval_degraded_total`。`EXPECTED_SCHEMA_VERSION` 升至 0019，sql-schema 契约已重新生成。
+- 教学回答展示检索模式：run 响应（`to_dict`）输出 `retrieval_decision`；前端证据栏显示 关键词/混合/降级（含降级原因中文文案）。`mark_dispatched` 在内存与 PG 两个适配器上原子持久化 `retrieval_decision`（契约测试扩展覆盖）。
+- 验证：新增 `test_hybrid_retrieval.py`（索引键身份、RRF 确定性、三种降级、keyword 基线等价、冻结评测不回归）与 0019 迁移结构断言 + PG 往返测试（升级带 retrieval_decisions、降级恢复 0018 函数体可用、再升级还原）；冻结评测 keyword/v1 recall@5=1.0 / MRR=1.0 保持。ruff/mypy/契约/迁移校验/许可/秘密扫描全通过。pgvector ECS 项保持未勾：只读复核确认候选包存在但扩展未安装，安装属生产变更须用户确认。前端证据栏为带空值守卫的增量标签（旧 run 无 retrieval_decision 时显示不变），`node --check` 通过；完整浏览器矩阵未随本轮重跑。

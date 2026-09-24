@@ -33,7 +33,7 @@
 - [ ] 冻结候选状态：`discovered`、`selected`、`rejected`、`expired`；下载状态：`queued`、`running`、`succeeded`、`failed`、`unknown`。
 - [ ] 明确用户操作：搜索只读；选择候选是显式写入；重新下载必须复用 acquisition idempotency key；unknown 不自动重复下载。
 - [ ] 建立最小中文评测集：同义改写、标题命中失败、正文命中、跨项目同名资料、历史版本引用、无关噪声和恶意提示注入。
-- [ ] 为每个样本冻结期望引用 source/document/span/hash，不把“模型说得像”作为通过条件。
+- [x] 为每个样本冻结期望引用 source/document/span/hash，不把“模型说得像”作为通过条件。（2026-09-24：`backend/tests/fixtures/retrieval_v1.json` 25 个样本已含 document/span/content_hash 期望，冻结评测 recall@5=1.0 / MRR=1.0。）
 
 **退出门：** protocol、SQL schema、错误码和评测集能在代码审查中被唯一定位；未冻结字段不进入实现。
 
@@ -61,10 +61,10 @@
 
 ## 任务 3：混合检索增量
 
-- [ ] 保留 `keyword/v1` 作为基线；先加入查询规范化、标题/章节加权和全局片段兜底，不改变现有 API 语义。
-- [ ] 增加可选 embedding 端口和版本化索引键：content hash、parser/chunker version、embedding model revision、最终 input hash 必须共同决定缓存身份。
-- [ ] 优先验证 PostgreSQL `pgvector` 在目标 ECS 的可安装性、版本、RLS 查询形状和迁移回滚；未验证前不得将 pgvector 写入生产依赖。
-- [ ] 以确定性 RRF/融合规则合并关键词与向量候选，保留每个候选的召回来源和版本信息。
+- [x] 保留 `keyword/v1` 作为基线；先加入查询规范化、标题/章节加权和全局片段兜底，不改变现有 API 语义。（第 4 轮 keyword/v1 已含 normalize_text、标题加权与全片段兜底；本轮 `search()` 保持原签名，`search_hybrid()` 为新增出口。）
+- [x] 增加可选 embedding 端口和版本化索引键：content hash、parser/chunker version、embedding model revision、最终 input hash 必须共同决定缓存身份。（2026-09-24：`knowledge/embedding.py` 四元组 `EmbeddingIndexKey` + provider/index 端口；生产装配不注入向量组件，恒 keyword 基线。）
+- [ ] 优先验证 PostgreSQL `pgvector` 在目标 ECS 的可安装性、版本、RLS 查询形状和迁移回滚；未验证前不得将 pgvector 写入生产依赖。（只读复核：ECS PG 16.15 有 `postgresql-16-pgvector 0.6.0-1` 候选包但扩展未安装；安装属生产变更，须用户确认后才能继续验证 RLS 形状与回滚。）
+- [x] 以确定性 RRF/融合规则合并关键词与向量候选，保留每个候选的召回来源和版本信息。（2026-09-24：`knowledge/fusion.py` `fuse_rrf`，`Fraction` 精确得分、`(source_id, chunk_index)` tie-break、`recalled_from` 保留召回来源。）
 - [ ] reranker 仅作为离线实验；只有评测集上的 recall@k、MRR/nDCG、证据覆盖和延迟/成本均达标才允许上线开关。
 
 **退出门：** 任一索引缺失、embedding provider 超时或向量版本不匹配时，自动回退关键词检索并明确记录降级原因；不因向量失败而丢失现有可用答案。
@@ -85,7 +85,7 @@
 - [ ] 在资料页新增“搜索资料”入口，显示候选标题、来源域名、摘要、更新时间、风险/状态和选择操作；候选正文默认不全部注入页面。
 - [ ] 选择后显示下载 queued/running/succeeded/failed/unknown；刷新和重启后仍能恢复状态。
 - [ ] 搜索、选择、下载分别有独立 idempotency key；未知结果只显示确认/继续查询，不自动重复外部下载。
-- [ ] 教学回答展示检索模式（关键词/混合/降级）、资料版本和引用原文；不把“搜索到”写成“事实已验证”。
+- [x] 教学回答展示检索模式（关键词/混合/降级）、资料版本和引用原文；不把“搜索到”写成“事实已验证”。（2026-09-24：run 响应含 `retrieval_decision`，证据栏显示 检索模式与降级原因；资料版本（document_id）与“读取原文”已有，grounding 文案区分“已核验/未核验”。）
 - [ ] 继续覆盖中文用户名、移动端、纯键盘、无资料、外网失败、权限拒绝和云端 provider 不可用状态。
 
 **退出门：** 新用户不需要终端即可搜索、选择、等待资料完成、提问并读取准确引用；浏览器断网/5xx 后不会重复下载或重复收费。
@@ -94,7 +94,7 @@
 
 - [ ] 新增内存/PG 同构测试、真实 HTTP fixture、worker lease/claim、重启和 unknown 恢复测试。
 - [ ] 新增安全探针：SSRF、跨租户、越权对象、未选候选、提示注入、任意文件路径和外部响应超限。
-- [ ] 新增 fetch latency、bytes、attempt、provider usage、route decision、fallback 和 reconciliation 指标；正文、API key、完整 prompt 默认不进日志。
+- [x] 新增 fetch latency、bytes、attempt、provider usage、route decision、fallback 和 reconciliation 指标；正文、API key、完整 prompt 默认不进日志。（0017/0018 覆盖前六类；2026-09-24 补 0019 检索模式/降级原因聚合与 `render_metrics` 白名单渲染，闭集标签，无动态标签透传。）
 - [ ] 生产继续不设置月度金额拒绝；保留单次 token/deadline/attempt/loop/bytes/并发边界，并设置超时与人工对账告警。
 - [ ] 完成备份、迁移往返、release hash、systemd restart、HTTPS 和回滚演练；真实 provider 只做经用户确认的最小 smoke。
 
