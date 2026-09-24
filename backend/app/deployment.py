@@ -157,6 +157,8 @@ class DeploymentSettings:
     #: configuration. The secret is excluded from repr so diagnostics cannot
     #: accidentally print it.
     teaching_api_key: str = field(default="", repr=False)
+    #: Metrics use a separate bearer credential. Empty means the endpoint is disabled.
+    metrics_token: str = field(default="", repr=False)
     teaching_base_url: str = "https://api.openai.com/v1"
     source_search_provider: str = "disabled"
     source_search_api_key: str = field(default="", repr=False)
@@ -298,6 +300,7 @@ class DeploymentSettings:
                 )
             ),
             teaching_api_key=env.get("STUDY_PLATFORM_TEACHING_API_KEY", ""),
+            metrics_token=env.get("STUDY_PLATFORM_METRICS_TOKEN", "").strip(),
             teaching_base_url=env.get(
                 "STUDY_PLATFORM_TEACHING_BASE_URL", "https://api.openai.com/v1"
             ).strip(),

@@ -7,13 +7,13 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:82aab0ffc0636b9913374ac033040451c50a82bc2c14992fa82a8ce16a37cc99, generated_at=2026-09-23T08:11:42Z -->
-> 生成时间：2026-09-23T08:11:42Z
+<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:d1b092db0ba1fd82e34ff132d76bfba3993aab202ee3f6f1c5b8f5d84c5bf6e5, generated_at=2026-09-23T13:19:23Z -->
+> 生成时间：2026-09-23T13:19:23Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
 
-当前 head：`0017`
+当前 head：`0018`
 
 ### 表总览
 
