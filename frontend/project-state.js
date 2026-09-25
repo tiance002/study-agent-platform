@@ -1,4 +1,4 @@
-/* Project-scoped data loading: conversations, plan, sources and job lists. */
+/* Project-scoped data loading: conversations, plan, diagnosis, sources and job lists. */
 /* global React */
 (function () {
   "use strict";
@@ -24,10 +24,14 @@
     const [conversations, setConversations] = useState([]);
     const [messages, setMessages] = useState([]);
     const [plan, setPlan] = useState(null);
+    const [diagnosis, setDiagnosis] = useState(null);
     const [sources, setSources] = useState([]);
     const [ingestionJobs, setIngestionJobs] = useState([]);
     const [candidates, setCandidates] = useState([]);
     const [acquisitionJobs, setAcquisitionJobs] = useState([]);
+    // 知识库是**用户级**列表（跨项目共享），与 projectId 无关，
+    // 只受账号 epoch 约束：切账号时旧响应不得覆盖新账号的库。
+    const [librarySources, setLibrarySources] = useState([]);
 
     const loadedRef = useRef(onProjectDataLoaded);
     loadedRef.current = onProjectDataLoaded;
@@ -55,11 +59,22 @@
       setConversations([]);
       setMessages([]);
       setPlan(null);
+      setDiagnosis(null);
       setSources([]);
       setIngestionJobs([]);
       setCandidates([]);
       setAcquisitionJobs([]);
     }, []);
+
+    const refreshLibrary = useCallback(async () => {
+      const epoch = scopeRef.current.epoch;
+      const owner = scopeRef.current.principalId;
+      const result = await api("GET", "/library/sources");
+      if (scopeRef.current.principalId !== owner || scopeRef.current.epoch !== epoch) return [];
+      const next = (result && result.sources) || [];
+      setLibrarySources(next);
+      return next;
+    }, [scopeRef]);
 
     const refreshProjectData = useCallback(async (selectedId, signal) => {
       if (!selectedId) {
@@ -68,10 +83,11 @@
         return;
       }
       const scope = { principalId, projectId: selectedId, epoch: scopeRef.current.epoch };
-      const [projectData, conversationData, planData, sourceData, jobData, candidateData] = await Promise.all([
+      const [projectData, conversationData, planData, diagnosisData, sourceData, jobData, candidateData] = await Promise.all([
         api("GET", `/projects/${selectedId}`, undefined, { signal }),
         api("GET", `/projects/${selectedId}/conversations`, undefined, { signal }),
         api("GET", `/projects/${selectedId}/plan`, undefined, { signal }),
+        api("GET", `/projects/${selectedId}/diagnosis`, undefined, { signal }),
         api("GET", `/projects/${selectedId}/sources`, undefined, { signal }),
         api("GET", `/projects/${selectedId}/ingestion-jobs`, undefined, { signal }),
         api("GET", `/projects/${selectedId}/source-candidates`, undefined, { signal }),
@@ -81,6 +97,7 @@
       setProject(projectData);
       setConversations(nextConversations);
       setPlan(planData);
+      setDiagnosis(diagnosisData);
       setSources(sourceData.sources || []);
       setIngestionJobs(jobData.jobs || []);
       setCandidates(candidateData.candidates || []);
@@ -119,6 +136,8 @@
       setMessages,
       plan,
       setPlan,
+      diagnosis,
+      setDiagnosis,
       sources,
       setSources,
       ingestionJobs,
@@ -127,6 +146,9 @@
       setCandidates,
       acquisitionJobs,
       setAcquisitionJobs,
+      librarySources,
+      setLibrarySources,
+      refreshLibrary,
       currentConversation,
       refreshProjects,
       refreshProjectData,
