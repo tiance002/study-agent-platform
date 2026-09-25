@@ -59,7 +59,7 @@ def _register(client: TestClient, *, suffix: str) -> tuple[str, str]:
     username = "lib" + suffix
     response = client.post(
         "/auth/register",
-        json={"username": username, "password": "Library12"},
+        json={"username": username, "password": "LibraryPass12"},
         headers={"Origin": "http://testserver"},
     )
     assert response.status_code == 201, response.text
