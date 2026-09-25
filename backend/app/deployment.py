@@ -47,9 +47,10 @@ MIN_SECRET_BYTES = 32
 #: 没有可信代理清单，"信任 X-Forwarded-For" 就等于"信任任意客户端的自报家门"，
 #: 限流键、CSRF Origin 全部可以被轮换伪造（审查实测：换一个 XFF 值即重置限流桶）。
 
-#: 邀请兑换的默认限流：每个客户端键每个窗口允许的尝试次数。
-DEFAULT_EXCHANGE_LIMIT = 20
-DEFAULT_EXCHANGE_WINDOW_SECONDS = 600
+#: 默认的认证尝试限流：每个客户端键每个窗口允许的尝试次数。
+#: 注册与登录共用这一条限流（`register_auth_attempt()` / InMemoryRateLimiter）。
+DEFAULT_AUTH_ATTEMPT_LIMIT = 20
+DEFAULT_AUTH_ATTEMPT_WINDOW_SECONDS = 600
 
 #: 教学 provider 的合法开关值（闭集）。`scripted` 仅供测试/演练注入模拟器；
 #: 真实云 provider 接入后在此追加（见 ADR-015）。空值 = disabled。
@@ -133,8 +134,8 @@ class DeploymentSettings:
     invalid_proxies: tuple[str, ...]
     behind_proxy: bool
     session_ttl: timedelta
-    exchange_limit: int
-    exchange_window_seconds: int
+    auth_attempt_limit: int
+    auth_attempt_window_seconds: int
     auth_rate_limit_capacity: int = 10_000
     #: DSN 是否由环境**显式**提供（区别于落到本机 trust 默认值）。
     dsn_explicitly_set: bool = False
@@ -249,11 +250,13 @@ class DeploymentSettings:
                 trusted_proxies.append(entry)
 
         ttl_minutes = int(env.get("STUDY_PLATFORM_SESSION_TTL_MINUTES", "480"))
-        exchange_limit = int(env.get("STUDY_PLATFORM_EXCHANGE_LIMIT", str(DEFAULT_EXCHANGE_LIMIT)))
-        exchange_window = int(
+        auth_attempt_limit = int(
+            env.get("STUDY_PLATFORM_AUTH_ATTEMPT_LIMIT", str(DEFAULT_AUTH_ATTEMPT_LIMIT))
+        )
+        auth_attempt_window = int(
             env.get(
-                "STUDY_PLATFORM_EXCHANGE_WINDOW_SECONDS",
-                str(DEFAULT_EXCHANGE_WINDOW_SECONDS),
+                "STUDY_PLATFORM_AUTH_ATTEMPT_WINDOW_SECONDS",
+                str(DEFAULT_AUTH_ATTEMPT_WINDOW_SECONDS),
             )
         )
 
@@ -340,8 +343,8 @@ class DeploymentSettings:
             invalid_proxies=tuple(invalid_proxies),
             behind_proxy=_env_bool("STUDY_PLATFORM_BEHIND_PROXY", env=env),
             session_ttl=timedelta(minutes=ttl_minutes),
-            exchange_limit=exchange_limit,
-            exchange_window_seconds=exchange_window,
+            auth_attempt_limit=auth_attempt_limit,
+            auth_attempt_window_seconds=auth_attempt_window,
             auth_rate_limit_capacity=int(env.get("STUDY_PLATFORM_AUTH_RATE_LIMIT_CAPACITY", "10000")),
         )
 
@@ -361,10 +364,12 @@ class DeploymentSettings:
             problems.append(
                 f"会话 TTL 不得超过硬上限 {MAX_SESSION_TTL.days} 天（STUDY_PLATFORM_SESSION_TTL_MINUTES）"
             )
-        if self.exchange_limit <= 0:
-            problems.append("邀请兑换限流次数必须为正（STUDY_PLATFORM_EXCHANGE_LIMIT）")
-        if self.exchange_window_seconds <= 0:
-            problems.append("邀请兑换限流窗口必须为正秒数（STUDY_PLATFORM_EXCHANGE_WINDOW_SECONDS）")
+        if self.auth_attempt_limit <= 0:
+            problems.append("认证尝试限流次数必须为正（STUDY_PLATFORM_AUTH_ATTEMPT_LIMIT）")
+        if self.auth_attempt_window_seconds <= 0:
+            problems.append(
+                "认证尝试限流窗口必须为正秒数（STUDY_PLATFORM_AUTH_ATTEMPT_WINDOW_SECONDS）"
+            )
         if self.auth_rate_limit_capacity <= 0:
             problems.append("认证限流桶容量必须为正")
         if not 0 < self.local_query_rewriter_timeout_seconds <= 3:

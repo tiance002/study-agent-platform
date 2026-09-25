@@ -11,7 +11,7 @@ from app.audit.sink import RiskLevel
 from app.core.clock import Clock
 from app.core.errors import ErrorCode, deny
 from app.core.ids import new_id
-from app.identity.models import AuthMethod, UserSession
+from app.identity.models import UserSession
 from app.identity.ports import (
     AccountLookup,
     AccountRegistrationResult,
@@ -89,7 +89,6 @@ class InMemoryAccountRepository:
                     principal_id=principal_id,
                     issued_at=now,
                     expires_at=session_expires_at,
-                    auth_method=AuthMethod.PASSWORD,
                     credential_id=credential_id,
                     security_generation=1,
                 )
@@ -166,7 +165,6 @@ class InMemoryAccountRepository:
                 principal_id=current.principal_id,
                 issued_at=now,
                 expires_at=session_expires_at,
-                auth_method=AuthMethod.PASSWORD,
                 credential_id=current.credential_id,
                 security_generation=current.security_generation,
             )

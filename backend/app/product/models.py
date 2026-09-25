@@ -29,7 +29,7 @@ from app.core.contracts import (
     require_positive,
     require_text,
 )
-from app.identity.models import AuthMethod, Invitation, UserSession  # noqa: F401
+from app.identity.models import UserSession  # noqa: F401
 
 
 class MessageRole(StrEnum):

@@ -1,33 +1,33 @@
-"""邀请登录与退出（认证引导 HTTP 入口）。
+"""注册、登录与退出（认证 HTTP 入口）。
 
 ## 本模块存在的意义
 
-用户通过**一次性邀请**进入系统，全程不需要终端、不需要粘贴 bearer 令牌：
+用户通过**注册或密码登录**取得会话，全程不需要终端、不需要粘贴 bearer 令牌：
 
 ```
-POST /auth/invitations/exchange  {"token": "<原始邀请令牌>"}
-  → 服务端算 sha256 → InvitationRepository.exchange()（无身份参数）
-  → 成功：种下 HttpOnly cookie，响应里**没有任何令牌材料**
-  → 失败：未知 / 已过期 / 已消费 / 格式错 → 同一个错误码同一句话
-  → 按客户端键限流，超限 429 + Retry-After
+POST /auth/register  {"username": ..., "password": ...}
+  → 建账号 + 首个密码会话 + 默认项目（原子）
+POST /auth/login     {"username": ..., "password": ...}
+  → 校验密码 → 种下 HttpOnly cookie，响应里**没有任何口令材料**
+  → 未知账号 / 密码错误 / 已禁用 → 同一个错误码同一句话
+  → 按客户端键与账号键限流，超限 429 + Retry-After
 
 POST /auth/logout       → 撤销当前会话 + 清除 cookie
 POST /auth/logout/all   → 集中失效本主体全部会话（退出所有设备）+ 清除 cookie
 ```
 
-## 安全边界（第 1 轮收口后）
+## 安全边界
 
-- **客户端没有身份参数可传**：请求体里只有 `token`，主体由邀请行预绑定
-  （0003 迁移的 `invitee_principal_id` + `SECURITY DEFINER` 兑换函数）；
-- **原始令牌与哈希不出现在任何响应/审计载荷里**；
-- **失败统一拒绝**：探测者无法区分"token 不存在"和"token 已被用过"；
+- **客户端没有身份参数可传**：身份由账号行决定，请求体里只有用户名与口令；
+- **口令与哈希不出现在任何响应/审计载荷里**；
+- **失败统一拒绝**：探测者无法区分"用户不存在"和"密码错误"；
 - **CSRF 严格模式**：凭 cookie 的不安全方法**必须**携带可信 Origin；
   无 Origin 时只接受同源 Referer；两者都没有 → 拒绝。可信集合 =
   配置的外部 Origin 白名单 ∪ 请求自身 Host 来源（反代下按
   X-Forwarded-* 计算，且只有显式声明 `STUDY_PLATFORM_BEHIND_PROXY=1`
   才信任转发头，否则客户端可随意伪造）；
 - **Bearer 兜底可整体关闭**：生产装配关闭 bearer，只认 cookie；
-- **审计**：兑换成功/被拒、认证失败、限流命中、退出（单个/全部）
+- **审计**：注册成功/失败、认证失败、限流命中、退出（单个/全部）
   全部进入审计事实源。
 """
 
@@ -44,11 +44,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.audit.sink import RiskLevel
 from app.core.errors import ErrorCode, PlatformError, deny
-from app.core.ids import new_id
 from app.identity.cookie_auth import SESSION_COOKIE_NAME
 from app.identity.models import Principal
 from app.identity.passwords import (
     DUMMY_PASSWORD_HASH,
+    MAX_PASSWORD_LENGTH,
+    MIN_PASSWORD_LENGTH,
     hash_password,
     needs_rehash,
     normalize_username,
@@ -60,8 +61,6 @@ if TYPE_CHECKING:  # 类型标注用，运行时不导入（避免与装配模�
 
 router = APIRouter()
 
-#: 邀请令牌的长度上限。原始令牌是高熵随机串；超长输入不是用户，是探测。
-TOKEN_MAX_CHARS = 4096
 REGISTER_LIMIT = 5
 REGISTER_WINDOW_SECONDS = 3600
 LOGIN_CLIENT_LIMIT = 30
@@ -72,27 +71,15 @@ LOGIN_WINDOW_SECONDS = 600
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
 
-class ExchangeBody(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    token: str = Field(min_length=1, max_length=TOKEN_MAX_CHARS)
-
-
 class PasswordAuthBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     username: str = Field(min_length=1, max_length=16)
-    password: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=MIN_PASSWORD_LENGTH, max_length=MAX_PASSWORD_LENGTH)
 
 
 def _state(request: Request):
     return request.app.state.platform
-
-
-def _token_hash(raw_token: str) -> str:
-    """原始令牌 → 固定长度哈希。**只存哈希**：库与日志里永远没有原始令牌。"""
-    digest = sha256(raw_token.encode("utf-8")).hexdigest()
-    return f"sha256:{digest}"
 
 
 def _username_digest(request: Request, username: str) -> str:
@@ -377,81 +364,6 @@ def authenticate_request(request: Request) -> Principal:
 # --------------------------------------------------------------------- 端点
 
 
-@router.post("/auth/invitations/exchange")
-def exchange_invitation(request: Request, body: ExchangeBody) -> JSONResponse:
-    """兑换邀请：限流 → 兑换 → 审计 → 种下会话 cookie。
-
-    这是**认证引导**端点 —— 调用方此刻还没有任何身份，所以本端点不做认证，
-    也不做 CSRF 来源检查（没有环境凭证可被利用），但必须限流。
-    """
-    state = _state(request)
-    _check_json_body(request)
-    now = state.clock.now()
-    client_key = _client_key(request, state)
-
-    decision = state.rate_limiter.register(client_key, now=now)
-    if not decision.allowed:
-        state.audit.append(
-            "auth_rate_limited",
-            {"client_key": client_key, "attempts": decision.attempts},
-            risk=RiskLevel.LOW,
-        )
-        # 统一走 error_response：429 + Retry-After + 标准错误体（含 request_id）。
-        raise PlatformError(
-            code=ErrorCode.RATE_LIMITED,
-            message="尝试过于频繁，请稍后再试",
-            retryable=True,
-            details={"retry_after_seconds": decision.retry_after_seconds},
-        )
-
-    try:
-        session = state.invitations.exchange(
-            _token_hash(body.token),
-            session_id=new_id("sess"),
-            session_expires_at=now + state.session_ttl,
-        )
-    except PlatformError:
-        # 内部一致性错误（例如 TTL 越界）不伪装成"邀请无效"，原样上抛为 5xx。
-        raise
-    if session is None:
-        # 审计同一条事件、载荷不带失败原因（未知/过期/已消费不可区分）。
-        # 未发生任何业务写入，这里保持同步写链式 sink：sink 不可用时
-        # fail-closed 是真实的 —— 拒绝响应的同时确实什么都没发生。
-        state.audit.append(
-            "invitation_rejected",
-            {"client_key": client_key},
-            risk=RiskLevel.HIGH,
-        )
-        # 统一拒绝：不给"token 存在但已被用掉"留任何可区分的信号。
-        raise deny(ErrorCode.INVITATION_INVALID, "邀请无效、已过期或已被使用")
-
-    # 成功路径的审计事实已与业务**同一事务**写入审计 outbox
-    # （数据库版）/同一临界区（内存版）—— sink 不可用不再可能
-    # "邀请已消费却返回 503"。这里只负责把事实投影进链式 sink；
-    # 投影失败时事件保持 pending 可观测，待后续请求补投影。
-    if state.audit_outbox is not None:
-        state.audit_outbox.flush_pending(session.tenant_id)
-
-    cookie_value = state.cookie_auth.issue(session)
-    response = _auth_response(
-        request,
-        {
-            "principal_id": session.principal_id,
-            "expires_at": session.expires_at.isoformat(),
-        }
-    )
-    response.set_cookie(
-        SESSION_COOKIE_NAME,
-        cookie_value,
-        httponly=True,      # JS 读不到：XSS 偷不走会话
-        samesite="lax",     # 跨站导航不带 cookie：CSRF 的第一道（非全部）防线
-        secure=state.cookie_secure,
-        max_age=int(state.session_ttl.total_seconds()),
-        path="/",
-    )
-    return response
-
-
 def _require_cookie_session(request: Request):
     """logout 系列端点共同前置：有效签名 cookie + 严格 CSRF，失败统一审计。"""
     state = _state(request)
@@ -525,7 +437,10 @@ def register_account(request: Request, body: PasswordAuthBody) -> JSONResponse:
             lambda: hash_password(body.password), priority="registration"
         )
     except ValueError as exc:
-        raise deny(ErrorCode.PARAMS_INVALID, "密码长度需为 12-128 个字符") from exc
+        raise deny(
+            ErrorCode.PARAMS_INVALID,
+            f"密码长度需为 {MIN_PASSWORD_LENGTH}-{MAX_PASSWORD_LENGTH} 个字符",
+        ) from exc
     result = state.accounts.register(
         username_original=username.original,
         username_normalized=username.normalized,

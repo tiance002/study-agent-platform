@@ -40,12 +40,10 @@ from app.identity.idempotency import (
 )
 from app.identity.membership import MembershipStore
 from app.identity.memory_store import (
-    InMemoryInvitationRepository,
     InMemorySessionRepository,
 )
 from app.identity.ports import (
     AccountRepository,
-    InvitationRepository,
     MembershipRepository,
     SessionRepository,
     SystemContext,
@@ -112,7 +110,6 @@ class PlatformState:
     sessions: SessionIssuer
     membership: MembershipRepository
     auth: AuthProvider
-    invitations: InvitationRepository
     session_store: SessionRepository
     cookie_auth: CookieAuth
     # 服务端确认记录
@@ -256,7 +253,6 @@ def build_platform(
     # 那个报错说明的是类型标注写错了，不是代码写错了。
     membership: MembershipRepository
     session_store: SessionRepository
-    invitations: InvitationRepository
     confirmations: ConfirmationRepository
     products: ProductRepository
     http_idempotency: HttpIdempotencyStore | None
@@ -278,7 +274,6 @@ def build_platform(
         from app.db.evidence_store import PostgresEvidenceRepository
         from app.db.idempotency_store import PostgresHttpIdempotencyStore
         from app.db.identity_store import (
-            PostgresInvitationRepository,
             PostgresMembershipRepository,
             PostgresSessionRepository,
         )
@@ -307,7 +302,6 @@ def build_platform(
         session_store = pg_sessions
         accounts = PostgresAccountRepository(sessions=pg_sessions, dsn=dsn, clock=clock)
         audit_outbox = PostgresAuditOutbox(sink=audit, dsn=dsn)
-        invitations = PostgresInvitationRepository(clock, dsn, sessions=pg_sessions, outbox=audit_outbox)
         confirmations = PostgresConfirmationStore(dsn)
         products = PostgresProductRepository(membership=membership, clock=clock, dsn=dsn)
         acquisition = PostgresAcquisitionRepository(
@@ -344,8 +338,8 @@ def build_platform(
             else None
         )
         rate_limiter: RateLimiter = PostgresRateLimiter(
-            limit=loaded.exchange_limit,
-            window_seconds=loaded.exchange_window_seconds,
+            limit=loaded.auth_attempt_limit,
+            window_seconds=loaded.auth_attempt_window_seconds,
             dsn=dsn,
         )
         runtime = _build_runtime(
@@ -361,7 +355,7 @@ def build_platform(
             evidence_log=evidence_log,
             confirmations=confirmations,
         )
-        # 生产形态不做演示种子：租户/主体由管理员邀请流程建立。
+        # 生产形态不做演示种子：租户/主体由注册流程建立。
         return PlatformState(
             registry=registry,
             gateway=gateway,
@@ -377,7 +371,6 @@ def build_platform(
             sessions=sessions,
             membership=membership,
             auth=auth,
-            invitations=invitations,
             session_store=session_store,
             cookie_auth=cookie_auth,
             confirmations=confirmations,
@@ -432,7 +425,6 @@ def build_platform(
     memory_sessions = InMemorySessionRepository(clock=clock)
     session_store = memory_sessions
     audit_outbox = InMemoryAuditOutbox(sink=audit)
-    invitations = InMemoryInvitationRepository(clock=clock, sessions=memory_sessions, outbox=audit_outbox)
     accounts = InMemoryAccountRepository(
         membership=membership,
         sessions=memory_sessions,
@@ -458,8 +450,8 @@ def build_platform(
         else None
     )
     rate_limiter = InMemoryRateLimiter(
-        limit=loaded.exchange_limit,
-        window_seconds=loaded.exchange_window_seconds,
+        limit=loaded.auth_attempt_limit,
+        window_seconds=loaded.auth_attempt_window_seconds,
         capacity=loaded.auth_rate_limit_capacity,
     )
     runtime = _build_runtime(
@@ -490,7 +482,6 @@ def build_platform(
         sessions=sessions,
         membership=membership,
         auth=auth,
-        invitations=invitations,
         session_store=session_store,
         cookie_auth=cookie_auth,
         confirmations=confirmations,
