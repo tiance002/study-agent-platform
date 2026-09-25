@@ -108,8 +108,11 @@ def test_learning_loop_survives_restart_and_state_does_not_forge_mastery(tmp_pat
     client_b.cookies.set("study_session", cookie)
     mastery_before = client_b.get(f"/projects/{project_id}/mastery").json()
     concept = next(row for row in mastery_before["components"] if row["component_id"] == "concept")
-    assert (concept["independence_level"], concept["confidence"]) == ("introduced", "low")
-    assert client_b.get(f"/projects/{project_id}/tasks/{task_id}").json()["verified"] is True
+    # 自报是中性证据：被记录但不抬升独立水平（self-report != verified）。
+    assert (concept["independence_level"], concept["confidence"]) == ("unknown", "low")
+    detail = client_b.get(f"/projects/{project_id}/tasks/{task_id}").json()
+    assert detail["verified"] is False
+    assert detail["self_reported"] is True
     assert client_b.get(f"/projects/{project_id}/diagnosis").json() == diagnosis.json()
 
     done = client_b.post(
