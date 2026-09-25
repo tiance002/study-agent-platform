@@ -280,7 +280,7 @@ CREATE TABLE action_intents (
 
 
 def _product_tables() -> list[str]:
-    """产品底座（原 0002，去掉 `invitations`）。"""
+    """产品底座（原 0002，去掉邀请码表）。"""
     return [
         """
 CREATE TABLE user_sessions (
@@ -1224,8 +1224,7 @@ def _credential_revocations() -> list[str]:
         "REVOKE ALL ON public.acquisition_fetch_observations FROM PUBLIC, study_app"
     )
     statements.append(
-        "GRANT SELECT, INSERT, UPDATE ON public.acquisition_fetch_observations"
-        " TO study_worker"
+        "GRANT SELECT, INSERT, UPDATE ON public.acquisition_fetch_observations TO study_worker"
     )
     statements.append("REVOKE ALL ON source_fetch_artifacts FROM PUBLIC")
     statements.append("REVOKE ALL ON source_fetch_artifacts FROM study_app")
@@ -2576,10 +2575,8 @@ ALTER TABLE teaching_runs
     )
     # 快照函数：建在它引用的全部列/表之后。
     op.execute(_metrics_function())
-    for statement in _secure_function(
-        "public.study_metrics_snapshot()", executor_role=APP_ROLE
-    ):
-        op.execute(statement)
+    op.execute("REVOKE ALL ON FUNCTION public.study_metrics_snapshot() FROM PUBLIC")
+    op.execute("GRANT EXECUTE ON FUNCTION public.study_metrics_snapshot() TO study_app")
 
     # ---- 任务详情列（原 0020） -----------------------------------------
     for statement in (
