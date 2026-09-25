@@ -384,7 +384,7 @@ def _controller(artifact_root: Path) -> int:
                 "STUDY_PLATFORM_COOKIE_SECURE": "false",
                 "STUDY_PLATFORM_REGISTRATION_ENABLED": "true",
                 "STUDY_PLATFORM_PASSWORD_LOGIN_ENABLED": "true",
-                "STUDY_PLATFORM_EXCHANGE_LIMIT": "10000",
+                "STUDY_PLATFORM_AUTH_ATTEMPT_LIMIT": "10000",
                 "STUDY_PLATFORM_TEACHING_PROVIDER": "openai",
                 "STUDY_PLATFORM_TEACHING_MODEL": "round8-process-test-model",
                 "STUDY_PLATFORM_TEACHING_API_KEY": "local-fixture-not-a-real-key",
@@ -406,7 +406,7 @@ def _controller(artifact_root: Path) -> int:
             worker_id="round8-before-restart",
         )
         headers = {"Idempotency-Key": "r8-process-" + uuid.uuid4().hex}
-        password = "Round8-process-password-123-dev-only"
+        password = "r8-dev-only"
         username = "r8p" + uuid.uuid4().hex[:9]
 
         with httpx.Client(
