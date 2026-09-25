@@ -181,10 +181,15 @@
       isProjectCurrent,
       isViewCurrent,
       scopeRef,
-      onProjectDataLoaded: (projectData, planData) => setPlanForm({
-        goal: planData?.plan?.goal || projectData.goal || "",
-        milestone: planData?.milestones?.[0]?.title || "",
-      }),
+      onProjectDataLoaded: (projectData, planData) => {
+        setPlanForm({
+          goal: planData?.plan?.goal || projectData.goal || "",
+          milestone: planData?.milestones?.[0]?.title || "",
+        });
+        // 刷新/重开读回时重建提交记录：否则界面上只剩服务端事实，
+        // 用户看不到自己提交过什么（"重开读回"必须包含它）。
+        loadTaskSubmissions(projectData.project_id, planData?.tasks).catch(() => setSubmissionsByTask({}));
+      },
     });
 
     const renderEpoch = scopeRef.current.epoch;
@@ -649,6 +654,31 @@
       } finally {
         setTaskBusyId("");
       }
+    }
+
+    // 刷新/切项目后重建每个任务的提交记录。`submissionsByTask` 原本只在提交
+    // 成功那一刻写入，刷新后界面上就看不到任何提交（服务端事实仍在）——
+    // "重开读回"必须包含这块状态，所以按任务逐个读回并整体替换。
+    async function loadTaskSubmissions(selectedProjectId, tasks) {
+      if (!selectedProjectId || !tasks || !tasks.length) {
+        setSubmissionsByTask({});
+        return;
+      }
+      const scope = { principalId, projectId: selectedProjectId, epoch: scopeRef.current.epoch };
+      const results = await Promise.all(
+        tasks.map((task) =>
+          api("GET", `/projects/${selectedProjectId}/tasks/${task.task_id}/submissions`).then(
+            (data) => [task.task_id, (data && data.submissions) || []],
+            () => [task.task_id, []]
+          )
+        )
+      );
+      if (!isProjectCurrent(scope)) return;
+      const next = {};
+      for (const [taskId, rows] of results) {
+        if (rows.length) next[taskId] = rows.map((row) => ({ ...row, task_id: taskId }));
+      }
+      setSubmissionsByTask(next);
     }
 
     async function pollIngestionJob(selectedProjectId, jobId) {

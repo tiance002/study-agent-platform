@@ -12,16 +12,16 @@
    断言界面把自报表述为"已记录，不等于自动评分"，且该任务**不显示为已验证**；
    再把任务流转到 done；
 5. 390px 视口无横向溢出，并把截图写入 var/round8-browser-gate/；
-6. 刷新页面后读回：计划、任务状态仍在界面上；提交记录经真实 HTTP 读回仍在
-   （见下方 READ_BACK 说明）。
+6. 刷新页面后读回：计划、任务状态、**提交记录**都在界面上重建；提交的
+   持久化事实另以真实 HTTP 读回交叉验证（任务详情 `self_reported=true` /
+   `verified=false`、`GET .../submissions` 命中原文）。
 
 成功打印 LEARNING_LOOP_BROWSER_PASSED。
 
-READ_BACK 说明：刷新后前端只重新拉取 `/plan` 与 `/diagnosis`，提交列表
-（`submissionsByTask`）是组件内状态，不会被重建，所以"提交记录仍在"这条
-在**当前 UI 上无法成立**。按"不得为通过而放宽断言"的要求，这条改用真实
-HTTP 读回持久化事实（任务详情 `self_reported=true` / `verified=false`、
-`GET .../submissions` 命中原文），UI 侧的缺口在报告中如实记录。
+历史说明：本脚本最初发现"刷新后前端不重建提交列表"（`submissionsByTask`
+是组件内状态，而刷新只重拉 `/plan` 与 `/diagnosis`），当时改用 HTTP 读回
+持久化事实、并在报告中如实记录缺口；前端随后补齐了读回逻辑，因此第 6 步
+已升级为**界面断言**，HTTP 读回保留为交叉验证。
 """
 
 from __future__ import annotations
@@ -165,10 +165,14 @@ def main() -> int:
         reloaded_head = reloaded_card.locator(".task-card-head")
         expect(reloaded_head).to_contain_text("未验证")
         assert "已验证" not in reloaded_head.inner_text(), reloaded_head.inner_text()
+        # 提交记录必须由**界面**读回：前端在项目数据加载后按任务重建提交列表，
+        # 否则"重开读回"在 UI 上不成立（这是本脚本最初发现的 P1，已修复）。
+        expect(reloaded_card.locator(".submission-list")).to_contain_text(SELF_REPORT, timeout=15000)
+        expect(reloaded_card.locator(".submission-list")).to_contain_text("不等于自动评分")
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
         page.screenshot(path=str(artifact_dir / "learning-loop-reloaded-390.png"), full_page=True)
 
-        # 提交记录的持久化事实用真实 HTTP 读回（UI 不重建提交列表，见模块 docstring）。
+        # 提交记录的持久化事实另用真实 HTTP 读回，作为界面断言之外的交叉验证。
         projects = read_json(page, "/projects")
         assert projects["status"] == 200, projects
         project = next(
