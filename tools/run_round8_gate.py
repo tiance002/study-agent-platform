@@ -25,7 +25,6 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--artifacts", default="var/round8-browser-gate")
-    parser.add_argument("--invite", default="round8-preview-invite")
     args = parser.parse_args()
 
     if not pg_support.reachable():
@@ -72,7 +71,7 @@ def main() -> int:
         ["node", "--check", "frontend/project-state.js"],
         ["node", "--check", "frontend/app.js"],
         [python, "tools/skills/gen_contracts.py", "--all", "--check"],
-        [python, "tools/check_round8_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts, "--invite", args.invite],
+        [python, "tools/check_round8_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts],
         # P9 证据栏浏览器回归：验证检索/路由标签与窄屏布局（复用同一预览）。
         [python, "tools/check_p9_evidence_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts],
         # 知识库真实旅程：用户级资料库添加 → 关联到当前项目 → 项目资料可见。
