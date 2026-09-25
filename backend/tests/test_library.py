@@ -2,7 +2,8 @@
 
 守住四件"不会报错、只会慢慢坏掉"的语义：
 
-1. **登记幂等**：同一份材料（同 `acquisition`）重复登记返回既有记录，不产生第二条；
+1. **登记幂等**：同一份材料（同 `acquisition` 且同原文）重复登记返回既有记录，
+   不产生第二条；同名**不同内容**则是两份材料（原文不被幂等命中丢弃）；
 2. **主体隔离**：别人主体的材料在自己这里既看不到也用不了，且拒绝**不泄露存在性**；
 3. **关联复用**：关联在目标项目内复用同一份材料（同 `identity_hash`），
    重复关联不产生第二份资料、也不产生第二个摄取；
@@ -111,9 +112,15 @@ def test_attach_creates_a_project_source_and_is_idempotent(client, platform, aut
     )
     assert first.status_code == 200, first.text
     body = first.json()
-    assert set(body) == {"source_id", "ingestion_job_id", "created"}
+    assert set(body) == {
+        "source_id",
+        "ingestion_job_id",
+        "created",
+        "library_document_version",
+    }
     assert body["created"] is True
     assert body["ingestion_job_id"], "库内有原文时服务端直接入队摄取"
+    assert body["library_document_version"] == 1, "首次关联冻结库内第 1 版原文"
 
     sources = client.get(f"/projects/{project_id}/sources", headers=headers).json()["sources"]
     assert [s["source_id"] for s in sources] == [body["source_id"]]
@@ -249,3 +256,136 @@ def test_url_material_attach_enqueues_a_fetch_instead_of_ingestion(client, platf
     )
     assert again.status_code == 200, again.text
     assert len(platform.acquisition.list_candidates(principal, project_id)) == 1
+
+    # 没有库内原文：关联响应里的版本号是 null（只做加法新增的字段）。
+    assert attached.json()["library_document_version"] is None
+
+
+@pytest.mark.invariant
+def test_same_acquisition_with_different_content_stays_two_materials(
+    client, platform, auth_headers, demo
+):
+    """同名（同 acquisition）不同内容 = 两份材料：原文各取各的，谁都不被丢弃。"""
+    headers = auth_headers()
+    acquisition = {"kind": "upload", "name": "事务讲义"}
+    other_markdown = "# 另一版\n\n这是不同的正文。\n"
+
+    first = _register(client, headers, acquisition=acquisition, content=MARKDOWN)
+    second = _register(client, headers, acquisition=acquisition, content=other_markdown)
+    assert (first.status_code, second.status_code) == (201, 201), "不同内容必须各自新建"
+    assert first.json()["library_source_id"] != second.json()["library_source_id"]
+    assert first.json()["identity_hash"] != second.json()["identity_hash"]
+
+    listed = client.get("/library/sources", headers=headers).json()["sources"]
+    assert {s["library_source_id"] for s in listed} == {
+        first.json()["library_source_id"],
+        second.json()["library_source_id"],
+    }
+
+    principal = Principal(principal_id=demo["principal"], tenant_id=demo["tenant"])
+    assert (
+        platform.library.latest_content(principal, first.json()["library_source_id"])
+        == MARKDOWN
+    )
+    assert (
+        platform.library.latest_content(principal, second.json()["library_source_id"])
+        == other_markdown
+    )
+
+    # 同一 (acquisition, content) 重复登记：幂等命中第一条，不新增。
+    repeat = _register(client, headers, acquisition=acquisition, content=MARKDOWN)
+    assert repeat.status_code == 200, repeat.text
+    assert repeat.json()["library_source_id"] == first.json()["library_source_id"]
+    assert len(client.get("/library/sources", headers=headers).json()["sources"]) == 2
+
+
+@pytest.mark.invariant
+def test_attach_failure_leaves_no_half_created_source(
+    client, platform, auth_headers, demo, monkeypatch
+):
+    """关联是一步原子命令：第二步失败不得留下"有资料无任务"的半成品。"""
+    headers = auth_headers()
+    registered = _register(
+        client, headers, acquisition={"kind": "upload", "n": "atomic"}, content=MARKDOWN
+    )
+    library_source_id = registered.json()["library_source_id"]
+    project_id = demo["project"]
+
+    real = platform.ingestion
+
+    class _FailingIngestion:
+        """把摄取写入整体打挂；只读方法仍委托真实实现。"""
+
+        def enqueue(self, *args, **kwargs):
+            raise RuntimeError("注入的入队失败")
+
+        def enqueue_with_source(self, *args, **kwargs):
+            raise RuntimeError("注入的入队失败")
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    monkeypatch.setattr(platform, "ingestion", _FailingIngestion())
+    with pytest.raises(RuntimeError):
+        client.post(
+            f"/projects/{project_id}/library-sources/{library_source_id}/attach",
+            headers=_keyed(headers),
+        )
+
+    # 项目里不残留该资料：没有"有资料无任务"的半成品。
+    sources = client.get(f"/projects/{project_id}/sources", headers=headers).json()["sources"]
+    jobs = client.get(f"/projects/{project_id}/ingestion-jobs", headers=headers).json()["jobs"]
+    assert sources == [] and jobs == []
+    # 库侧记录不受影响（失败的关联不改知识库）。
+    assert [
+        s["library_source_id"]
+        for s in client.get("/library/sources", headers=headers).json()["sources"]
+    ] == [library_source_id]
+
+    # 恢复后重试成功：只产生一份资料 + 一个任务。
+    monkeypatch.setattr(platform, "ingestion", real)
+    retry = client.post(
+        f"/projects/{project_id}/library-sources/{library_source_id}/attach",
+        headers=_keyed(headers),
+    )
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["created"] is True and retry.json()["ingestion_job_id"]
+    assert len(client.get(f"/projects/{project_id}/sources", headers=headers).json()["sources"]) == 1
+    assert len(client.get(f"/projects/{project_id}/ingestion-jobs", headers=headers).json()["jobs"]) == 1
+
+
+@pytest.mark.invariant
+def test_library_update_does_not_retroactively_change_attached_copy(
+    client, auth_headers, demo
+):
+    """「关联即冻结」：库内新增版本后，重复关联复用既有副本（created=false），
+    响应里的版本号反映库内最新版，但项目副本不被回溯改写。"""
+    headers = auth_headers()
+    registered = _register(
+        client, headers, acquisition={"kind": "upload", "n": "frozen"}, content=MARKDOWN
+    )
+    library_source_id = registered.json()["library_source_id"]
+    project_id = demo["project"]
+
+    first = client.post(
+        f"/projects/{project_id}/library-sources/{library_source_id}/attach",
+        headers=_keyed(headers),
+    ).json()
+    assert first["library_document_version"] == 1
+
+    # 库内再存一版（版本 = 2）。
+    uploaded = client.post(
+        f"/library/sources/{library_source_id}/content",
+        json={"content": MARKDOWN + "\n## 增补\n\n新的一节。\n"},
+        headers=_keyed(headers),
+    )
+    assert uploaded.status_code == 202, uploaded.text
+
+    again = client.post(
+        f"/projects/{project_id}/library-sources/{library_source_id}/attach",
+        headers=_keyed(headers),
+    ).json()
+    assert again["source_id"] == first["source_id"], "不产生第二份项目资料"
+    assert again["created"] is False
+    assert again["ingestion_job_id"] == first["ingestion_job_id"], "不产生第二个摄取"
+    assert again["library_document_version"] == 2, "字段反映库内最新版，但项目副本仍是第 1 版"

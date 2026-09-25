@@ -115,6 +115,20 @@ class InMemoryLibraryRepository:
                 return None
             return max(documents, key=lambda row: row.version).content
 
+    def latest_document_version(self, actor: Principal, library_source_id: str) -> int | None:
+        with self._lock:
+            source = self._sources.get(library_source_id)
+            if (
+                source is None
+                or source.tenant_id != actor.tenant_id
+                or source.principal_id != actor.principal_id
+            ):
+                return None
+            documents = self._documents.get(library_source_id, [])
+            if not documents:
+                return None
+            return max(row.version for row in documents)
+
     def set_content(
         self,
         actor: Principal,
