@@ -76,6 +76,8 @@ def main() -> int:
         [python, "tools/check_p9_evidence_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts],
         # 知识库真实旅程：用户级资料库添加 → 关联到当前项目 → 项目资料可见。
         [python, "tools/check_library_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts],
+        # 学习闭环真实旅程：诊断 → 生成计划 → 任务流转 → 自报提交 → 重开读回。
+        [python, "tools/check_learning_loop_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts],
         [python, "tools/check_round8_process_recovery.py"],
     ]
     for command in commands:
