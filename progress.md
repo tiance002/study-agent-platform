@@ -852,3 +852,49 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - Milestone A 前冻结：LightRAG/GraphRAG、reranker、完整四层记忆、多 provider、全格式 OCR、100k 规模并发专项优化等。
 - 下一阶段优先交付：普通用户入口、React 核心学习闭环、ContextBuilder v0、Memory v0、最小真实场景指标。
 - 核心功能稳定后，由真实用户场景与测试数据决定是否引入 pgvector、reranker、LightRAG、更复杂的记忆 consolidation 和性能优化。
+
+## 2026-09-25 · 审查修复与前端重构（分支 codex/review-fixes-and-ui-20260925）
+
+按用户指令处理 2026-09-25 的独立审查（基准 head `c28817e`，见对话中的「我已经按 PR #2 当前 Head 实际代码…」审查文本），并按用户显式要求完成前端重构与知识库。三条工作流在**各自隔离 worktree**（`study-plan-wt-core` / `study-plan-wt-kb` / `study-plan-wt-ui`，共享主 venv）并行开发，集成后总门禁一次通过；PR #2 保持冻结，本批改动走新分支与新 PR。
+
+### 后端核心修复（A01–A06）
+
+- **A01 计划生成不再复述目标**：`build_generated_bundle` 由"目标复制三遍"改为确定性真实分解（领域识别 → 里程碑 → 具体任务；agent/编程/数据库/语言/备考 + 通用兜底共 6 套模板），生成器版本升为 `template/graph-v2`，评估映射 `graph-v2/task-v1`。质量不变量由构造保证并被 `backend/tests/test_plan_quality.py` 锁定：标题不得回抄目标/不得重复/不得"学习 XXX"式空泛，任务详情必须完整，前置只引用同计划更早任务，总时长 ≤ `max(weekly_hours*60, 180)`。
+- **A02 任务模型可用**：`LearningTask` 扩展 `objective/instruction/task_type/estimated_minutes/deliverable/acceptance_criteria/evidence_required/prerequisites/related_skill_id`（默认值让手工计划零影响）；迁移 `0020_learning_task_details.py` 加列 + CHECK（闭集、0–600、jsonb 数组且元素为字符串），可逆；API 负载补 `milestone_id` 以支持刷新后按里程碑分组渲染。
+- **A03 自报 ≠ verified（Release Blocker）**：`self_report_verdict` 改为中性裁决（`direction = NONE`），自报既不能让任务 `verified`，也不抬升掌握度；事件照常落库保留审计。任务详情与流转响应新增 `self_reported: bool`；前端显示"自报反馈已记录，不等于自动评分"。
+- **A04 测试不再锁定错误语义**：重写 `test_learning_loop_api.py` 的 `verified` 断言，新增 `test_plan_quality.py`。
+- **A05 密码策略统一**：删除注册专用 6–12 分支，注册/哈希/校验/rehash 统一为 **12–128 码点**单一策略，消除"合法 6–11 位密码在 rehash 时抛 ValueError"的未来兼容性 bug。
+- **A06 Unicode 契约**：移除 `unicodedata.unidata_version` 的 import 级硬校验（Python ≥3.11 声明重新自洽），改为用代表性用户名的 NFKC+casefold 冻结测试防行为漂移。
+
+### 知识库（用户级共享，跨项目）
+
+现有资料表均为 `tenant + project` 严格作用域 + FORCE RLS 项目谓词 + 组合外键，跨项目读取没有合法路径，因此新增**主体级**表：
+
+- 迁移 `0021_library_sources.py`：`library_sources`（`UNIQUE(tenant, principal, identity_hash)`）与 `library_documents`（库内原文），ENABLE+FORCE RLS 谓词限定 `tenant_id + principal_id`，GRANT 仅 `SELECT, INSERT`；主体上下文复用既有 `set_principal_context`（不可由客户端伪造），未新增任何绕过通道。
+- 「关联到项目」= 服务端在目标项目复用同一 `identity_hash` 的材料（先 `membership.get` 校验），库内有原文则服务端直接入队摄取（**无需重新上传**），URL 类走抓取路径；现有检索/引用/RLS 不变量零改动。
+- 端点：`POST/GET /library/sources`、`POST /library/sources/{id}/content`、`POST /projects/{pid}/library-sources/{id}/attach`（写操作沿用 `idempotent_write`）。
+- 测试覆盖：跨主体不可见（无上下文/缺主体/同租户他人 0 行）、跨角色不可写、关联幂等、无 membership 被拒、迁移往返、关联后可检索到 chunks。
+
+### 前端重构（用户显式要求，破例见下）
+
+- **组件库**：按无构建约束选型 Ant Design 6.6.5，`npm install` 后 vendor UMD 与其运行期依赖（dayjs）到 `frontend/vendor/`（antd.min.js 1.43MB + reset.css + LICENSE），加载顺序由 `test_frontend_assets.py` 锁定为契约。
+- **星空主题**：`ConfigProvider` + `darkAlgorithm` + 自定义 token（深空底色/青色霓虹）；全局星空背景层、玻璃拟态面板、发光分区边界；`prefers-reduced-motion` 下动画静止。
+- **布局分区**：登录界面 / 主工作区（顶栏 + 左栏 + 主区 + 右栏证据）/ 设置抽屉三块边界明确，为后续扩展预留分区空间。
+- **知识库面板**：左侧栏常驻"知识库"模块，支持添加（URL 或粘贴文本）、列出、关联到当前项目（按冻结 API 契约接线）。
+- **学习闭环接线**：诊断（三字段）→ 生成带任务计划 → 任务流转（pending→in_progress→done）→ 自报提交 → 展示服务端 `verified` 与 `self_reported` 语义 → 刷新/重登读回；旧手工计划保持只读可查，生成新计划显式触发。
+- **术语统一**：新增 `frontend/terms.js`（`window.StudyTerms`）集中全部用户可见术语，视图不再散落硬编码文案。
+- **门禁同步**：保留 `check_round8_browser.py` / `check_p9_evidence_browser.py` 的全部真实旅程与 `EvidenceRail` props 契约（实测原样通过，未弱化断言）；`run_round8_gate.py` 增 `terms.js` 与新的 `check_library_browser.py`（知识库真实旅程，390px 无溢出 + pageerror 收集）。
+
+### 集成修复与门禁证据
+
+- 集成期修复：`0021` 的 `down_revision` 由并行期的临时 `0019` 改指 `0020`（串成单头 `0019→0020→0021`）并重生成契约；任务负载补 `milestone_id`；知识库 PG 夹具密码对齐 12–128 策略；摄取面路由不变量测试登记新端点并补充说明。
+- **`ROUND8_GATE_PASSED`（2026-09-25）**：全量 pytest 1008 通过 / 1 跳过（`test_concurrent_reservation_on_last_slot_has_one_winner[memory]`：内存锁天然串行，PG 场景由 PG 子集覆盖）；PG 子集 151 通过 / 0 跳过；ruff、mypy（141 文件）、compileall、6 个前端脚本 `node --check`、三份契约 `--check`、迁移 21 条单头 0021、`git diff --check` 全部通过；浏览器三脚本（`ROUND8_BROWSER_PASSED` / `P9_EVIDENCE_BROWSER_PASSED` / `LIBRARY_BROWSER_PASSED`）与进程恢复检查通过。
+- **环境注意（非产品缺陷）**：注册/登录限流为内存态；同一预览实例被重复运行浏览器门禁时会触发"尝试过于频繁，请稍后再试"。门禁应在**全新预览实例**上单次运行——本次第二次门禁失败即由此造成，重启预览后通过。
+
+### 破例记录（按 `docs/superpowers/specs/2026-09-24-08-rapid-iteration-delivery-policy.md` §8 / MVP 计划 §9）
+
+MVP 计划 §9 把"UI 设计系统重做"列为 Milestone A 结束前默认禁止项。本次为用户 2026-09-25 显式指令破例，理由：①当前界面被用户判定为"简陋"，直接影响首版可用性与演示可信度；②重做不是新增子系统——不改后端业务语义、不引入构建链（vendor UMD）、术语与主题集中在单文件，改动面限于 `frontend/` 与门禁脚本；③与首版目标同向：本次同时接通了诊断→计划→任务→自报闭环与用户级知识库，服务于 Milestone A 用户路径，而非"为以后"铺垫。
+
+### 本轮范围外（已登记 docs/tech-debt.md）
+
+A07（PR 拆分）、A08（CI 未覆盖前端/浏览器/恢复检查）、开发工具与仓库卫生（`.trae/mcp.json` 机器路径、`verify_components.py` 假绿、双份开发策略 skill、文档归档与审查快照标注）、PlatformState 瘦身/legacy ChunkIndex/单 worker audit sink/向量后端/metrics 百万规模/前端 hooks 拆分——均按用户选择不在本轮执行，登记后延。
