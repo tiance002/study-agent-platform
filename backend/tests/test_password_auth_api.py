@@ -53,7 +53,7 @@ def test_nfkc_collision_and_wrong_password_are_uniform(tmp_path):
     assert collision.status_code == 409
     client.post("/auth/logout", headers={"Origin": "http://testserver"})
     wrong = client.post(
-        "/auth/login", json={"username": "Ａ", "password": "wrong-password"}, headers=headers
+        "/auth/login", json={"username": "Ａ", "password": "wrongpass1"}, headers=headers
     )
     assert wrong.status_code == 401
 
@@ -80,35 +80,49 @@ def test_development_flags_default_open_and_explicit_disable_still_works(tmp_pat
     response = client.post(
         "/auth/register", json={"username": "张三2", "password": "abcde"}, headers={"Origin": "http://testserver"}
     )
-    assert response.status_code == 400
-    assert response.json()["message"] == "密码长度需为 12-128 个字符"
+    assert response.status_code == 422
+    assert response.json()["code"] == "PARAMS_INVALID"
 
     disabled_response = TestClient(create_app(platform=disabled_platform)).post(
-        "/auth/register", json={"username": "disabled", "password": "LongEnough1234"}, headers={"Origin": "http://testserver"}
+        "/auth/register", json={"username": "disabled", "password": "ValidPass12"}, headers={"Origin": "http://testserver"}
     )
     assert disabled_response.status_code == 403
     assert disabled_response.json()["code"] == "REGISTRATION_DISABLED"
 
 
-def test_short_registration_password_is_rejected_under_single_policy(tmp_path):
-    """单一策略 12–128：6–11 码点不再被接受（与登录校验同一个下界）。"""
-    platform, client = _client(tmp_path)
+def test_password_policy_is_single_6_to_12_code_points(tmp_path):
+    """单一策略 6–12 码点：5 与 13 拒绝，6 与 12 允许（注册与登录同一规则）。"""
+    _, client = _client(tmp_path)
     headers = {"Origin": "http://testserver"}
-    rejected = client.post(
-        "/auth/register", json={"username": "shortpass", "password": "abc123"}, headers=headers
-    )
-    assert rejected.status_code == 400
-    assert rejected.json()["message"] == "密码长度需为 12-128 个字符"
 
-    accepted = client.post(
-        "/auth/register", json={"username": "okpass", "password": "abc123456789"}, headers=headers
+    too_short = client.post(
+        "/auth/register", json={"username": "shortp", "password": "abc12"}, headers=headers
     )
-    assert accepted.status_code == 201
+    assert too_short.status_code == 422
+    assert too_short.json()["code"] == "PARAMS_INVALID"
+
+    six = client.post(
+        "/auth/register", json={"username": "sixpass", "password": "abc123"}, headers=headers
+    )
+    assert six.status_code == 201
     client.post("/auth/logout", headers=headers)
-    logged_in = client.post(
-        "/auth/login", json={"username": "okpass", "password": "abc123456789"}, headers=headers
+    relogin = client.post(
+        "/auth/login", json={"username": "sixpass", "password": "abc123"}, headers=headers
     )
-    assert logged_in.status_code == 200
+    assert relogin.status_code == 200
+    client.post("/auth/logout", headers=headers)
+
+    twelve = client.post(
+        "/auth/register", json={"username": "twelvepas", "password": "abc123456789"}, headers=headers
+    )
+    assert twelve.status_code == 201
+    client.post("/auth/logout", headers=headers)
+
+    too_long = client.post(
+        "/auth/register", json={"username": "longpass", "password": "abc1234567890"}, headers=headers
+    )
+    assert too_long.status_code == 422
+    assert too_long.json()["code"] == "PARAMS_INVALID"
 
 
 def test_logout_clears_invalid_cookie_without_claiming_server_revocation(tmp_path):

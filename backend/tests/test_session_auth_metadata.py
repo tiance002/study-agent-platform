@@ -1,7 +1,13 @@
+"""会话模型的不变量收口：单一密码登录方式下，会话必须绑定凭据与安全代际。
+
+邀请会话分支已随邀请码移除；`auth_method` 字段也已删除。这里守住剩下的约定：
+`credential_id` 非空、`security_generation` 为正、时间戳带时区且过期晚于签发。
+"""
+
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from app.product.models import AuthMethod, UserSession
+from app.product.models import UserSession
 
 
 def _window(**kwargs):
@@ -12,49 +18,40 @@ def _window(**kwargs):
         "principal_id": "principal_test",
         "issued_at": now,
         "expires_at": now + timedelta(hours=1),
+        "credential_id": "cred_test",
+        "security_generation": 1,
     }
     values.update(kwargs)
     return values
 
 
-def test_invitation_session_cannot_reference_password_credential():
-    with pytest.raises(ValueError):
-        UserSession(
-            **_window(
-                auth_method=AuthMethod.INVITATION,
-                credential_id="cred_test",
-                security_generation=1,
-            )
-        )
-
-
-def test_password_session_requires_matching_credential_and_generation():
-    session = UserSession(
-        **_window(
-            auth_method=AuthMethod.PASSWORD,
-            credential_id="cred_test",
-            security_generation=1,
-        )
-    )
-    assert session.auth_method is AuthMethod.PASSWORD
+def test_password_session_requires_a_credential_and_generation():
+    session = UserSession(**_window())
     assert session.credential_id == "cred_test"
     assert session.security_generation == 1
+    assert session.revoked_at is None
 
 
 @pytest.mark.parametrize(
-    "kwargs",
+    ("field", "value"),
     [
-        {"auth_method": AuthMethod.PASSWORD},
-        {"auth_method": AuthMethod.PASSWORD, "credential_id": "cred_test"},
+        ("credential_id", ""),
+        ("security_generation", 0),
+        ("security_generation", -1),
     ],
 )
-def test_session_auth_metadata_rejects_incomplete_combinations(kwargs):
-    with pytest.raises(ValueError):
-        UserSession(**_window(**kwargs))
+def test_session_rejects_missing_credential_or_invalid_generation(field, value):
+    with pytest.raises(ValueError, match=field):
+        UserSession(**_window(**{field: value}))
 
 
-def test_legacy_constructor_defaults_to_invitation_session():
-    session = UserSession(**_window())
-    assert session.auth_method is AuthMethod.INVITATION
-    assert session.credential_id is None
-    assert session.security_generation == 1
+def test_session_requires_aware_timestamps():
+    now = datetime.now(timezone.utc)
+    with pytest.raises(ValueError, match="时区"):
+        UserSession(**_window(issued_at=now.replace(tzinfo=None)))
+
+
+def test_session_expiry_must_be_after_issue():
+    now = datetime.now(timezone.utc)
+    with pytest.raises(ValueError, match="expires_at"):
+        UserSession(**_window(issued_at=now, expires_at=now))

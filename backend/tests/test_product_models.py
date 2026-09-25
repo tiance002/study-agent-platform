@@ -23,7 +23,6 @@ from app.identity.models import LearningProject
 from app.identity.ports import SystemContext
 from app.product.models import (
     Conversation,
-    Invitation,
     LearningPlan,
     LearningTask,
     Message,
@@ -206,24 +205,7 @@ def test_task_order_must_be_non_negative():
         LearningTask("tk1", "t1", "p1", "ms1", -1, "读文档", TaskStatus.PENDING)
 
 
-# ------------------------------------------------------------------ 邀请与会话
-
-
-@pytest.mark.invariant
-def test_invitation_expiry_must_be_after_issue():
-    with pytest.raises(ValueError, match="expires_at"):
-        Invitation("inv1", "t1", "sha256:x", "user_1", "user_2", NOW, NOW)
-
-
-@pytest.mark.invariant
-def test_invitation_carries_only_a_token_hash():
-    """邀请只存哈希 —— 原始令牌不得出现在契约里。
-
-    这条断言看起来像废话，但它挡住了"顺手加个 token 字段方便调试"这种改动。
-    """
-    fields = {f.name for f in dataclasses.fields(Invitation)}
-    assert "token_hash" in fields
-    assert not (fields & {"token", "raw_token", "secret"}), fields
+# ------------------------------------------------------------------ 会话
 
 
 @pytest.mark.invariant
@@ -233,9 +215,24 @@ def test_session_expiry_must_be_after_issue():
 
 
 @pytest.mark.invariant
+def test_session_requires_a_password_credential_and_generation():
+    """单一登录方式：会话必须关联凭据与安全代际（账号禁用/集中失效依赖它们）。"""
+    with pytest.raises(ValueError, match="credential_id"):
+        UserSession("s1", "t1", "user_1", NOW, NOW.replace(year=2027))
+    with pytest.raises(ValueError, match="security_generation"):
+        UserSession(
+            "s1", "t1", "user_1", NOW, NOW.replace(year=2027),
+            credential_id="cred_1", security_generation=0,
+        )
+
+
+@pytest.mark.invariant
 def test_session_is_revoked_only_by_timestamp():
     """撤销是**时间戳**而不是布尔：需要知道"什么时候撤的"。"""
-    live = UserSession("s1", "t1", "user_1", NOW, NOW.replace(year=2027))
+    live = UserSession(
+        "s1", "t1", "user_1", NOW, NOW.replace(year=2027),
+        credential_id="cred_1", security_generation=1,
+    )
     assert live.revoked_at is None
     assert live.is_live(NOW)
 

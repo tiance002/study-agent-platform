@@ -2,35 +2,37 @@
 
 约定：
 - 每个测试使用独立临时目录与全新平台实例，互不干扰。
-- 身份通过 `auth_headers` **走完整认证路径**生成（签发 → 序列化 → Bearer 头）。
-  不允许为了方便在测试里绕过认证 —— 那会让"客户端自报身份"以另一种形式复活。
-- `cookie_project` 是 **cookie 主路径**的共享起点：签发邀请 → 兑换会话 → 建项目。
-  摄取与检索两处都要用它。每个文件各抄一份登录舞蹈，正是某一天两份会分叉的地方
-  （比如一处忘了断言兑换状态码），而分叉的结果是"有一个文件的身份根本不是真的"。
+- 身份一律通过**真实 HTTP 注册/登录**取得（`POST /auth/register` +
+  `POST /auth/login`），不再有仓储直发会话或自签 Bearer 的旁路 ——
+  绕过认证会让"客户端自报身份"以另一种形式复活。
+- `cookie_project` 是 **cookie 主路径**的共享起点：注册（自动建默认项目）→
+  取默认项目 id。摄取、检索、教学等用例共用它。每个文件各抄一份登录舞蹈，
+  正是某一天两份会分叉的地方（比如一处忘了断言注册状态码），
+  而分叉的结果是"有一个文件的身份根本不是真的"。
+- `auth_headers` 注册一个真实账号并返回其 **Cookie 请求头**（含同源 Origin）；
+  `demo` 与 `auth_headers()` 指向**同一个**注册身份。
 - `pg_database` 是**PostgreSQL 测试的强制前置**：整场会话跑在一个随机临时库上，
   结束即删除。业务库里的在途任务不是测试的耗材（见 `pg_support.py` 的模块 docstring）。
 """
 
 from __future__ import annotations
 
-import hashlib
 import os
 import sys
 import uuid
 from collections.abc import Iterator
-from datetime import timedelta
+from dataclasses import dataclass
 
 import pg_support
 import pytest
-from app.identity.ports import SystemContext
-from app.main import (
-    DEMO_PRINCIPAL,
-    DEMO_PROJECT,
-    DEMO_TENANT,
-    build_platform,
-    create_app,
-)
+from app.identity.cookie_auth import SESSION_COOKIE_NAME
+from app.main import build_platform, create_app
 from fastapi.testclient import TestClient
+
+SAME_ORIGIN = "http://testserver"
+
+#: 注册夹具使用的口令（6–12 码点策略内的合法值）。
+DEFAULT_TEST_PASSWORD = "test-pass-1"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -109,54 +111,115 @@ def client(platform):
     return TestClient(create_app(platform=platform))
 
 
-@pytest.fixture
-def cookie_project(client, platform):
-    """已登录的 cookie 会话 + 一个刚创建的项目，返回 `(client, project_id)`。"""
-    token = "cookie-" + uuid.uuid4().hex
-    now = platform.clock.now()
-    platform.invitations.issue(
-        SystemContext(DEMO_TENANT, "cookie 会话夹具"),
-        invitation_id="inv_" + uuid.uuid4().hex[:8],
-        token_hash="sha256:" + hashlib.sha256(token.encode()).hexdigest(),
-        issued_by=DEMO_PRINCIPAL,
-        invitee_principal_id=DEMO_PRINCIPAL,
-        issued_at=now,
-        expires_at=now + timedelta(days=1),
+@dataclass(frozen=True)
+class RegisteredAccount:
+    """一个通过真实 HTTP 注册得到的账号身份与可用请求头。"""
+
+    username: str
+    password: str
+    principal_id: str
+    tenant_id: str
+    project_id: str
+    cookie: str
+    headers: dict[str, str]
+
+
+def _register_http(session_client: TestClient, *, password: str | None = None) -> RegisteredAccount:
+    """通过 `POST /auth/register` 真实注册一个账号。
+
+    注册会原子地创建租户、主体、凭据、首个会话与默认项目；返回的身份
+    全部来自服务端响应（`principal_id` / `default_project_id`）与回读的
+    `/me`，没有任何一处是测试自己拼出来的。
+    """
+    username = "u" + uuid.uuid4().hex[:10]
+    password = password or DEFAULT_TEST_PASSWORD
+    response = session_client.post(
+        "/auth/register",
+        json={"username": username, "password": password},
+        headers={"Origin": SAME_ORIGIN},
     )
-    exchanged = client.post("/auth/invitations/exchange", json={"token": token})
-    assert exchanged.status_code == 200, "夹具必须走完整认证路径"
-    created = client.post(
-        "/projects",
-        json={"name": "夹具项目"},
-        headers={"Origin": "http://testserver", "Idempotency-Key": "fix-" + uuid.uuid4().hex},
+    assert response.status_code == 201, response.text
+    body = response.json()
+    cookie = session_client.cookies.get(SESSION_COOKIE_NAME)
+    assert cookie, "注册必须种下会话 cookie"
+    headers = {"Cookie": f"{SESSION_COOKIE_NAME}={cookie}", "Origin": SAME_ORIGIN}
+    me = session_client.get("/me", headers=headers)
+    assert me.status_code == 200, me.text
+    identity = me.json()
+    return RegisteredAccount(
+        username=username,
+        password=password,
+        principal_id=identity["principal_id"],
+        tenant_id=identity["tenant_id"],
+        project_id=body["default_project_id"],
+        cookie=cookie,
+        headers=headers,
     )
-    assert created.status_code == 201, created.text
-    return client, created.json()["project_id"]
 
 
 @pytest.fixture
-def auth_headers(platform):
-    """签发会话令牌并组装 Authorization 头。"""
+def register_user(platform):
+    """注册额外用户的工厂：每次调用得到独立客户端、cookie 与身份。
 
-    def _make(
-        tenant_id: str = DEMO_TENANT,
-        principal_id: str = DEMO_PRINCIPAL,
-        name: str = "",
-    ) -> dict[str, str]:
-        token = platform.sessions.issue(
-            principal_id=principal_id,
-            tenant_id=tenant_id,
-            display_name=name,
-            issued_at=platform.clock.now(),
-        )
-        return {"Authorization": f"Bearer {platform.sessions.serialize(token)}"}
+    用于"另一个用户"的隔离用例（越权、确认转让等）。每个账号在**独立**
+    的 TestClient 上注册 —— 同一个客户端的 cookie jar 已有会话时会命中
+    `already_authenticated`，无法再注册第二个账号。
+    """
+
+    def _make(password: str | None = None) -> tuple[TestClient, RegisteredAccount]:
+        session_client = TestClient(create_app(platform=platform))
+        return session_client, _register_http(session_client, password=password)
 
     return _make
 
 
 @pytest.fixture
-def demo():
-    return {"tenant": DEMO_TENANT, "principal": DEMO_PRINCIPAL, "project": DEMO_PROJECT}
+def primary_account(platform):
+    """每个用例的**主身份**：真实注册得到，`demo` 与默认 `auth_headers()` 都用它。"""
+    return _register_http(TestClient(create_app(platform=platform)))
+
+
+@pytest.fixture
+def auth_headers(primary_account, platform):
+    """返回一个可调用的请求头工厂（签名与历史一致）。
+
+    默认参数返回**主身份**的 Cookie 头；传入不同的 (tenant_id, principal_id, name)
+    会注册一个**独立**的真实账号（用于需要"另一个主体"的用例）。
+    请求头同时带同源 `Origin`，以便不安全方法通过严格 CSRF 校验。
+    """
+    cache: dict[tuple, RegisteredAccount] = {(None, None, ""): primary_account}
+
+    def _make(
+        tenant_id: str | None = None,
+        principal_id: str | None = None,
+        name: str = "",
+    ) -> dict[str, str]:
+        key = (tenant_id, principal_id, name)
+        account = cache.get(key)
+        if account is None:
+            account = _register_http(TestClient(create_app(platform=platform)))
+            cache[key] = account
+        return dict(account.headers)
+
+    _make.accounts = cache  # type: ignore[attr-defined]
+    return _make
+
+
+@pytest.fixture
+def cookie_project(client, platform):
+    """已注册登录的 cookie 会话 + 注册自动创建的默认项目，返回 `(client, project_id)`。"""
+    account = _register_http(client)
+    return client, account.project_id
+
+
+@pytest.fixture
+def demo(primary_account):
+    """与 `auth_headers()` 同一个注册身份（租户/主体/默认项目）。"""
+    return {
+        "tenant": primary_account.tenant_id,
+        "principal": primary_account.principal_id,
+        "project": primary_account.project_id,
+    }
 
 
 @pytest.fixture
