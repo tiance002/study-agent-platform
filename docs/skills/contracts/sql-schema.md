@@ -7,13 +7,13 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:15f5bd55f0780d38517b41cab54436a43619b352bd2448f176bbaa6e2f9e9592, generated_at=2026-09-24T07:47:18Z -->
-> 生成时间：2026-09-24T07:47:18Z
+<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:2e55f06bf45031d66a19ce4965c76395f826fc40aaa97340c897d2da4d1a0b8f, generated_at=2026-09-25T05:55:18Z -->
+> 生成时间：2026-09-25T05:55:18Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
 
-当前 head：`0019`
+当前 head：`0020`
 
 ### 表总览
 
@@ -31,7 +31,7 @@
 | `ingestion_jobs` | 0007 → 0008 改写 | 租户+项目 | SELECT, INSERT | SELECT, UPDATE | 14 |
 | `invitations` | 0002 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 9 |
 | `learning_plans` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
-| `learning_tasks` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
+| `learning_tasks` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 16 |
 | `messages` | 0002 | 租户+项目 | SELECT, INSERT | INSERT | 8 |
 | `milestones` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
 | `principals` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 4 |
@@ -188,6 +188,15 @@
 | `learning_tasks` | `order_index` | `integer` |
 | `learning_tasks` | `title` | `text` |
 | `learning_tasks` | `status` | `text` |
+| `learning_tasks` | `objective` | `text` |
+| `learning_tasks` | `instruction` | `text` |
+| `learning_tasks` | `task_type` | `text` |
+| `learning_tasks` | `estimated_minutes` | `integer` |
+| `learning_tasks` | `deliverable` | `text` |
+| `learning_tasks` | `acceptance_criteria` | `jsonb` |
+| `learning_tasks` | `evidence_required` | `jsonb` |
+| `learning_tasks` | `prerequisites` | `jsonb` |
+| `learning_tasks` | `related_skill_id` | `text` |
 | `messages` | `message_id` | `text` |
 | `messages` | `tenant_id` | `text` |
 | `messages` | `project_id` | `text` |
