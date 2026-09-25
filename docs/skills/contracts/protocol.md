@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:2a93131ea4ac72612651ce7d8d353970901812886f4dcf19c02677660cb63c54, generated_at=2026-09-25T05:55:18Z -->
-> 生成时间：2026-09-25T05:55:18Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:93919f22418acf048ee62fb721cf9b304ad9fc83bf46ca569ab534c5af85edf3, generated_at=2026-09-25T06:27:57Z -->
+> 生成时间：2026-09-25T06:27:57Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -21,6 +21,9 @@
 | `/auth/logout/all` | POST | Logout All |
 | `/auth/register` | POST | Register Account |
 | `/healthz` | GET | Healthz |
+| `/library/sources` | GET | List Library Sources |
+| `/library/sources` | POST | Register Library Source |
+| `/library/sources/{library_source_id}/content` | POST | Upload Library Source Content |
 | `/me` | GET | Me |
 | `/projects` | GET | List Projects |
 | `/projects` | POST | Create Project |
@@ -41,6 +44,7 @@
 | `/projects/{project_id}/ingestion-jobs/{job_id}` | GET | Get Ingestion Job |
 | `/projects/{project_id}/interactions` | POST | Interact |
 | `/projects/{project_id}/knowledge/search` | POST | Search Knowledge |
+| `/projects/{project_id}/library-sources/{library_source_id}/attach` | POST | Attach Library Source To Project |
 | `/projects/{project_id}/mastery` | GET | Mastery |
 | `/projects/{project_id}/plan` | GET | Current Plan |
 | `/projects/{project_id}/plan` | PUT | Replace Plan |

@@ -44,6 +44,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.api.auth_routes import router as auth_router
+from app.api.library_routes import router as library_router
 from app.api.product_routes import router as product_router
 from app.api.projects_routes import router as projects_router
 from app.api.routes import error_response, legacy_router, request_validation_response, router
@@ -94,6 +95,7 @@ def create_app(*, platform: PlatformState | None = None) -> FastAPI:
     app.include_router(auth_router)
     app.include_router(projects_router)
     app.include_router(product_router)
+    app.include_router(library_router)
     app.include_router(teaching_router)
 
     @app.middleware("http")

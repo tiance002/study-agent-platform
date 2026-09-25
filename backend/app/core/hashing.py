@@ -48,6 +48,20 @@ def content_hash(value: Any) -> str:
     return f"sha256:{digest}"
 
 
+def acquisition_identity_hash(acquisition: dict) -> str:
+    """从**获取方式**派生材料的稳定标识。
+
+    这是"同一份材料"的**唯一**判定出口：项目级 `sources` 的用户级知识库
+    `library_sources` 都用它去重，而知识库关联到项目靠的正是
+    "项目里已有同 `identity_hash` 的资料"。
+
+    因此它必须只有一份实现 —— 两处各算一遍时，任何一次规范化差异
+    都会让"同一份材料"在两个域里得到不同哈希，于是关联会**静默地**
+    在项目里创建第二份资料，而所有的去重声明看起来都还在。
+    """
+    return content_hash(acquisition)
+
+
 def hash_chain(previous: str | None, payload_hash: str) -> str:
     """把上一条审计记录的哈希与当前载荷哈希串成哈希链。
 

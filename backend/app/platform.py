@@ -54,7 +54,9 @@ from app.identity.rate_limit import InMemoryRateLimiter, RateLimiter
 from app.identity.session import SessionIssuer
 from app.knowledge.acquisition_ports import AcquisitionRepository
 from app.knowledge.discovery import SourceSearchProvider, TavilySearchProvider
+from app.knowledge.library import LibraryRepository
 from app.knowledge.memory_acquisition_store import InMemoryAcquisitionRepository
+from app.knowledge.memory_library_store import InMemoryLibraryRepository
 from app.knowledge.memory_store import InMemoryIngestionRepository
 from app.knowledge.ports import IngestionRepository
 from app.knowledge.retrieval import ChunkIndex
@@ -90,7 +92,7 @@ DEMO_PROJECT = "proj_demo"
 DEFAULT_SESSION_TTL = timedelta(hours=8)
 
 #: 代码预期的数据库迁移版本。启动自检核对它；新增迁移必须同步更新。
-EXPECTED_SCHEMA_VERSION = "0020"
+EXPECTED_SCHEMA_VERSION = "0021"
 
 
 @dataclass
@@ -131,6 +133,10 @@ class PlatformState:
     # 资料摄取：原文、摄取任务与可引用片段。必填同理 —— 上传端点不能等
     # 第一个请求才暴露装配缺失。
     ingestion: IngestionRepository
+    # 用户级共享知识库（主体级）。必填同理：知识库面板不能等第一个请求才暴露装配缺失。
+    # 它是**跨项目**的持久资源，「关联到项目」由 library_routes 复用 products +
+    # ingestion 完成，因此项目级隔离结构完全不变。
+    library: LibraryRepository
     # 项目内检索：作用域收窄 + 确定性排序 + 保守的证据判定。
     # 它没有后端分支（排序是纯函数，隔离由 ingestion 承担），所以
     # 两个分支里构造出来的其实是同一个类 —— 这一点写在装配处，免得
@@ -257,6 +263,7 @@ def build_platform(
     evidence: EvidenceRepository
     learning_loop: LearningLoopRepository
     ingestion: IngestionRepository
+    library: LibraryRepository
     knowledge: KnowledgeRepository
     acquisition: AcquisitionRepository
     teaching: TeachingRunRepository
@@ -277,6 +284,7 @@ def build_platform(
         )
         from app.db.ingestion_store import PostgresIngestionRepository
         from app.db.learning_store import PostgresLearningLoopRepository
+        from app.db.library_store import PostgresLibraryRepository
         from app.db.metrics_store import PostgresMetricsStore
         from app.db.platform_budget_store import PostgresPlatformPaidBudget
         from app.db.product_store import PostgresProductRepository
@@ -320,6 +328,7 @@ def build_platform(
             # 回退同样走 `db.settings` 的唯一出口，而不是写死默认值。
             worker_dsn=loaded.worker_dsn or worker_role_dsn(),
         )
+        library = PostgresLibraryRepository(clock=clock, dsn=dsn)
         knowledge = KnowledgeRepository(ingestion=ingestion)
         teaching = PostgresTeachingRepository(
             membership=membership,
@@ -377,6 +386,7 @@ def build_platform(
             evidence=evidence,
             learning_loop=learning_loop,
             ingestion=ingestion,
+            library=library,
             knowledge=knowledge,
             acquisition=acquisition,
             source_search_provider=source_search_provider,
@@ -436,6 +446,7 @@ def build_platform(
     evidence = InMemoryEvidenceRepository(clock=clock)
     learning_loop = InMemoryLearningLoopRepository(memory_products, evidence)
     ingestion = InMemoryIngestionRepository(membership=membership, products=products, clock=clock)
+    library = InMemoryLibraryRepository(clock=clock)
     knowledge = KnowledgeRepository(ingestion=ingestion)
     acquisition = InMemoryAcquisitionRepository(membership=membership, products=products, clock=clock)
     teaching = InMemoryTeachingRepository(membership=membership, products=memory_products, clock=clock)
@@ -488,6 +499,7 @@ def build_platform(
         evidence=evidence,
         learning_loop=learning_loop,
         ingestion=ingestion,
+        library=library,
         knowledge=knowledge,
         acquisition=acquisition,
         source_search_provider=source_search_provider,
