@@ -81,25 +81,32 @@ def test_development_flags_default_open_and_explicit_disable_still_works(tmp_pat
         "/auth/register", json={"username": "张三2", "password": "abcde"}, headers={"Origin": "http://testserver"}
     )
     assert response.status_code == 400
-    assert response.json()["message"] == "密码长度需为 6-12 个字符"
+    assert response.json()["message"] == "密码长度需为 12-128 个字符"
 
     disabled_response = TestClient(create_app(platform=disabled_platform)).post(
-        "/auth/register", json={"username": "disabled", "password": "abc123"}, headers={"Origin": "http://testserver"}
+        "/auth/register", json={"username": "disabled", "password": "LongEnough1234"}, headers={"Origin": "http://testserver"}
     )
     assert disabled_response.status_code == 403
     assert disabled_response.json()["code"] == "REGISTRATION_DISABLED"
 
 
-def test_six_character_registration_password_can_login(tmp_path):
+def test_short_registration_password_is_rejected_under_single_policy(tmp_path):
+    """单一策略 12–128：6–11 码点不再被接受（与登录校验同一个下界）。"""
     platform, client = _client(tmp_path)
     headers = {"Origin": "http://testserver"}
-    registered = client.post(
-        "/auth/register", json={"username": "sixchar", "password": "abc123"}, headers=headers
+    rejected = client.post(
+        "/auth/register", json={"username": "shortpass", "password": "abc123"}, headers=headers
     )
-    assert registered.status_code == 201
+    assert rejected.status_code == 400
+    assert rejected.json()["message"] == "密码长度需为 12-128 个字符"
+
+    accepted = client.post(
+        "/auth/register", json={"username": "okpass", "password": "abc123456789"}, headers=headers
+    )
+    assert accepted.status_code == 201
     client.post("/auth/logout", headers=headers)
     logged_in = client.post(
-        "/auth/login", json={"username": "sixchar", "password": "abc123"}, headers=headers
+        "/auth/login", json={"username": "okpass", "password": "abc123456789"}, headers=headers
     )
     assert logged_in.status_code == 200
 

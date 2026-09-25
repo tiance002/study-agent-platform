@@ -3,6 +3,15 @@
 The validation rules in this module are deliberately independent of API models:
 callers get the original username for display/storage and a normalized value for
 exact lookup, while passwords are passed unchanged to Argon2id.
+
+**单一密码策略**：注册、登录校验与重哈希全部使用同一组常量
+（12–128 码点）。历史上注册曾有一套更宽松的 6–12 规则，那条分支已删除 ——
+两套策略并存会让"注册能设的密码登录时被拒"或"重哈希对合法密码抛错"。
+
+Unicode 归一化行为由测试向量冻结（`tests/test_password_accounts.py`），
+**不在导入期硬校验 `unicodedata.unidata_version`**：运行时的 Unicode 数据版本
+会随 Python 小版本升级而变，硬失败会让整个服务在一个无害升级后无法启动，
+而不是让行为漂移被测试抓住。
 """
 
 from __future__ import annotations
@@ -14,12 +23,6 @@ from dataclasses import dataclass
 from argon2 import PasswordHasher, Type
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
-UNICODE_DATA_VERSION = "15.0.0"
-if unicodedata.unidata_version != UNICODE_DATA_VERSION:
-    raise RuntimeError(
-        f"unsupported Unicode data version {unicodedata.unidata_version}; "
-        f"expected {UNICODE_DATA_VERSION}"
-    )
 ARGON2_PARAMETERS = {
     "memory_cost": 19_456,
     "time_cost": 2,
@@ -27,8 +30,6 @@ ARGON2_PARAMETERS = {
 }
 MIN_PASSWORD_CODEPOINTS = 12
 MAX_PASSWORD_CODEPOINTS = 128
-REGISTRATION_MIN_PASSWORD_CODEPOINTS = 6
-REGISTRATION_MAX_PASSWORD_CODEPOINTS = 12
 
 _USERNAME_ORIGINAL = re.compile(r"^[A-Za-z0-9_.\-\u3400-\u4DBF\u4E00-\u9FFF\uFF21-\uFF3A\uFF41-\uFF5A]+$")
 _USERNAME_NORMALIZED = re.compile(r"^[A-Za-z0-9_.\-\u3400-\u4DBF\u4E00-\u9FFF]+$")
@@ -82,26 +83,21 @@ def hash_password(password: str) -> str:
     return _PASSWORD_HASHER.hash(password)
 
 
-def hash_registration_password(password: str) -> str:
-    """Hash a newly registered credential under the product's 6-12 rule."""
-    if not isinstance(password, str) or not (
-        REGISTRATION_MIN_PASSWORD_CODEPOINTS
-        <= len(password)
-        <= REGISTRATION_MAX_PASSWORD_CODEPOINTS
-    ):
-        raise ValueError("registration password must contain 6 to 12 code points")
-    return _PASSWORD_HASHER.hash(password)
-
-
 def _verify_hash(encoded_hash: str, password: str) -> bool:
     return _PASSWORD_HASHER.verify(encoded_hash, password)
 
 
 def verify_password_diagnostic(password: object, encoded_hash: object) -> tuple[bool, str]:
-    """Internal-safe result: reason names contain no password or hash material."""
+    """Internal-safe result: reason names contain no password or hash material.
+
+    下界用**统一策略常量**（12 码点）：登录校验与注册/重哈希共用同一条规则，
+    所以"验证通过"必然意味着"可以安全地对它重哈希"。
+    """
 
     try:
-        if not isinstance(password, str) or not REGISTRATION_MIN_PASSWORD_CODEPOINTS <= len(password) <= MAX_PASSWORD_CODEPOINTS:
+        if not isinstance(password, str) or not (
+            MIN_PASSWORD_CODEPOINTS <= len(password) <= MAX_PASSWORD_CODEPOINTS
+        ):
             _verify_hash(DUMMY_PASSWORD_HASH, password if isinstance(password, str) else "")
             return False, "invalid_password"
         target = encoded_hash if isinstance(encoded_hash, str) and encoded_hash.startswith("$argon2id$") else DUMMY_PASSWORD_HASH
