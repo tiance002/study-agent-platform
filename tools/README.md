@@ -35,7 +35,6 @@
 
 | 脚本 | 用途 |
 |---|---|
-| `issue_invitation.py` | 为演示租户签发邀请 token |
 | `issue_session.py` | 生成本地调试用会话令牌 |
 | `push_via_api.py` | 代理环境下经 Git Data API 推送的替代流程 |
 | `pytest_gate_support.py` | 门禁共用的 JUnit XML 解析库（非直接入口） |
@@ -48,8 +47,10 @@
 | 脚本 | 替代者 | 历史引用 |
 |---|---|---|
 | `run_round6_gate.py` | `run_round8_gate.py` | `docs/superpowers/plans/2026-09-20-round-6-reliability-and-provider.md`、`progress.md` |
-| `run_round7_preview.py` | `run_round8_preview.py` | `docs/superpowers/plans/2026-09-20-round-8-workbench-correctness.md` |
-| `check_round7_browser.py` | `check_round8_browser.py` | `docs/superpowers/plans/2026-09-20-round-7-review.md`、`2026-09-20-round-8-workbench-correctness.md` |
+
+> `run_round7_preview.py`、`check_round7_browser.py`、`issue_invitation.py` 已随
+> 2026-09-25 邀请码全链路移除一并删除（它们只依赖已删除的邀请兑换入口，
+> 无法再运行）；历史引用见 `docs/superpowers/plans/` 同名计划的归档记录。
 
 ## 可重建产物与忽略规则
 

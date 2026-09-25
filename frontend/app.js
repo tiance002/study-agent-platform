@@ -73,9 +73,7 @@
 
   function App() {
     const [user, setUser] = useState(null);
-    const [authToken, setAuthToken] = useState("");
-    // Open-registration deployments should lead with the account workflow;
-    // invitation exchange remains available as a compatibility tab.
+    // 唯一认证方式是账号密码；认证界面在「登录」「注册」间切换。
     const [authMode, setAuthMode] = useState("login");
     const [authCredentials, setAuthCredentials] = useState({ username: "", password: "" });
     const [authBusy, setAuthBusy] = useState(true);
@@ -174,6 +172,7 @@
       refreshProjectData,
       refreshMessages,
       clearProjectData,
+      clearLibraryData,
     } = useProjectState({
       principalId,
       conversationId,
@@ -182,10 +181,15 @@
       isProjectCurrent,
       isViewCurrent,
       scopeRef,
-      onProjectDataLoaded: (projectData, planData) => setPlanForm({
-        goal: planData?.plan?.goal || projectData.goal || "",
-        milestone: planData?.milestones?.[0]?.title || "",
-      }),
+      onProjectDataLoaded: (projectData, planData) => {
+        setPlanForm({
+          goal: planData?.plan?.goal || projectData.goal || "",
+          milestone: planData?.milestones?.[0]?.title || "",
+        });
+        // 刷新/重开读回时重建提交记录：否则界面上只剩服务端事实，
+        // 用户看不到自己提交过什么（"重开读回"必须包含它）。
+        loadTaskSubmissions(projectData.project_id, planData?.tasks).catch(() => setSubmissionsByTask({}));
+      },
     });
 
     const renderEpoch = scopeRef.current.epoch;
@@ -251,16 +255,21 @@
     }, [principalId, projectId, conversationId]);
 
     useEffect(() => {
-      if (!principalId) {
-        setLibraryForm({ name: "", url: "", content: "" });
-        return;
-      }
+      // 知识库是用户级列表：换账号时必须先清空旧账号的库列表与相关
+      // loading/error/busy/form 状态，再拉取新账号的库。否则旧账号的
+      // 资料（以及粘在表单里的草稿）会在新账号下继续可见。
+      clearLibraryData();
+      setLibraryLoading(false);
       setLibraryError("");
+      setLibraryBusy(false);
+      setLibraryBusyId("");
+      setLibraryForm({ name: "", url: "", content: "" });
+      if (!principalId) return;
       setLibraryLoading(true);
       refreshLibrary()
         .catch((caught) => setLibraryError(errorText(caught)))
         .finally(() => setLibraryLoading(false));
-    }, [principalId, refreshLibrary]);
+    }, [principalId, refreshLibrary, clearLibraryData]);
 
     useEffect(() => {
       const expired = () => {
@@ -331,24 +340,6 @@
       return () => controller.abort();
     }, [projectId, conversationId, principalId, user]);
 
-    async function exchangeInvite(event) {
-      event.preventDefault();
-      if (!authToken.trim()) return;
-      setAuthBusy(true);
-      setError("");
-      try {
-        await api("POST", "/auth/invitations/exchange", { token: authToken.trim() }, { idempotent: false });
-        const me = await api("GET", "/me");
-        setUser(me);
-        setAuthToken("");
-        await refreshProjects(me.principal_id);
-      } catch (caught) {
-        setError(errorText(caught));
-      } finally {
-        setAuthBusy(false);
-      }
-    }
-
     async function passwordAuth(event) {
       event.preventDefault();
       if (!authCredentials.username.trim() || !authCredentials.password) return;
@@ -393,8 +384,14 @@
         setPlanGenerated(false);
         setTaskStates({});
         setSubmissionsByTask({});
+        // 登出同样要清空用户级知识库及其 UI 状态，避免下一个账号
+        // 复用同一工作台时看到上一个账号的库。
+        clearLibraryData();
         setLibraryForm({ name: "", url: "", content: "" });
         setLibraryError("");
+        setLibraryLoading(false);
+        setLibraryBusy(false);
+        setLibraryBusyId("");
         resetCommands();
         setNewProject({ name: "", goal: "" });
       }
@@ -657,6 +654,31 @@
       } finally {
         setTaskBusyId("");
       }
+    }
+
+    // 刷新/切项目后重建每个任务的提交记录。`submissionsByTask` 原本只在提交
+    // 成功那一刻写入，刷新后界面上就看不到任何提交（服务端事实仍在）——
+    // "重开读回"必须包含这块状态，所以按任务逐个读回并整体替换。
+    async function loadTaskSubmissions(selectedProjectId, tasks) {
+      if (!selectedProjectId || !tasks || !tasks.length) {
+        setSubmissionsByTask({});
+        return;
+      }
+      const scope = { principalId, projectId: selectedProjectId, epoch: scopeRef.current.epoch };
+      const results = await Promise.all(
+        tasks.map((task) =>
+          api("GET", `/projects/${selectedProjectId}/tasks/${task.task_id}/submissions`).then(
+            (data) => [task.task_id, (data && data.submissions) || []],
+            () => [task.task_id, []]
+          )
+        )
+      );
+      if (!isProjectCurrent(scope)) return;
+      const next = {};
+      for (const [taskId, rows] of results) {
+        if (rows.length) next[taskId] = rows.map((row) => ({ ...row, task_id: taskId }));
+      }
+      setSubmissionsByTask(next);
     }
 
     async function pollIngestionJob(selectedProjectId, jobId) {
@@ -950,11 +972,8 @@
     if (!user) return withTheme(h(AuthScreen, {
       mode: authMode,
       setMode: setAuthMode,
-      token: authToken,
-      setToken: setAuthToken,
       credentials: authCredentials,
       setCredentials: setAuthCredentials,
-      onInvite: exchangeInvite,
       onPassword: passwordAuth,
       busy: authBusy,
       error,

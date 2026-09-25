@@ -38,6 +38,7 @@ from app.knowledge.models import (
     assert_chunks_match_document,
 )
 from app.policy.taint import TaintSource
+from app.product.models import SourceRecord
 from app.product.ports import ProductRepository
 
 
@@ -90,7 +91,6 @@ class InMemoryIngestionRepository:
         # 资料必须存在且属于该项目 —— 内存版没有组合外键兜底，
         # 这一句就是"不能给别的项目的资料挂原文"的唯一防线。
         self.products.get_source(actor, project_id, source_id)
-        now = self._clock.now()
         document = SourceDocument(
             document_id=document_id,
             tenant_id=actor.tenant_id,
@@ -101,7 +101,7 @@ class InMemoryIngestionRepository:
             content=content,
             media_type=media_type,
             language=language,
-            observed_at=now,
+            observed_at=self._clock.now(),
             parser_version=parser_version,
             acquisition_method=acquisition_method,
             taint_sources=taint_sources or (TaintSource.UPLOADED_SOURCE,),
@@ -110,64 +110,156 @@ class InMemoryIngestionRepository:
             raw_content_hash=raw_content_hash,
         )
         with self._lock:
-            existing = self._documents.get(document_id)
-            if existing is not None:
-                existing_job = self._jobs.get(job_id)
-                if (
-                    existing_job is None
-                    or existing.tenant_id != actor.tenant_id
-                    or existing.project_id != project_id
-                    or existing.source_id != source_id
-                    or existing.content_hash != document.content_hash
-                    or existing.document_title != title
-                    or existing.media_type != media_type
-                    or existing.language != language
-                    or existing.acquisition_method != acquisition_method
-                    or existing.parser_version != parser_version
-                    or existing.fetch_attempt_id != fetch_attempt_id
-                    or existing.source_content_type != source_content_type
-                    or existing.raw_content_hash != raw_content_hash
-                ):
-                    raise deny(ErrorCode.VERSION_CONFLICT, "同一下载任务的原文标识已被占用")
-                return existing, existing_job
-            if acquisition_method == ACQUISITION_METHOD_WEB:
-                for prior_job in self._jobs.values():
-                    prior_document = self._documents[prior_job.document_id]
-                    if (
-                        prior_job.status is not IngestionStatus.FAILED
-                        and prior_document.tenant_id == actor.tenant_id
-                        and prior_document.project_id == project_id
-                        and prior_document.source_id == source_id
-                        and prior_document.acquisition_method == ACQUISITION_METHOD_WEB
-                        and prior_document.content_hash == document.content_hash
-                        and prior_document.parser_version == parser_version
-                        and prior_document.content == content
-                    ):
-                        return prior_document, prior_job
-            version = (
-                max(
-                    (row.version for row in self._documents.values() if row.source_id == source_id),
-                    default=0,
-                )
-                + 1
+            return self._enqueue_locked(actor, project_id, source_id, document=document, job_id=job_id)
+
+    def enqueue_with_source(
+        self,
+        actor: Principal,
+        project_id: str,
+        *,
+        source_id: str,
+        display_name: str,
+        media_type: str,
+        identity_hash: str,
+        acquisition: dict,
+        document_id: str,
+        job_id: str,
+        title: str,
+        content: str,
+        document_media_type: str,
+        language: str,
+        acquisition_method: str = ACQUISITION_METHOD_UPLOAD,
+        parser_version: str = DOCUMENT_PARSER_VERSION,
+    ) -> tuple[SourceRecord, IngestionJob, bool]:
+        """登记/复用项目资料并入队摄取（见端口契约）。
+
+        与 PostgreSQL 版同一语义：资料写入与原文/任务写入落在**同一临界区**
+        （先产品锁、后摄取锁，与 `memory_acquisition_store` 同一锁序），
+        因此不会留下"有资料无任务"。资料写入失败或未执行时，原文与任务
+        不会先行落库。
+        """
+        self.membership.get(actor, project_id)
+        # 产品仓储的锁可能是 RLock（可重入）：先持它再调 `register_source`，
+        # 使"资料可见"与"原文/任务可见"对读者是原子的（同 acquisition 内存版）。
+        product_lock = getattr(self.products, "_lock", self._lock)
+        with product_lock, self._lock:
+            source = self.products.register_source(
+                actor,
+                project_id,
+                source_id=source_id,
+                display_name=display_name,
+                media_type=media_type,
+                identity_hash=identity_hash,
+                acquisition=acquisition,
             )
-            document = replace(document, version=version)
-            job = IngestionJob(
-                job_id=job_id,
+            created = source.source_id == source_id
+            existing = self._live_job_for_source(actor, project_id, source.source_id)
+            if existing is not None:
+                return source, existing, created
+            document = SourceDocument(
+                document_id=document_id,
                 tenant_id=actor.tenant_id,
                 project_id=project_id,
-                source_id=source_id,
-                document_id=document_id,
-                status=IngestionStatus.QUEUED,
-                attempt_count=0,
-                created_at=now,
-                updated_at=now,
+                source_id=source.source_id,
+                version=1,  # 占位：真实版本在锁内分配
+                document_title=title,
+                content=content,
+                media_type=document_media_type,
+                language=language,
+                observed_at=self._clock.now(),
+                parser_version=parser_version,
+                acquisition_method=acquisition_method,
+                taint_sources=(TaintSource.UPLOADED_SOURCE,),
             )
-            # 两行一起进内存：中途不会失败，但顺序刻意与 PostgreSQL 一致
-            # （原文先、任务后，任务的外键指向原文）。
-            self._documents[document_id] = document
-            self._jobs[job_id] = job
+            _, job = self._enqueue_locked(
+                actor, project_id, source.source_id, document=document, job_id=job_id
+            )
+            return source, job, created
+
+    def _enqueue_locked(
+        self,
+        actor: Principal,
+        project_id: str,
+        source_id: str,
+        *,
+        document: SourceDocument,
+        job_id: str,
+    ) -> tuple[SourceDocument, IngestionJob]:
+        """写入原文与任务。**调用方必须持有 ``self._lock``。**"""
+        existing = self._documents.get(document.document_id)
+        if existing is not None:
+            existing_job = self._jobs.get(job_id)
+            if (
+                existing_job is None
+                or existing.tenant_id != actor.tenant_id
+                or existing.project_id != project_id
+                or existing.source_id != source_id
+                or existing.content_hash != document.content_hash
+                or existing.document_title != document.document_title
+                or existing.media_type != document.media_type
+                or existing.language != document.language
+                or existing.acquisition_method != document.acquisition_method
+                or existing.parser_version != document.parser_version
+                or existing.fetch_attempt_id != document.fetch_attempt_id
+                or existing.source_content_type != document.source_content_type
+                or existing.raw_content_hash != document.raw_content_hash
+            ):
+                raise deny(ErrorCode.VERSION_CONFLICT, "同一下载任务的原文标识已被占用")
+            return existing, existing_job
+        if document.acquisition_method == ACQUISITION_METHOD_WEB:
+            for prior_job in self._jobs.values():
+                prior_document = self._documents[prior_job.document_id]
+                if (
+                    prior_job.status is not IngestionStatus.FAILED
+                    and prior_document.tenant_id == actor.tenant_id
+                    and prior_document.project_id == project_id
+                    and prior_document.source_id == source_id
+                    and prior_document.acquisition_method == ACQUISITION_METHOD_WEB
+                    and prior_document.content_hash == document.content_hash
+                    and prior_document.parser_version == document.parser_version
+                    and prior_document.content == document.content
+                ):
+                    return prior_document, prior_job
+        version = (
+            max(
+                (row.version for row in self._documents.values() if row.source_id == source_id),
+                default=0,
+            )
+            + 1
+        )
+        document = replace(document, version=version)
+        job = IngestionJob(
+            job_id=job_id,
+            tenant_id=actor.tenant_id,
+            project_id=project_id,
+            source_id=source_id,
+            document_id=document.document_id,
+            status=IngestionStatus.QUEUED,
+            attempt_count=0,
+            created_at=document.observed_at,
+            updated_at=document.observed_at,
+        )
+        # 两行一起进内存：中途不会失败，但顺序刻意与 PostgreSQL 一致
+        # （原文先、任务后，任务的外键指向原文）。
+        self._documents[document.document_id] = document
+        self._jobs[job.job_id] = job
         return document, job
+
+    def _live_job_for_source(
+        self, actor: Principal, project_id: str, source_id: str
+    ) -> IngestionJob | None:
+        """该项目里这条资料**已有的、未失败**的摄取任务（最近优先）。"""
+        rows = [
+            job
+            for job in self._jobs.values()
+            if job.tenant_id == actor.tenant_id
+            and job.project_id == project_id
+            and job.source_id == source_id
+            and job.status is not IngestionStatus.FAILED
+        ]
+        if not rows:
+            return None
+        return max(rows, key=lambda job: (job.created_at, job.job_id))
 
     # ------------------------------------------------------------------ 读取
 

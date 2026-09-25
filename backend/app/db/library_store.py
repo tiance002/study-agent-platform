@@ -200,6 +200,17 @@ class PostgresLibraryRepository:
             ).fetchone()
         return row[0] if row is not None else None
 
+    def latest_document_version(self, actor: Principal, library_source_id: str) -> int | None:
+        with principal_transaction(
+            tenant_id=actor.tenant_id, principal_id=actor.principal_id, dsn=self._dsn
+        ) as conn:
+            row = conn.execute(
+                "SELECT version FROM library_documents"
+                " WHERE library_source_id = %s ORDER BY version DESC LIMIT 1",
+                (library_source_id,),
+            ).fetchone()
+        return int(row[0]) if row is not None else None
+
     # ------------------------------------------------------------------ 内部
 
     def _insert_document(

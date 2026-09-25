@@ -7,53 +7,52 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:5e70fad49b862be4347bb3eb2aa0a80004c37b2ad01fd647f7e538fd6e438bd4, generated_at=2026-09-25T06:27:57Z -->
-> 生成时间：2026-09-25T06:27:57Z
+<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:2de1e39e509178a469716d8760d2de28d32914761b9aa1e65935dbdde17d7f94, generated_at=2026-09-25T10:53:34Z -->
+> 生成时间：2026-09-25T10:53:34Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
 
-当前 head：`0021`
+当前 head：`0001`
 
 ### 表总览
 
 | 表 | 来源迁移 | 隔离级别 | 应用角色权限 | worker 角色权限 | 列数 |
 |---|---|---|---|---|---:|
-| `acquisition_jobs` | 0014 → 0014 改写 | 租户+项目 | SELECT, INSERT | SELECT, UPDATE | 20 |
+| `acquisition_jobs` | 0001 → 0001 改写 | 租户+项目 | SELECT, INSERT | SELECT, UPDATE | 20 |
 | `action_intents` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 11 |
-| `auth_attempt_counters` | 0004 | 系统级（无租户，认证前设施） | 无表权限（仅 SECURITY DEFINER 函数 EXECUTE） | — | 4 |
-| `auth_audit_outbox` | 0006 → 0006 改写 | 系统级（认证前审计事实中转；应用 INSERT/SELECT/UPDATE，无 DELETE） | SELECT, INSERT, UPDATE | — | 9 |
+| `auth_attempt_counters` | 0001 | 系统级（无租户，认证前设施） | 无表权限（仅 SECURITY DEFINER 函数 EXECUTE） | — | 4 |
+| `auth_audit_outbox` | 0001 → 0001 改写 | 系统级（认证前审计事实中转；应用 INSERT/SELECT/UPDATE，无 DELETE） | SELECT, INSERT, UPDATE | — | 9 |
 | `confirmations` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 12 |
-| `conversations` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 6 |
-| `diagnoses` | 0005 | 租户+项目+主体 | SELECT, INSERT | — | 7 |
+| `conversations` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 6 |
+| `diagnoses` | 0001 | 租户+项目+主体 | SELECT, INSERT | — | 7 |
 | `evidence_events` | 0001 | 租户+项目 | SELECT, INSERT | — | 12 |
-| `http_idempotency` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE | — | 13 |
-| `ingestion_jobs` | 0007 → 0008 改写 | 租户+项目 | SELECT, INSERT | SELECT, UPDATE | 14 |
-| `invitations` | 0002 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 9 |
-| `learning_plans` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
-| `learning_tasks` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 16 |
-| `library_documents` | 0021 | 租户+主体 | SELECT, INSERT | — | 9 |
-| `library_sources` | 0021 | 租户+主体 | SELECT, INSERT | — | 8 |
-| `messages` | 0002 | 租户+项目 | SELECT, INSERT | INSERT | 8 |
-| `milestones` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
+| `http_idempotency` | 0001 | 租户+主体 | SELECT, INSERT, UPDATE | — | 13 |
+| `ingestion_jobs` | 0001 → 0001 改写 | 租户+项目 | SELECT, INSERT | SELECT, UPDATE | 14 |
+| `learning_plans` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
+| `learning_tasks` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 16 |
+| `library_documents` | 0001 | 租户+主体 | SELECT, INSERT | — | 9 |
+| `library_sources` | 0001 | 租户+主体 | SELECT, INSERT | — | 8 |
+| `messages` | 0001 | 租户+项目 | SELECT, INSERT | INSERT | 8 |
+| `milestones` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
 | `principals` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 4 |
 | `project_grants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 4 |
-| `projects` | 0001 → 0002 改写 | 成员感知 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
-| `provider_attempts` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 13 |
-| `source_candidates` | 0014 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 10 |
-| `source_chunks` | 0007 | 租户+项目 | SELECT, INSERT | SELECT, INSERT | 15 |
-| `source_documents` | 0007 | 租户+项目 | SELECT, INSERT | SELECT | 18 |
-| `source_fetch_artifacts` | 0016 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 8 |
-| `sources` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 8 |
-| `task_assessments` | 0005 | 租户+项目 | SELECT, INSERT | — | 8 |
-| `task_submissions` | 0005 | 租户+项目+主体 | SELECT, INSERT | — | 8 |
-| `teaching_budgets` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 11 |
-| `teaching_events` | 0010 | 租户+项目 | SELECT, INSERT | SELECT, INSERT | 7 |
-| `teaching_reservations` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 12 |
-| `teaching_runs` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 24 |
-| `teaching_tenant_budgets` | 0010 | 租户 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 8 |
+| `projects` | 0001 → 0001 改写 | 成员感知 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
+| `provider_attempts` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 13 |
+| `source_candidates` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 10 |
+| `source_chunks` | 0001 | 租户+项目 | SELECT, INSERT | SELECT, INSERT | 15 |
+| `source_documents` | 0001 | 租户+项目 | SELECT, INSERT | SELECT | 18 |
+| `source_fetch_artifacts` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 8 |
+| `sources` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 8 |
+| `task_assessments` | 0001 | 租户+项目 | SELECT, INSERT | — | 8 |
+| `task_submissions` | 0001 | 租户+项目+主体 | SELECT, INSERT | — | 8 |
+| `teaching_budgets` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 11 |
+| `teaching_events` | 0001 | 租户+项目 | SELECT, INSERT | SELECT, INSERT | 7 |
+| `teaching_reservations` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 12 |
+| `teaching_runs` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 24 |
+| `teaching_tenant_budgets` | 0001 | 租户 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 8 |
 | `tenants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 3 |
-| `user_sessions` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE, DELETE | — | 6 |
+| `user_sessions` | 0001 | 租户+主体 | SELECT, INSERT, UPDATE, DELETE | — | 6 |
 
 ### 列明细
 
@@ -167,15 +166,6 @@
 | `ingestion_jobs` | `created_at` | `timestamptz` |
 | `ingestion_jobs` | `updated_at` | `timestamptz` |
 | `ingestion_jobs` | `claim_token` | `uuid` |
-| `invitations` | `invitation_id` | `text` |
-| `invitations` | `tenant_id` | `text` |
-| `invitations` | `token_hash` | `text` |
-| `invitations` | `issued_by` | `text` |
-| `invitations` | `issued_at` | `timestamptz` |
-| `invitations` | `expires_at` | `timestamptz` |
-| `invitations` | `consumed_at` | `timestamptz` |
-| `invitations` | `consumed_by` | `text` |
-| `invitations` | `invitee_principal_id` | `text` |
 | `learning_plans` | `plan_id` | `text` |
 | `learning_plans` | `tenant_id` | `text` |
 | `learning_plans` | `project_id` | `text` |

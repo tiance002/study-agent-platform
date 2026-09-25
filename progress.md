@@ -1,5 +1,12 @@
 # 进度日志
 
+> **历史口径说明（2026-09-25）**：本文件 2026-09-25 之前的条目中出现的
+> 「邀请码 / 邀请访问码 / 邀请兑换」「密码 12–128」以及 `user_sessions.auth_method`
+> 等描述，均为当时事实；这些机制已在 2026-09-25 新版改造中删除或改写
+> （见 `docs/superpowers/plans/2026-09-25-v2-clean-baseline-and-auth-rebuild.md`）：
+> 邀请码全链路移除、密码统一 6–12 码点、会话不再有 `auth_method`。
+> 以下历史条目按原样保留作为变更证据，不再代表当前行为。
+
 ## 2026-09-21 · 最终实现核验
 
 - 按冻结方案完成开放注册、中文用户名规范化、Argon2id 登录、会话来源/代际约束、双开关、无邮箱账号处置说明、平台级预算预留与 worker 派发接入。
@@ -898,3 +905,30 @@ MVP 计划 §9 把"UI 设计系统重做"列为 Milestone A 结束前默认禁�
 ### 本轮范围外（已登记 docs/tech-debt.md）
 
 A07（PR 拆分）、A08（CI 未覆盖前端/浏览器/恢复检查）、开发工具与仓库卫生（`.trae/mcp.json` 机器路径、`verify_components.py` 假绿、双份开发策略 skill、文档归档与审查快照标注）、PlatformState 瘦身/legacy ChunkIndex/单 worker audit sink/向量后端/metrics 百万规模/前端 hooks 拆分——均按用户选择不在本轮执行，登记后延。
+
+## 2026-09-25 · 新版改造：无邀请码认证 + 干净数据库基线 + 6–12 密码（分支 codex/v2-clean-baseline-20260925）
+
+按用户「新版整体修改方案」执行；三条隔离 worktree 并行（后端认证 / 前端与门禁 / 数据库基线），集成后按 B → A1 → A2 合入，随后两批正确性修复。全部证据来自**全新本地预览实例单次运行**。
+
+### 阶段 1–4（原子单元）：邀请码移除 + 认证收口 + 密码重建 + 新基线 + 测试迁移
+
+- **邀请码全链路删除**：API（兑换端点、`ExchangeBody`、令牌哈希、专用限流）、`INVITATION_INVALID` 错误码与映射、`AuthMethod.INVITATION` / `Invitation`、`InvitationRepository`（端口 + 内存 + PG 实现）、装配与路由守卫、`tools/issue_invitation.py`、`run_round7_preview.py` / `check_round7_browser.py`、前端邀请模式与 `exchangeInvite`、契约与测试。
+- **认证收口**：公开入口只剩注册与登录；`UserSession` 删除"会话来源"列（`auth_method`），保留 `credential_id` / `security_generation` / 签名与撤销 / CSRF / RLS / `register_auth_attempt()` 与 `auth_attempt_counters`；`EXCHANGE_*` 配置收敛为 `AUTH_ATTEMPT_*`（注册与登录共用，限流语义不变）。
+- **密码重建**：单一策略 **6–12 码点**（`MIN/MAX_PASSWORD_LENGTH` + 统一入口 `validate_password()` 被 `hash_password`/`verify_password` 共用）；不 strip/截断/大小写/NFKC 规范化，非法 UTF-8 被拒；边界 5 拒绝 / 6 允许 / 12 允许 / 13 拒绝，前后端一致。
+- **数据库干净基线**：21 条迁移→**`0001_initial_schema.py` 单条基线**（`EXPECTED_SCHEMA_VERSION="0001"`，单头）。新基线不含 `invitations` 表/索引/策略/授权、`invitee_principal_id` 与组合外键、`exchange_invitation()`、会话来源列及其 CHECK；保留全部 FORCE RLS 与谓词约定、`projects` 成员感知策略、worker 三条策略、definer 函数 `search_path = pg_catalog`、schema/表 GRANT、`study_metrics_snapshot()`（0019 版）、`learning_jsonb_string_array` 与预算配置种子行。**未对任何真实数据库执行破坏性操作**（仅随机 `study_test_*` 临时库；空库一次 upgrade + 对象级 dump 对比）。
+- **测试体系迁移**：`conftest` 的 `cookie_project` / `auth_headers` / `demo` 改为**真实注册登录**取得身份（不再仓储直发会话）；邀请专属用例删除，共享认证语义迁入 `test_session_cookie_auth.py` 并改指密码流程；新增 `test_initial_schema_postgres.py`（空库一次初始化、关键对象与策略齐备、基线源码不含邀请与会话来源残留）；删除依赖旧 revision 的往返用例。
+
+### 阶段 5：核心正确性修复
+
+- **P0 换账号隔离**：前端新增用户级 `clearLibraryData`，换账号与登出时清空知识库列表及 loading/error/busy/form；`check_round8_browser.py` 增加"切号后知识库为空"断言（反向验证：仅回退修复时该断言确定性失败）。
+- **P1 知识库内容身份**：携带原文的登记改用 `H(acquisition, content_hash)` 身份（库侧实现，不动共享哈希算法），同名不同内容成为两份材料且都能列出/关联，同内容重复仍幂等。
+- **P1 自报证据**：投影时跳过 `Direction.NONE`，自报不再计入证据计数与独立组、不抬高 mastery confidence；`verified` 仍只认 VALID + POSITIVE。
+- **P1 关联原子性**：新增 `IngestionRepository.enqueue_with_source`，在**同一事务**内登记资料并入队（Postgres 走 in-conn 变体，内存版同临界区）；URL 路径改由 `select_with_source` 自持事务，失败整段回滚，不再留下"有 source 无任务"的半成品。
+- **P2 库内版本语义**：固化"关联即冻结到项目副本、库侧后续更新不回溯"，attach 响应**加法**新增 `library_document_version`。
+- **P1（验收中发现并修复）刷新读回**：前端此前只重拉 `/plan` 与 `/diagnosis`，提交列表是组件内状态 → 改为按任务读回 `GET .../submissions` 重建；`check_learning_loop_browser.py` 的读回断言相应升级为**界面断言**（HTTP 读回保留为交叉验证）。
+
+### 阶段 6：验收证据
+
+- **`ROUND8_GATE_PASSED`（2026-09-25）**：全量 pytest **986 通过 / 1 跳过**；PG 子集 **135 通过 / 0 跳过**；迁移 **1 条、单头 `0001`**；ruff / mypy / compileall / 前端脚本 `node --check` / 三份契约 `--check` / `git diff --check` 全过；**四个**浏览器旅程通过 —— `ROUND8_BROWSER_PASSED`、`P9_EVIDENCE_BROWSER_PASSED`、`LIBRARY_BROWSER_PASSED`、`LEARNING_LOOP_BROWSER_PASSED`（最后一个是本轮新增：注册 → 登录 → 建项目 → 诊断 → 生成计划（断言任务标题不复述目标）→ 任务流转 → 自报（断言表述为"已记录，不等于自动评分"且不显示已验证）→ 刷新读回计划/状态/提交记录 → 390px 无溢出）；进程恢复检查通过。
+- **残留扫描**：`invitation|invite|exchange_invitation` 在 `backend/ tools/ frontend/ alembic/` 的 13 处命中**全部是断言"不存在"的反例测试**与历史说明，运行时零引用。
+- 产物：截图与 JUnit 在 `var/`（gitignore）。PR：`#4`（堆叠在 PR #3 之上；PR #3 的 head 未改动）。

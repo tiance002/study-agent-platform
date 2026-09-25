@@ -25,7 +25,6 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--artifacts", default="var/round8-browser-gate")
-    parser.add_argument("--invite", default="round8-preview-invite")
     args = parser.parse_args()
 
     if not pg_support.reachable():
@@ -72,11 +71,16 @@ def main() -> int:
         ["node", "--check", "frontend/project-state.js"],
         ["node", "--check", "frontend/app.js"],
         [python, "tools/skills/gen_contracts.py", "--all", "--check"],
-        [python, "tools/check_round8_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts, "--invite", args.invite],
+        # 秘密扫描与 CI 同源：本地门禁必须能提前发现"占位值缺标记"这类问题
+        # （此前两次由 CI 才暴露，故纳入本地门禁）。
+        [python, "tools/security/scan_secrets.py"],
+        [python, "tools/check_round8_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts],
         # P9 证据栏浏览器回归：验证检索/路由标签与窄屏布局（复用同一预览）。
         [python, "tools/check_p9_evidence_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts],
         # 知识库真实旅程：用户级资料库添加 → 关联到当前项目 → 项目资料可见。
         [python, "tools/check_library_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts],
+        # 学习闭环真实旅程：诊断 → 生成计划 → 任务流转 → 自报提交 → 重开读回。
+        [python, "tools/check_learning_loop_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts],
         [python, "tools/check_round8_process_recovery.py"],
     ]
     for command in commands:

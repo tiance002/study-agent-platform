@@ -18,7 +18,6 @@
 | `create_project` / `grant_project` | 租户级 | 写入供给：创建项目时还没有 project_id 可设 |
 | `list_for` / `get` | 租户 + 主体 | `projects` 读取策略是成员感知的（EXISTS 读 `app.principal_id`） |
 | `get_live` / `revoke` / `revoke_all_for` | 租户 + 主体 | `user_sessions` 策略叠加了主体维度 |
-| `exchange` | **无上下文** | 兑换发生在任何身份存在之前（SECURITY DEFINER 函数自己搞定） |
 """
 
 from __future__ import annotations
@@ -27,16 +26,13 @@ from datetime import datetime
 
 from psycopg import errors as pg_errors
 
-from app.audit.outbox import TransactionalAuditOutbox
-from app.audit.sink import RiskLevel
 from app.core.clock import Clock, SystemClock
 from app.core.errors import ErrorCode, deny
 from app.db.session import (
-    connect,
     principal_transaction,
     tenant_only_transaction,
 )
-from app.identity.models import AuthMethod, Invitation, LearningProject, Principal, UserSession
+from app.identity.models import LearningProject, Principal, UserSession
 from app.identity.ports import SystemContext
 
 _PROJECT_COLUMNS = (
@@ -44,7 +40,7 @@ _PROJECT_COLUMNS = (
 )
 _SESSION_COLUMNS = (
     "session_id, tenant_id, principal_id, issued_at, expires_at, revoked_at, "
-    "auth_method, credential_id, security_generation"
+    "credential_id, security_generation"
 )
 
 
@@ -68,9 +64,8 @@ def _session_from_row(row: tuple) -> UserSession:
         issued_at=row[3],
         expires_at=row[4],
         revoked_at=row[5],
-        auth_method=AuthMethod(row[6]),
-        credential_id=row[7],
-        security_generation=row[8],
+        credential_id=row[6],
+        security_generation=row[7],
     )
 
 
@@ -244,127 +239,6 @@ class PostgresMembershipRepository:
         return _project_from_row(row)
 
 
-class PostgresInvitationRepository:
-    """邀请的 PostgreSQL 实现。兑换走 `exchange_invitation()` 引导函数。
-
-    审计事实经 `outbox` 与业务**同事务**落库（transactional outbox，
-    见 `app.audit.outbox`）：审查发现的缺陷是兑换先提交、审计后写，
-    sink 不可用时返回 503 而邀请已消费 —— fail-closed 名存实亡。
-    """
-
-    def __init__(
-        self,
-        clock: Clock | None = None,
-        dsn: str | None = None,
-        sessions: PostgresSessionRepository | None = None,
-        outbox: "TransactionalAuditOutbox | None" = None,
-    ) -> None:
-        self._clock = clock or SystemClock()
-        self._dsn = dsn
-        # 允许装配层注入**同一个**会话仓储：兑换写入与认证回读必须落在同一
-        # 适配器/同一 DSN 上，各建各的实例在传入不同 dsn 时会静默分叉。
-        self._sessions = sessions or PostgresSessionRepository(clock=self._clock, dsn=dsn)
-        self._outbox = outbox
-
-    def issue(
-        self,
-        context: SystemContext,
-        *,
-        invitation_id: str,
-        token_hash: str,
-        issued_by: str,
-        invitee_principal_id: str,
-        issued_at: datetime,
-        expires_at: datetime,
-    ) -> Invitation:
-        try:
-            with tenant_only_transaction(tenant_id=context.tenant_id, dsn=self._dsn) as conn:
-                conn.execute(
-                    "INSERT INTO invitations"
-                    " (invitation_id, tenant_id, token_hash, issued_by,"
-                    "  invitee_principal_id, issued_at, expires_at)"
-                    " VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    (
-                        invitation_id,
-                        context.tenant_id,
-                        token_hash,
-                        issued_by,
-                        invitee_principal_id,
-                        issued_at,
-                        expires_at,
-                    ),
-                )
-        except pg_errors.UniqueViolation as exc:
-            raise deny(
-                ErrorCode.PARAMS_INVALID,
-                "同一 token_hash 只能签发一次；重复签发会让旧邀请的消费状态失去意义",
-            ) from exc
-        return Invitation(
-            invitation_id=invitation_id,
-            tenant_id=context.tenant_id,
-            token_hash=token_hash,
-            issued_by=issued_by,
-            invitee_principal_id=invitee_principal_id,
-            issued_at=issued_at,
-            expires_at=expires_at,
-        )
-
-    def exchange(
-        self, token_hash: str, *, session_id: str, session_expires_at: datetime
-    ) -> UserSession | None:
-        # 刻意不设任何上下文：兑换发生在「调用方还没有任何身份」的时刻。
-        # 函数是 SECURITY DEFINER，自己完成"消费邀请 + 建会话"；
-        # 应用角色只有 EXECUTE 权限，没有无上下文读表的能力。
-        try:
-            with connect(self._dsn) as conn:
-                rows = conn.execute(
-                    "SELECT session_id, tenant_id, principal_id, expires_at"
-                    " FROM exchange_invitation(%s, %s, %s)",
-                    (token_hash, session_id, session_expires_at),
-                ).fetchall()
-                if rows and self._outbox is not None:
-                    # 高风险审计事实与业务**同一事务**落库：
-                    # commit 成功 = 邀请消费 + 会话创建 + 审计事实三者同生共死。
-                    # 事件投影进链式 sink 是提交后的事（见 outbox.flush_pending）。
-                    _sid, tenant_id, principal_id, _expires = rows[0]
-                    conn.execute(
-                        "SELECT set_config('app.tenant_id', %s, true)",
-                        (tenant_id,),
-                    )
-                    self._outbox.stage_in_transaction(
-                        conn,
-                        event_type="invitation_exchanged",
-                        payload={"principal_id": principal_id},
-                        risk=RiskLevel.HIGH,
-                        tenant_id=tenant_id,
-                    )
-                conn.commit()
-        except pg_errors.CheckViolation as exc:
-            # 0004 起函数对会话期限做硬上限校验、表上也有同名 CHECK。
-            # 能触发它只可能是服务端配置/调用错误（客户端不提供期限），
-            # 翻译成内部一致性错误，与内存适配器同一拒绝方向。
-            raise deny(
-                ErrorCode.INTERNAL_CONSISTENCY_ERROR,
-                "会话有效期超出服务端允许范围",
-            ) from exc
-        if not rows:
-            # 未知 / 已过期 / 已消费统一走到这里 —— 与内存版同一个公开结果。
-            return None
-        _sid, tenant_id, principal_id, _expires = rows[0]
-        principal = Principal(principal_id=principal_id, tenant_id=tenant_id)
-        # 回读权威行（含 issued_at / revoked_at），而不是用入参拼一个近似对象。
-        session = self._sessions.get_live(principal, session_id)
-        if session is None:
-            # 不用 assert：python -O 会剥掉断言，而这是兑换事务与会话表
-            # 隔离策略之间的内部一致性破裂，在优化模式下也必须当场暴露。
-            raise deny(
-                ErrorCode.INTERNAL_CONSISTENCY_ERROR,
-                "兑换函数返回了会话但回读不可见，认证存储一致性破裂",
-                session_id=session_id,
-            )
-        return session
-
-
 class PostgresSessionRepository:
     """会话的 PostgreSQL 实现。撤销与失效判定每次都回库 —— 这是 cookie 可撤销的根基。"""
 
@@ -382,15 +256,14 @@ class PostgresSessionRepository:
                 conn.execute(
                     "INSERT INTO user_sessions"
                     " (session_id, tenant_id, principal_id, issued_at, expires_at, "
-                    "auth_method, credential_id, security_generation)"
-                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    "credential_id, security_generation)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s)",
                     (
                         session.session_id,
                         session.tenant_id,
                         session.principal_id,
                         session.issued_at,
                         session.expires_at,
-                        session.auth_method.value,
                         session.credential_id,
                         session.security_generation,
                     ),

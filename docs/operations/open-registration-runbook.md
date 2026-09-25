@@ -5,7 +5,7 @@
 ## 发布顺序
 
 1. 所有实例保持 `STUDY_PLATFORM_REGISTRATION_ENABLED=0`、`STUDY_PLATFORM_PASSWORD_LOGIN_ENABLED=0`，完成备份、迁移演练和健康检查。
-2. 先把 `STUDY_PLATFORM_PASSWORD_LOGIN_ENABLED=1` 发布到灰度实例，验证既有密码账号登录、旧邀请码兑换、登出和 `logout/all`。
+2. 先把 `STUDY_PLATFORM_PASSWORD_LOGIN_ENABLED=1` 发布到灰度实例，验证既有密码账号登录、登出和 `logout/all`。
 3. 确认 Argon2 队列无持续饱和、认证失败率和 `429` 在基线内，再逐步设置 `STUDY_PLATFORM_REGISTRATION_ENABLED=1`。
 4. 付费派发开关与注册开关独立；缺省为关闭。PostgreSQL 部署以 `platform_budget_config`
    单例行为事实源为准（`0013` 的受限函数读取它）。`monthly_cap_micro` 使用整数微单位；
@@ -34,4 +34,4 @@
 
 ## 回滚
 
-回滚应用包时保留 `0012`/`0013` 表和函数，不把密码会话转换成邀请会话，不删除凭据表；可先关闭注册，确认既有密码登录仍符合当前安全评估，再决定是否关闭密码登录。
+回滚应用包时保留 `0012`/`0013` 表和函数，保留密码会话与凭据表；可先关闭注册，确认既有密码登录仍符合当前安全评估，再决定是否关闭密码登录。

@@ -12,8 +12,9 @@ from datetime import datetime, timezone
 
 import pytest
 from app.core.hashing import content_hash
+from app.identity.models import Principal
 from app.knowledge.models import CHUNK_PARSER_VERSION, StoredChunk
-from app.main import DEMO_PRINCIPAL, DEMO_TENANT, PlatformState
+from app.main import PlatformState
 from app.teaching.provider import ScriptedProvider
 from app.workers.teaching import run_once
 from fastapi.testclient import TestClient
@@ -21,19 +22,19 @@ from fastapi.testclient import TestClient
 CONTENT = "# 事务\n\nACID 是事务的四个性质。\n"
 QUESTION = "什么是 ACID？"
 
-#: 内存适配器的演示主体（cookie_project 夹具兑换的就是它）。
-_ACTOR = None
-
 
 def _unique(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
 
 
-def _seed_material(platform: PlatformState, project_id: str) -> StoredChunk:
-    """给 demo 主体在项目里铺一份已切块的资料（检索命中用）。"""
-    from app.identity.models import Principal
+def _actor_of(client: TestClient) -> Principal:
+    """从会话回读当前身份（供直接调用仓储时构造 `Principal`，不绕过认证）。"""
+    me = client.get("/me").json()
+    return Principal(principal_id=me["principal_id"], tenant_id=me["tenant_id"])
 
-    actor = Principal(principal_id=DEMO_PRINCIPAL, tenant_id=DEMO_TENANT)
+
+def _seed_material(platform: PlatformState, project_id: str, actor: Principal) -> StoredChunk:
+    """给定主体在项目里铺一份已切块的资料（检索命中用）。"""
     source_id = _unique("src")
     platform.products.register_source(
         actor,
@@ -105,7 +106,7 @@ def teaching_env(platform, client, cookie_project):
     )
     assert conversation.status_code == 201, conversation.text
     conversation_id = conversation.json()["conversation_id"]
-    chunk = _seed_material(platform, project_id)
+    chunk = _seed_material(platform, project_id, _actor_of(client_))
     return client_, platform, project_id, conversation_id, chunk
 
 
@@ -313,12 +314,8 @@ def test_reconnect_after_restart_replays_without_new_generation(teaching_env):
     platform.teaching_provider = provider
     run_id = _create_run(client, project_id, conversation_id).json()["run_id"]
     assert run_once(platform, worker_id="w1") == "succeeded"
-    budget_before = platform.teaching.budget_snapshot(
-        __import__("app.identity.models", fromlist=["Principal"]).Principal(
-            principal_id=DEMO_PRINCIPAL, tenant_id=DEMO_TENANT
-        ),
-        project_id,
-    )
+    actor = _actor_of(client)
+    budget_before = platform.teaching.budget_snapshot(actor, project_id)
 
     # "重启"：同一平台对象上重连（内存适配器无跨进程；PG 端到端在任务 6）。
     events_after = client.get(
@@ -328,10 +325,5 @@ def test_reconnect_after_restart_replays_without_new_generation(teaching_env):
     assert "event: run.succeeded" in events_after.text
     assert provider.call_count == 1  # 重连没有触发 generate
 
-    budget_after = platform.teaching.budget_snapshot(
-        __import__("app.identity.models", fromlist=["Principal"]).Principal(
-            principal_id=DEMO_PRINCIPAL, tenant_id=DEMO_TENANT
-        ),
-        project_id,
-    )
+    budget_after = platform.teaching.budget_snapshot(actor, project_id)
     assert budget_after == budget_before  # 费用不变

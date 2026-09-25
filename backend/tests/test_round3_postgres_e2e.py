@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
 import uuid
-from datetime import timedelta
 
 import pg_support
 import psycopg
 import pytest
 from app.deployment import DeploymentSettings
-from app.identity.ports import SystemContext
 from app.main import build_platform, create_app
 from fastapi.testclient import TestClient
 
@@ -38,36 +35,20 @@ def _headers(key: str) -> dict[str, str]:
 
 def test_learning_loop_survives_restart_and_state_does_not_forge_mastery(tmp_path):
     suffix = uuid.uuid4().hex
-    tenant_id, principal_id = "t_r3_" + suffix, "u_r3_" + suffix
-    token = "invite-r3-" + suffix
-    with psycopg.connect(pg_support.migration_dsn()) as conn, conn.transaction():
-        conn.execute(
-            "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)",
-            (tenant_id, "Round 3 exit gate"),
-        )
-        conn.execute(
-            "INSERT INTO principals (principal_id, tenant_id) VALUES (%s, %s)",
-            (principal_id, tenant_id),
-        )
-
     settings = DeploymentSettings.load(
-        {"STUDY_PLATFORM_PERSISTENCE": "postgres", "STUDY_PLATFORM_EXCHANGE_LIMIT": "100000"}
+        {"STUDY_PLATFORM_PERSISTENCE": "postgres", "STUDY_PLATFORM_AUTH_ATTEMPT_LIMIT": "100000"}
     )
     platform_a = build_platform(var_dir=tmp_path / "a", settings=settings)
-    now = platform_a.clock.now()
-    platform_a.invitations.issue(
-        SystemContext(tenant_id, "Round 3 exit gate"),
-        invitation_id="inv_" + suffix,
-        token_hash="sha256:" + hashlib.sha256(token.encode()).hexdigest(),
-        issued_by=principal_id,
-        invitee_principal_id=principal_id,
-        issued_at=now,
-        expires_at=now + timedelta(hours=1),
-    )
+
+    # 身份一律通过真实 HTTP 注册取得。
     client_a = TestClient(create_app(platform=platform_a))
-    exchanged = client_a.post("/auth/invitations/exchange", json={"token": token})
-    assert exchanged.status_code == 200
-    cookie = exchanged.cookies["study_session"]
+    registered = client_a.post(
+        "/auth/register",
+        json={"username": "r3-" + suffix[:10], "password": "r3-pass-1234"},
+        headers={"Origin": ORIGIN},
+    )
+    assert registered.status_code == 201, registered.text
+    cookie = client_a.cookies["study_session"]
 
     project = client_a.post(
         "/projects",
@@ -108,8 +89,8 @@ def test_learning_loop_survives_restart_and_state_does_not_forge_mastery(tmp_pat
     client_b.cookies.set("study_session", cookie)
     mastery_before = client_b.get(f"/projects/{project_id}/mastery").json()
     concept = next(row for row in mastery_before["components"] if row["component_id"] == "concept")
-    # 自报是中性证据：被记录但不抬升独立水平（self-report != verified）。
-    assert (concept["independence_level"], concept["confidence"]) == ("unknown", "low")
+    # 自报是中性证据：被记录但不抬升独立水平，也不抬升置信度（self-report != verified）。
+    assert (concept["independence_level"], concept["confidence"]) == ("unknown", "insufficient")
     detail = client_b.get(f"/projects/{project_id}/tasks/{task_id}").json()
     assert detail["verified"] is False
     assert detail["self_reported"] is True

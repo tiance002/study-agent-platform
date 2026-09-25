@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:93919f22418acf048ee62fb721cf9b304ad9fc83bf46ca569ab534c5af85edf3, generated_at=2026-09-25T06:27:57Z -->
-> 生成时间：2026-09-25T06:27:57Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:b501a43ef8c5997637be4bf3d157bf92d00bc7172081943b08724c49b08da737, generated_at=2026-09-25T11:35:52Z -->
+> 生成时间：2026-09-25T11:35:52Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 
@@ -15,7 +15,6 @@
 
 | 路径 | 方法 | 说明 |
 |---|---|---|
-| `/auth/invitations/exchange` | POST | Exchange Invitation |
 | `/auth/login` | POST | Password Login |
 | `/auth/logout` | POST | Logout |
 | `/auth/logout/all` | POST | Logout All |
@@ -69,7 +68,7 @@
 
 ### 稳定错误码
 
-共 48 个，一经发布不得改变语义，只能追加。
+共 47 个，一经发布不得改变语义，只能追加。
 
 | 错误码 |
 |---|
@@ -98,7 +97,6 @@
 | `IDEMPOTENCY_VIOLATION` |
 | `ILLEGAL_STATE_TRANSITION` |
 | `INTERNAL_CONSISTENCY_ERROR` |
-| `INVITATION_INVALID` |
 | `NODE_NOT_REGISTERED` |
 | `OBLIGATION_UNSUPPORTED` |
 | `PARAMS_INVALID` |

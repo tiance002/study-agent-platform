@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import sys
 import uuid
 
 import pytest
@@ -18,7 +19,15 @@ from app.identity.ports import SystemContext
 from app.main import create_app
 from fastapi.testclient import TestClient
 
+#: 认证身份已改为**真实注册**：这些端到端用例要操作的必须是该身份能访问的项目。
+#: `_registered_project` 把它替换成注册账号的默认项目（`demo["project"]`）。
 PROJECT = "proj_demo"
+
+
+@pytest.fixture(autouse=True)
+def _registered_project(monkeypatch, demo):
+    monkeypatch.setattr(sys.modules[__name__], "PROJECT", demo["project"])
+
 
 # 每次调用生成唯一幂等键：变更接口必须携带 Idempotency-Key（审查修复），
 # 且不同调用不得共用键 —— 同键同内容会命中重放缓存，测不到真实执行。
@@ -68,7 +77,8 @@ WRITE_PARAMS = {
 }
 
 
-def _ingest(client, headers, *, project: str = PROJECT) -> dict:
+def _ingest(client, headers, *, project: str | None = None) -> dict:
+    project = project or PROJECT
     response = client.post(
         f"/projects/{project}/retrieval/chunks",
         json={
@@ -81,7 +91,8 @@ def _ingest(client, headers, *, project: str = PROJECT) -> dict:
     return response.json()
 
 
-def _interact(client, headers, node_id: str, *, project: str = PROJECT, **extra) -> dict:
+def _interact(client, headers, node_id: str, *, project: str | None = None, **extra) -> dict:
+    project = project or PROJECT
     payload = {
         "node_id": node_id,
         "user_input": "Agent harness 怎么学",
@@ -97,7 +108,8 @@ def _interact(client, headers, node_id: str, *, project: str = PROJECT, **extra)
     return response.json()
 
 
-def _create_confirmation(client, headers, tool_id: str, params: dict, *, project: str = PROJECT):
+def _create_confirmation(client, headers, tool_id: str, params: dict, *, project: str | None = None):
+    project = project or PROJECT
     return client.post(
         f"/projects/{project}/confirmations",
         json={"tool_id": tool_id, "params": params},
@@ -135,12 +147,8 @@ def test_requests_without_token_are_rejected(client):
         assert response.json()["code"] == "UNAUTHENTICATED"
 
 
-def test_forged_token_is_rejected(client, auth_headers, platform):
-    """篡改令牌（换租户）必须失败 —— 这是「身份不可自报」的核心证明。"""
-    headers = auth_headers(tenant_id="tenant_demo", principal_id="user_demo")
-    raw = headers["Authorization"].split(" ", 1)[1]
-
-    # 手工构造一个租户不同的令牌（用错误密钥签名）
+def test_forged_token_is_rejected(client, platform):
+    """篡改令牌（换租户 + 错误密钥）必须失败 —— 这是「身份不可自报」的核心证明。"""
     from app.identity.session import SessionIssuer
 
     attacker = SessionIssuer(secret="dev-only-attacker-secret")
@@ -150,17 +158,16 @@ def test_forged_token_is_rejected(client, auth_headers, platform):
         issued_at=platform.clock.now(),
     )
     forged_raw = attacker.serialize(forged)
-    assert forged_raw != raw
 
     response = client.get("/me", headers={"Authorization": f"Bearer {forged_raw}"})
     assert response.status_code == 401
 
 
-def test_identity_comes_from_token_not_request(client, auth_headers):
-    """/me 返回的身份来自令牌；请求体里根本没有可填的身份字段。"""
-    body = client.get("/me", headers=auth_headers(principal_id="user_demo")).json()
-    assert body["principal_id"] == "user_demo"
-    assert body["tenant_id"] == "tenant_demo"
+def test_identity_comes_from_token_not_request(client, auth_headers, demo):
+    """/me 返回的身份来自会话；请求体里根本没有可填的身份字段。"""
+    body = client.get("/me", headers=auth_headers()).json()
+    assert body["principal_id"] == demo["principal"]
+    assert body["tenant_id"] == demo["tenant"]
 
 
 def test_body_fields_impersonating_identity_are_rejected(client, auth_headers):
@@ -352,23 +359,26 @@ def test_confirmation_cannot_be_issued_for_low_impact_tool(client, auth_headers)
     assert response.json()["code"] == "POLICY_DENIED"
 
 
-def test_confirmation_cannot_be_transferred_to_another_principal(client, auth_headers, platform):
-    """确认不能转让：别人拿不走你的确认。"""
+def test_confirmation_cannot_be_transferred_to_another_principal(client, auth_headers):
+    """确认不能转让：别人拿不走你的确认（另一个真实账号访问同一份确认被拒）。"""
     headers = auth_headers()
     created = _create_confirmation(client, headers, "append_project_evidence", WRITE_PARAMS).json()
 
-    platform.membership.grant_project(
-        SystemContext("tenant_demo"), principal_id="user_other", project_id=PROJECT
-    )
+    # 另一个真实注册的账号：对同一项目没有访问权 —— 统一 404，
+    # 既不拿走确认，也不暴露确认是否存在。
     other_headers = auth_headers(principal_id="user_other")
-    result = _interact(
-        client,
-        other_headers,
-        "validate_and_record",
-        params=WRITE_PARAMS,
-        confirmation_id=created["confirmation_id"],
+    response = client.post(
+        f"/projects/{PROJECT}/interactions",
+        json={
+            "node_id": "validate_and_record",
+            "user_input": "x",
+            "params": WRITE_PARAMS,
+            "confirmation_id": created["confirmation_id"],
+        },
+        headers={**other_headers, "Idempotency-Key": _idem_key()},
     )
-    assert result["status"] == "denied"
+    assert response.status_code == 404
+    assert response.json()["code"] == "NOT_FOUND"
 
 
 # ------------------------------------------------------------- 读接口

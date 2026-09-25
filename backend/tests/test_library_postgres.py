@@ -5,8 +5,8 @@
 1. **FORCE RLS 真的在生效**：`study_app` 在无上下文 / 错主体上下文下
    读 `library_sources` 得到 **0 行**（不是"读到别人的"，也不是报错）；
 2. **append-only 由 GRANT 保证**：应用角色对这两张表没有 `UPDATE`；
-3. **迁移往返**：`0021` 在随机临时库上 `downgrade → upgrade` 往返，
-   表与策略都真的消失又回来。
+3. **迁移往返**：新基线（`0001`）在随机临时库上 `downgrade base → upgrade head`
+   往返，表与策略都真的消失又回来。
 
 外加一条端到端：注册用户 → 登记知识库 → 关联到默认项目 → worker 摄取 →
 既有检索命中。用真实 cookie 会话与真实 PG 适配器，不绕过认证。
@@ -59,7 +59,7 @@ def _register(client: TestClient, *, suffix: str) -> tuple[str, str]:
     username = "lib" + suffix
     response = client.post(
         "/auth/register",
-        json={"username": username, "password": "LibraryPass12"},
+        json={"username": username, "password": "LibPass12"},
         headers={"Origin": "http://testserver"},
     )
     assert response.status_code == 201, response.text
@@ -105,13 +105,14 @@ def test_library_end_to_end_in_postgres(tmp_path):
     assert registered.json()["has_content"] is True
     assert registered.json()["identity_hash"].startswith("sha256:")
 
-    # 同样的 acquisition 再登记一次：返回既有记录（200），库里仍只有一行。
+    # 同样的 (acquisition, 原文) 再登记一次：返回既有记录（200），库里仍只有一行。
     repeated = client.post(
         "/library/sources",
         json={
             "display_name": "事务讲义(重传)",
             "media_type": "text/markdown",
             "acquisition": {"kind": "upload", "n": suffix},
+            "content": MARKDOWN,
         },
         headers=_keyed(),
     )
@@ -219,6 +220,68 @@ def test_attach_requires_membership_in_postgres(tmp_path):
 
 
 @pytest.mark.invariant
+def test_attach_rolls_back_the_source_when_enqueue_fails(tmp_path, monkeypatch):
+    """真实事务回滚：摄取写入在资料登记之后失败，整段回滚，不留半成品。
+
+    与内存版的分工：内存版证明"路由不再分两步写"；这里证明 PostgreSQL 侧
+    "资料登记与入队在同一事务"，第二步失败时资料登记被一并回滚。
+    """
+    from app.db.ingestion_store import PostgresIngestionRepository
+
+    suffix = uuid.uuid4().hex[:10]
+    platform = build_platform(var_dir=tmp_path / "web", settings=_settings())
+    client = TestClient(create_app(platform=platform))
+    _principal_id, project_id = _register(client, suffix=suffix)
+
+    registered = client.post(
+        "/library/sources",
+        json={
+            "display_name": "事务讲义",
+            "media_type": "text/markdown",
+            "acquisition": {"kind": "upload", "n": suffix},
+            "content": MARKDOWN,
+        },
+        headers=_keyed(),
+    )
+    library_source_id = registered.json()["library_source_id"]
+
+    def _boom(self, *args, **kwargs):
+        raise RuntimeError("注入的入队失败：资料登记必须一并回滚")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(PostgresIngestionRepository, "_enqueue_in_conn", _boom)
+        with pytest.raises(RuntimeError):
+            client.post(
+                f"/projects/{project_id}/library-sources/{library_source_id}/attach",
+                headers=_keyed(),
+            )
+
+    # 项目里不残留该资料（资料登记已随事务回滚）。
+    assert client.get(f"/projects/{project_id}/sources").json()["sources"] == []
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM sources WHERE project_id = %s", (project_id,)
+        ).fetchone()[0] == 0
+        # 库侧记录不受影响。
+        assert conn.execute(
+            "SELECT count(*) FROM library_sources WHERE library_source_id = %s",
+            (library_source_id,),
+        ).fetchone()[0] == 1
+
+    # 恢复后重试成功：一份资料 + 一个摄取任务。
+    retry = client.post(
+        f"/projects/{project_id}/library-sources/{library_source_id}/attach",
+        headers=_keyed(),
+    )
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["created"] is True and retry.json()["ingestion_job_id"]
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM sources WHERE project_id = %s", (project_id,)
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.invariant
 def test_study_app_sees_no_library_rows_without_context(pg_database):
     """RLS 反例：无上下文 0 行、错主体 0 行、正确主体能看到自己那一行。"""
     suffix = uuid.uuid4().hex[:10]
@@ -288,8 +351,12 @@ def _run_alembic(dsn: str, *arguments: str) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_0021_migration_cycle_is_reversible(pg_database):
-    """`0021` 在随机临时库上往返：表与策略真的消失又回来。"""
+def test_baseline_migration_cycle_is_reversible(pg_database):
+    """新基线（0001）在随机临时库上往返：表与策略真的消失又回来。
+
+    压扁后"降级到 0019"已不存在；基线自身在**无数据**时允许清空、
+    有数据时拒绝（护栏由 test_metrics 覆盖）。
+    """
     database = pg_support.create_test_database()
     try:
         with psycopg.connect(database.migration_dsn) as conn:
@@ -297,15 +364,20 @@ def test_0021_migration_cycle_is_reversible(pg_database):
                 "SELECT count(*) FROM information_schema.tables"
                 " WHERE table_name IN ('library_sources', 'library_documents')"
             ).fetchone()[0] == 2
+            assert conn.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0] == "0001"
 
-        _run_alembic(database.migration_dsn, "downgrade", "0019")
+        _run_alembic(database.migration_dsn, "downgrade", "base")
         with psycopg.connect(database.migration_dsn) as conn:
             assert conn.execute(
                 "SELECT count(*) FROM information_schema.tables"
                 " WHERE table_name IN ('library_sources', 'library_documents')"
             ).fetchone()[0] == 0
-            version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "0019"
+            assert conn.execute(
+                "SELECT count(*) FROM information_schema.tables"
+                " WHERE table_schema = 'public' AND table_name <> 'alembic_version'"
+            ).fetchone()[0] == 0
 
         _run_alembic(database.migration_dsn, "upgrade", "head")
         with psycopg.connect(database.migration_dsn) as conn:
@@ -318,6 +390,8 @@ def test_0021_migration_cycle_is_reversible(pg_database):
                 ("library_documents", True, True),
                 ("library_sources", True, True),
             ]
-            assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0021"
+            assert conn.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0] == "0001"
     finally:
         pg_support.drop_test_database(database)

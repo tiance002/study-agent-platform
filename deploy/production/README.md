@@ -55,27 +55,14 @@ sudo systemctl --no-pager --full status study-plan-web.service study-plan-teachi
 The service account can read the provider file, but it cannot write it. The
 file should remain owned by `root:studyplan` with mode `0640`.
 
-## Create a first invitation
+## Create the first account
 
-Run this on the server after the teaching provider is configured. The command
-prints one single-use invitation token; do not store it in the repository.
+Registration and password login are enabled in the current first-release
+configuration; after registration the server creates the user's initial project
+automatically. Open `https://120.55.115.162` and use the **注册账号** tab.
 
-```sh
-set -a
-. /etc/study-plan/admin.env
-set +a
-/opt/study-plan/venv/bin/python /opt/study-plan/current/tools/issue_invitation.py \
-  --tenant t_first_release \
-  --principal u_first_release
-```
-
-Open `https://120.55.115.162` and use the **注册账号** tab. Registration and
-password login are enabled in the current first-release configuration; after
-registration the server creates the user's initial project automatically.
-
-The invitation command remains an optional operator path for deployments that
-choose to disable open registration. It is not required for ordinary users in
-the current release.
+There is no separate invitation/bootstrap command: accounts are created through
+public registration only, and passwords must be 6-12 characters.
 
 ## Operations
 

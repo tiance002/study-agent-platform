@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
 import uuid
-from datetime import timedelta
 
 import pg_support
 import psycopg
 import pytest
 from app.deployment import DeploymentSettings
-from app.identity.ports import SystemContext
 from app.main import build_platform, create_app
 from fastapi.testclient import TestClient
 
@@ -38,56 +35,31 @@ def _key(value: str) -> dict[str, str]:
 @pytest.mark.invariant
 def test_cookie_product_flow_and_idempotency_survive_restart(tmp_path):
     suffix = uuid.uuid4().hex
-    tenant_id = "t_r2_" + suffix
-    principal_id = "u_r2_" + suffix
-    token = "invite-r2-" + suffix
-
-    with psycopg.connect(pg_support.migration_dsn()) as conn:
-        with conn.transaction():
-            conn.execute(
-                "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)",
-                (tenant_id, "Round 2 exit gate"),
-            )
-            conn.execute(
-                "INSERT INTO principals (principal_id, tenant_id) VALUES (%s, %s)",
-                (principal_id, tenant_id),
-            )
 
     settings = DeploymentSettings.load(
         {
             "STUDY_PLATFORM_PERSISTENCE": "postgres",
-            "STUDY_PLATFORM_EXCHANGE_LIMIT": "100000",
+            "STUDY_PLATFORM_AUTH_ATTEMPT_LIMIT": "100000",
         }
     )
     platform_a = build_platform(var_dir=tmp_path / "a", settings=settings)
-    now = platform_a.clock.now()
-    platform_a.invitations.issue(
-        SystemContext(tenant_id, "Round 2 exit gate"),
-        invitation_id="inv_" + suffix,
-        token_hash="sha256:" + hashlib.sha256(token.encode()).hexdigest(),
-        issued_by=principal_id,
-        invitee_principal_id=principal_id,
-        issued_at=now,
-        expires_at=now + timedelta(hours=1),
-    )
 
+    # 身份一律通过真实 HTTP 注册取得：注册原子地建租户/主体/凭据/会话/默认项目。
     client_a = TestClient(create_app(platform=platform_a))
-    exchanged = client_a.post("/auth/invitations/exchange", json={"token": token})
-    assert exchanged.status_code == 200, exchanged.text
-    cookie = exchanged.cookies["study_session"]
-
-    project_key = "r2-project-" + suffix
-    project_body = {"name": "Agent 工程首版", "goal": "完成可用学习闭环"}
-    project_response = client_a.post(
-        "/projects", json=project_body, headers=_key(project_key)
+    registered = client_a.post(
+        "/auth/register",
+        json={"username": "r2-" + suffix[:10], "password": "r2-pass-1234"},
+        headers={"Origin": ORIGIN},
     )
-    assert project_response.status_code == 201, project_response.text
-    project_id = project_response.json()["project_id"]
+    assert registered.status_code == 201, registered.text
+    cookie = client_a.cookies["study_session"]
+    project_id = registered.json()["default_project_id"]
 
+    conversation_key = "r2-conversation-" + suffix
     conversation = client_a.post(
         f"/projects/{project_id}/conversations",
         json={"title": "第一周"},
-        headers=_key("r2-conversation-" + suffix),
+        headers=_key(conversation_key),
     )
     assert conversation.status_code == 201, conversation.text
     conversation_id = conversation.json()["conversation_id"]
@@ -141,15 +113,17 @@ def test_cookie_product_flow_and_idempotency_survive_restart(tmp_path):
     assert [item["content"] for item in messages.json()["messages"]] == [
         "从认证和幂等开始"
     ]
-    assert client_b.get(f"/projects/{project_id}/plan").json()["plan"]["goal"] == project_body[
-        "goal"
-    ]
+    assert client_b.get(f"/projects/{project_id}/plan").json()["plan"]["goal"] == "完成可用学习闭环"
     assert client_b.get(f"/projects/{project_id}/sources").json()["sources"][0][
         "display_name"
     ] == "FastAPI 文档"
 
-    replay = client_b.post("/projects", json=project_body, headers=_key(project_key))
+    replay = client_b.post(
+        f"/projects/{project_id}/conversations",
+        json={"title": "第一周"},
+        headers=_key(conversation_key),
+    )
     assert replay.status_code == 201
     assert replay.headers["X-Idempotent-Replay"] == "true"
-    assert replay.json() == project_response.json()
+    assert replay.json() == conversation.json()
     assert len(client_b.get("/projects").json()["projects"]) == 1

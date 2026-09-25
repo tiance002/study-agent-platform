@@ -23,14 +23,11 @@ class ErrorCode(StrEnum):
     TENANT_CONTEXT_MISSING = "TENANT_CONTEXT_MISSING"
     CROSS_TENANT_DENIED = "CROSS_TENANT_DENIED"
     CROSS_PROJECT_DENIED = "CROSS_PROJECT_DENIED"
-    # 邀请兑换失败。**未知 / 已过期 / 已消费 / 格式错统一用这一个码**：
-    # 区分原因等于告诉探测者"这个 token 存在过" —— 存在性本身就是信息。
-    INVITATION_INVALID = "INVITATION_INVALID"
     # cookie 认证的跨站请求伪造拦截。仅作用于"凭 cookie 认证的不安全方法"；
     # bearer 兼容路径不经过它（凭据是显式的，不存在环境凭证被利用的问题）。
     CSRF_DENIED = "CSRF_DENIED"
-    # 未认证引导端点（邀请兑换）触发限流：这是**可重试**拒绝，
-    # 响应带 Retry-After；与"邀请无效"是两回事，不能合并。
+    # 认证尝试（注册/登录）触发限流：这是**可重试**拒绝，
+    # 响应带 Retry-After。
     RATE_LIMITED = "RATE_LIMITED"
     ACCOUNT_ALREADY_AUTHENTICATED = "already_authenticated"
     USERNAME_TAKEN = "USERNAME_TAKEN"
@@ -101,7 +98,7 @@ class ErrorCode(StrEnum):
     AUDIT_LOG_CORRUPTED = "AUDIT_LOG_CORRUPTED"
 
     # ---- 内部一致性 ----
-    # 服务端自己的不变量被破坏（例如兑换函数声称建了会话、回读却不可见，
+    # 服务端自己的不变量被破坏（例如注册函数声称建了会话、回读却不可见，
     # 或服务端传入了超出硬上限的会话期限）。**绝不能用 assert 守这类不变量**：
     # python -O 会剥掉断言。对外只呈现通用 500，不暴露内部细节。
     INTERNAL_CONSISTENCY_ERROR = "INTERNAL_CONSISTENCY_ERROR"

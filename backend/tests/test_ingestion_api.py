@@ -26,7 +26,6 @@ import pytest
 from app.core.errors import ERROR_PAYLOAD_KEYS
 from app.identity.models import Principal
 from app.knowledge.models import MAX_DOCUMENT_BYTES
-from app.main import DEMO_PRINCIPAL, DEMO_TENANT
 from app.workers.ingestion import Outcome, main, run_once
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "app"
@@ -61,7 +60,7 @@ def learner(cookie_project, platform):
     """已登录用户 + 一个已创建的项目 + 一份已登记的资料。
 
     返回 `(client, platform, project_id, source_id)`。身份走完整认证路径
-    （签发邀请 → 兑换 cookie 会话），不绕过认证 —— 绕过就等于用另一种形式
+    （真实注册/登录取得 cookie 会话），不绕过认证 —— 绕过就等于用另一种形式
     把"客户端自报身份"放回来。登录舞蹈本身在 `conftest.cookie_project` 里，
     与检索测试共用一份，避免两处各抄一遍再各自分叉。
     """
@@ -87,10 +86,11 @@ def _upload(
     return client.post(_content_path(project_id, source_id), json=body, headers=_keyed(key))
 
 
-def _principal() -> Principal:
-    """读接口需要身份对象。这不是"自报身份"—— 它只用于直接调用仓储，
-    与 HTTP 路径无关（HTTP 路径的身份一律来自会话）。"""
-    return Principal(principal_id=DEMO_PRINCIPAL, tenant_id=DEMO_TENANT)
+def _principal(client) -> Principal:
+    """读接口需要身份对象。这不是"自报身份"—— 身份仍来自**会话回读**
+    （`GET /me`），只是省掉反复解包响应的样板。"""
+    me = client.get("/me").json()
+    return Principal(principal_id=me["principal_id"], tenant_id=me["tenant_id"])
 
 
 # ---------------------------------------------------------------- 上传端点
@@ -116,7 +116,7 @@ def test_upload_enqueues_durably_and_never_returns_content(learner):
     assert "content" not in payload["document"], "响应体不得携带原文"
     assert "content" not in payload["job"]
     # 上传**不**产出片段：切块是 worker 的活。
-    assert platform.ingestion.stored_chunks(_principal(), project_id) == ()
+    assert platform.ingestion.stored_chunks(_principal(client), project_id) == ()
 
 
 @pytest.mark.invariant
@@ -321,7 +321,7 @@ def test_worker_turns_a_queued_job_into_verifiable_chunks(learner):
 
     assert outcome == Outcome(kind="succeeded", job_id=job_id, chunk_count=2)
     assert client.get(_job_path(project_id, job_id)).json()["status"] == "succeeded"
-    chunks = platform.ingestion.stored_chunks(_principal(), project_id)
+    chunks = platform.ingestion.stored_chunks(_principal(client), project_id)
     assert [chunk.heading_path for chunk in chunks] == [("事务",), ("事务", "回滚")]
     for chunk in chunks:
         assert SAMPLE[chunk.span_start : chunk.span_end] == chunk.content
@@ -344,7 +344,7 @@ def test_terminal_job_is_never_reclaimed(learner):
     assert run_once(platform, worker_id="wk-a").kind == "succeeded"
     assert run_once(platform, worker_id="wk-b") == Outcome(kind="idle")
     # 片段没有被追加第二套：`chunk_index` 仍然连续。
-    chunks = platform.ingestion.stored_chunks(_principal(), project_id)
+    chunks = platform.ingestion.stored_chunks(_principal(client), project_id)
     assert [chunk.chunk_index for chunk in chunks] == [0, 1]
 
 
@@ -477,7 +477,7 @@ def test_worker_command_once_processes_exactly_one_job(learner):
     # 两份上传是**同一个来源的两个版本**，默认只看最新版本时会只剩一批 ——
     # 那正是 R4-03 要的检索语义，所以这一条必须显式要求全部版本。
     chunks = platform.ingestion.stored_chunks(
-        _principal(), project_id, latest_only=False
+        _principal(client), project_id, latest_only=False
     )
     assert len({chunk.document_id for chunk in chunks}) == 2
 

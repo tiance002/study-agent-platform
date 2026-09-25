@@ -10,15 +10,10 @@ PostgreSQL 实现跑同一套契约测试，靠「结构相同」互换，不靠
 - **访问判定方法**（`list_for` / `get` / `get_live` / `revoke`）的第一个参数
   是 `Principal` —— 服务端断言的身份。端口层不接受裸的 `tenant_id` 字符串，
   否则「谁在问」就退化成「调用方记得传对」。
-- **供给方法**（`create_project` / `grant_project` / `issue`）的第一个参数
+- **供给方法**（`create_project` / `grant_project`）的第一个参数
   是 `SystemContext` —— 显式类型的可信系统上下文（种子脚本、运维动作、
   将来的管理接口）。它和"随手传个 id"在类型上是两回事：
   前者必须显式构造并写明理由，后者在代码审查里一眼就能看出来。
-
-`InvitationRepository.exchange` 是刻意的例外：它**不接收任何身份参数**。
-兑换发生在"调用方还没有任何身份"的时刻（这正是邀请存在的意义），
-被邀请者由邀请行**预绑定**（0003 迁移的 `invitee_principal_id`），
-客户端没有机会通过兑换决定自己是谁。
 """
 
 from __future__ import annotations
@@ -28,7 +23,7 @@ from datetime import datetime
 from typing import Protocol
 
 from app.core.contracts import require_id, require_text
-from app.identity.models import Invitation, LearningProject, Principal, UserSession
+from app.identity.models import LearningProject, Principal, UserSession
 
 
 @dataclass(frozen=True)
@@ -143,34 +138,6 @@ class MembershipRepository(Protocol):
     def get(self, actor: Principal, project_id: str) -> LearningProject:
         """访问判定。**一切失败模式（不存在/跨租户/未授予）返回同一种拒绝**，
         不让人通过错误差异探测别的租户有哪些项目。
-        """
-        ...
-
-
-class InvitationRepository(Protocol):
-    """一次性邀请的签发与兑换。"""
-
-    def issue(
-        self,
-        context: SystemContext,
-        *,
-        invitation_id: str,
-        token_hash: str,
-        issued_by: str,
-        invitee_principal_id: str,
-        issued_at: datetime,
-        expires_at: datetime,
-    ) -> Invitation:
-        """签发邀请。`token_hash` 是 `sha256(原始令牌)` —— 原始令牌不落库。"""
-        ...
-
-    def exchange(
-        self, token_hash: str, *, session_id: str, session_expires_at: datetime
-    ) -> UserSession | None:
-        """兑换邀请并创建会话 —— **原子且无身份参数**。
-
-        未知 / 已过期 / 已消费返回 `None`（同一种公开结果，不给探针留缝）。
-        返回的 `UserSession` 属于邀请**预绑定**的主体。
         """
         ...
 

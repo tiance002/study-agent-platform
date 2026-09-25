@@ -53,6 +53,7 @@ from psycopg import errors as pg_errors
 from app.core.artifacts import DisplayPolicy
 from app.core.clock import Clock, SystemClock
 from app.core.errors import ErrorCode, deny
+from app.db.product_store import register_source_in_conn
 from app.db.session import tenant_transaction, worker_transaction
 from app.identity.models import Principal
 from app.identity.ports import MembershipRepository
@@ -68,6 +69,7 @@ from app.knowledge.models import (
     assert_chunks_match_document,
 )
 from app.policy.taint import TaintSource
+from app.product.models import SourceRecord
 
 _DOCUMENT_COLUMNS = (
     "document_id, tenant_id, project_id, source_id, version, document_title,"
@@ -143,6 +145,21 @@ def _job_from_row(row: tuple) -> IngestionJob:
         created_at=row[12],
         updated_at=row[13],
     )
+
+
+def _live_job_row_in_conn(conn, project_id: str, source_id: str):
+    """该项目里这条资料**已有的、未失败**的摄取任务行（按最近优先，没有则 None）。
+
+    与 `library_routes._existing_ingestion_job_id` 同一口径（`list_jobs` 的
+    `created_at DESC, job_id DESC` 排序）：失败的任务不算 —— 重关联正是用户
+    表达"再试一次"的方式。
+    """
+    return conn.execute(
+        "SELECT " + _JOB_COLUMNS + " FROM ingestion_jobs"
+        " WHERE project_id = %s AND source_id = %s AND status <> 'failed'"
+        " ORDER BY created_at DESC, job_id DESC LIMIT 1",
+        (project_id, source_id),
+    ).fetchone()
 
 
 def _chunk_from_row(row: tuple) -> StoredChunk:
@@ -251,113 +268,184 @@ class PostgresIngestionRepository:
         )
         try:
             with tenant_transaction(tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn) as conn:
-                exists = conn.execute("SELECT 1 FROM sources WHERE source_id = %s", (source_id,)).fetchone()
-                if exists is None:
-                    # RLS 已按租户 + 项目过滤：查不到只剩"不属于本项目"一种解释。
-                    raise deny(
-                        ErrorCode.CROSS_TENANT_DENIED,
-                        "无权访问该项目",
-                        source_id=source_id,
-                    )
-                if acquisition_method == ACQUISITION_METHOD_WEB:
-                    # Serialize web version allocation for one source so two
-                    # workers cannot both miss the same fingerprint and insert
-                    # duplicate versions.
-                    conn.execute(
-                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                        (source_id,),
-                    )
-                    duplicate = conn.execute(
-                        "SELECT d.document_id, j.job_id"
-                        " FROM source_documents AS d"
-                        " JOIN ingestion_jobs AS j ON j.document_id = d.document_id"
-                        " WHERE d.source_id = %s AND d.content_hash = %s"
-                        " AND d.parser_version = %s"
-                        " AND d.acquisition_method = %s"
-                        " AND j.status <> 'failed'"
-                        " ORDER BY d.version DESC LIMIT 1",
-                        (source_id, document.content_hash, parser_version, acquisition_method),
-                    ).fetchone()
-                    if duplicate is not None:
-                        duplicate_document = conn.execute(
-                            "SELECT " + _DOCUMENT_COLUMNS + " FROM source_documents WHERE document_id = %s",
-                            (duplicate[0],),
-                        ).fetchone()
-                        duplicate_job = conn.execute(
-                            "SELECT " + _JOB_COLUMNS + " FROM ingestion_jobs WHERE job_id = %s",
-                            (duplicate[1],),
-                        ).fetchone()
-                        assert duplicate_document is not None and duplicate_job is not None
-                        stored_document = _document_from_row(duplicate_document)
-                        if stored_document.content != content:
-                            raise deny(
-                                ErrorCode.INTERNAL_CONSISTENCY_ERROR,
-                                "相同资料指纹对应了不同正文",
-                            )
-                        return stored_document, _job_from_row(duplicate_job)
-                version_row = conn.execute(
-                    "SELECT COALESCE(MAX(version), 0) FROM source_documents WHERE source_id = %s",
-                    (source_id,),
-                ).fetchone()
-                assert version_row is not None, "聚合查询必返回一行（COALESCE 保证非 NULL）"
-                document = _with_version(document, int(version_row[0]) + 1)
-                conn.execute(
-                    "INSERT INTO source_documents ("
-                    + _DOCUMENT_COLUMNS
-                    + ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
-                    " %s::jsonb, %s::jsonb, %s, %s, %s, %s)",
-                    (
-                        document.document_id,
-                        document.tenant_id,
-                        document.project_id,
-                        document.source_id,
-                        document.version,
-                        document.document_title,
-                        document.content,
-                        document.content_hash,
-                        document.media_type,
-                        document.language,
-                        document.parser_version,
-                        document.acquisition_method,
-                        _jsonb_list(document.taint_sources),
-                        _jsonb_list(document.derived_from),
-                        document.observed_at,
-                        document.fetch_attempt_id or None,
-                        document.source_content_type or None,
-                        document.raw_content_hash or None,
-                    ),
-                )
-                job = IngestionJob(
-                    job_id=job_id,
-                    tenant_id=actor.tenant_id,
-                    project_id=project_id,
-                    source_id=source_id,
-                    document_id=document_id,
-                    status=IngestionStatus.QUEUED,
-                    attempt_count=0,
-                    created_at=now,
-                    updated_at=now,
-                )
-                conn.execute(
-                    "INSERT INTO ingestion_jobs ("
-                    " job_id, tenant_id, project_id, source_id, document_id, status,"
-                    " attempt_count)"
-                    " VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    (
-                        job.job_id,
-                        job.tenant_id,
-                        job.project_id,
-                        job.source_id,
-                        job.document_id,
-                        str(job.status),
-                        job.attempt_count,
-                    ),
-                )
+                return self._enqueue_in_conn(conn, actor, document=document, job_id=job_id)
         except pg_errors.UniqueViolation as exc:
             raise deny(
                 ErrorCode.VERSION_CONFLICT,
                 "该资料的版本号被并发上传占用；请重新提交（将基于最新版本分配）",
             ) from exc
+
+    def enqueue_with_source(
+        self,
+        actor: Principal,
+        project_id: str,
+        *,
+        source_id: str,
+        display_name: str,
+        media_type: str,
+        identity_hash: str,
+        acquisition: dict,
+        document_id: str,
+        job_id: str,
+        title: str,
+        content: str,
+        document_media_type: str,
+        language: str,
+        acquisition_method: str = ACQUISITION_METHOD_UPLOAD,
+        parser_version: str = DOCUMENT_PARSER_VERSION,
+    ) -> tuple[SourceRecord, IngestionJob, bool]:
+        """在同一事务内登记/复用项目资料并入队摄取（见端口契约）。
+
+        `register_source_in_conn` 与 `_enqueue_in_conn` 共用一个
+        `tenant_transaction`：任何一个失败整段回滚，不会留下"有资料无任务"。
+        """
+        self.membership.get(actor, project_id)
+        try:
+            with tenant_transaction(tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn) as conn:
+                source = register_source_in_conn(
+                    conn,
+                    actor,
+                    project_id,
+                    source_id=source_id,
+                    display_name=display_name,
+                    media_type=media_type,
+                    identity_hash=identity_hash,
+                    acquisition=acquisition,
+                )
+                created = source.source_id == source_id
+                existing = _live_job_row_in_conn(conn, project_id, source.source_id)
+                if existing is not None:
+                    return source, _job_from_row(existing), created
+                document = SourceDocument(
+                    document_id=document_id,
+                    tenant_id=actor.tenant_id,
+                    project_id=project_id,
+                    source_id=source.source_id,
+                    version=1,  # 占位：真实版本在事务内分配
+                    document_title=title,
+                    content=content,
+                    media_type=document_media_type,
+                    language=language,
+                    observed_at=self._clock.now(),
+                    parser_version=parser_version,
+                    acquisition_method=acquisition_method,
+                    taint_sources=(TaintSource.UPLOADED_SOURCE,),
+                )
+                _, job = self._enqueue_in_conn(conn, actor, document=document, job_id=job_id)
+                return source, job, created
+        except pg_errors.UniqueViolation as exc:
+            raise deny(
+                ErrorCode.VERSION_CONFLICT,
+                "该资料的版本号被并发上传占用；请重新提交（将基于最新版本分配）",
+            ) from exc
+
+    def _enqueue_in_conn(
+        self, conn, actor: Principal, *, document: SourceDocument, job_id: str
+    ) -> tuple[SourceDocument, IngestionJob]:
+        """在调用方已有事务内写入原文与摄取任务。`document.version` 是占位值。"""
+        source_id = document.source_id
+        exists = conn.execute("SELECT 1 FROM sources WHERE source_id = %s", (source_id,)).fetchone()
+        if exists is None:
+            # RLS 已按租户 + 项目过滤：查不到只剩"不属于本项目"一种解释。
+            raise deny(
+                ErrorCode.CROSS_TENANT_DENIED,
+                "无权访问该项目",
+                source_id=source_id,
+            )
+        if document.acquisition_method == ACQUISITION_METHOD_WEB:
+            # Serialize web version allocation for one source so two
+            # workers cannot both miss the same fingerprint and insert
+            # duplicate versions.
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (source_id,),
+            )
+            duplicate = conn.execute(
+                "SELECT d.document_id, j.job_id"
+                " FROM source_documents AS d"
+                " JOIN ingestion_jobs AS j ON j.document_id = d.document_id"
+                " WHERE d.source_id = %s AND d.content_hash = %s"
+                " AND d.parser_version = %s"
+                " AND d.acquisition_method = %s"
+                " AND j.status <> 'failed'"
+                " ORDER BY d.version DESC LIMIT 1",
+                (source_id, document.content_hash, document.parser_version, document.acquisition_method),
+            ).fetchone()
+            if duplicate is not None:
+                duplicate_document = conn.execute(
+                    "SELECT " + _DOCUMENT_COLUMNS + " FROM source_documents WHERE document_id = %s",
+                    (duplicate[0],),
+                ).fetchone()
+                duplicate_job = conn.execute(
+                    "SELECT " + _JOB_COLUMNS + " FROM ingestion_jobs WHERE job_id = %s",
+                    (duplicate[1],),
+                ).fetchone()
+                assert duplicate_document is not None and duplicate_job is not None
+                stored_document = _document_from_row(duplicate_document)
+                if stored_document.content != document.content:
+                    raise deny(
+                        ErrorCode.INTERNAL_CONSISTENCY_ERROR,
+                        "相同资料指纹对应了不同正文",
+                    )
+                return stored_document, _job_from_row(duplicate_job)
+        version_row = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) FROM source_documents WHERE source_id = %s",
+            (source_id,),
+        ).fetchone()
+        assert version_row is not None, "聚合查询必返回一行（COALESCE 保证非 NULL）"
+        document = _with_version(document, int(version_row[0]) + 1)
+        conn.execute(
+            "INSERT INTO source_documents ("
+            + _DOCUMENT_COLUMNS
+            + ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
+            " %s::jsonb, %s::jsonb, %s, %s, %s, %s)",
+            (
+                document.document_id,
+                document.tenant_id,
+                document.project_id,
+                document.source_id,
+                document.version,
+                document.document_title,
+                document.content,
+                document.content_hash,
+                document.media_type,
+                document.language,
+                document.parser_version,
+                document.acquisition_method,
+                _jsonb_list(document.taint_sources),
+                _jsonb_list(document.derived_from),
+                document.observed_at,
+                document.fetch_attempt_id or None,
+                document.source_content_type or None,
+                document.raw_content_hash or None,
+            ),
+        )
+        job = IngestionJob(
+            job_id=job_id,
+            tenant_id=actor.tenant_id,
+            project_id=document.project_id,
+            source_id=document.source_id,
+            document_id=document.document_id,
+            status=IngestionStatus.QUEUED,
+            attempt_count=0,
+            created_at=document.observed_at,
+            updated_at=document.observed_at,
+        )
+        conn.execute(
+            "INSERT INTO ingestion_jobs ("
+            " job_id, tenant_id, project_id, source_id, document_id, status,"
+            " attempt_count)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (
+                job.job_id,
+                job.tenant_id,
+                job.project_id,
+                job.source_id,
+                job.document_id,
+                str(job.status),
+                job.attempt_count,
+            ),
+        )
         return document, job
 
     # ------------------------------------------------------------------ 读取

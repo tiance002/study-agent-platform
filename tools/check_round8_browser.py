@@ -53,6 +53,9 @@ def install_late_response_gate(page) -> None:
               this.responses = [];
               this.calls = [];
             },
+            addTarget(path) {
+              this.targets.add(path);
+            },
             async body(path) {
               const item = this.responses.find((entry) => entry.path === path);
               return item ? await item.body : null;
@@ -106,7 +109,6 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:8008")
     parser.add_argument("--artifacts", default="var/round8-browser")
-    parser.add_argument("--invite", default="round8-preview-invite")
     args = parser.parse_args()
     artifact_dir = Path(args.artifacts)
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -144,7 +146,7 @@ def main() -> int:
         )
         type_with_keyboard(keyboard_page, keyboard_page.get_by_label("用户名"), "r8key" + uuid.uuid4().hex[:7])
         keyboard_page.keyboard.press("Tab")
-        keyboard_page.keyboard.type("round8-keyboard-password")
+        keyboard_page.keyboard.type("r8-keyboard")
         keyboard_page.keyboard.press("Tab")
         keyboard_page.keyboard.press("Enter")
         expect(keyboard_page.locator(".project-create summary")).to_be_visible()
@@ -216,7 +218,7 @@ def main() -> int:
 
         page.get_by_role("tab", name="注册账号").click()
         page.get_by_label("用户名").fill("r8user" + uuid.uuid4().hex[:6])
-        page.get_by_label("密码").fill("round8-password-123")
+        page.get_by_label("密码").fill("r8-password")
         page.get_by_role("button", name="创建账号").click()
         expect(page.locator(".project-create summary")).to_be_visible()
         expect(page.locator(".project-form")).not_to_be_visible()
@@ -622,7 +624,7 @@ def main() -> int:
         second_page.goto(args.base_url, wait_until="networkidle")
         second_page.get_by_role("tab", name="注册账号").click()
         second_page.get_by_label("用户名").fill(second_user)
-        second_page.get_by_label("密码").fill("round8-scope-password")
+        second_page.get_by_label("密码").fill("r8-scope-pw")
         second_page.get_by_role("button", name="创建账号").click()
         expect(second_page.locator(".project-create summary")).to_be_visible()
         expect(second_page.locator(".project-form")).not_to_be_visible()
@@ -649,13 +651,27 @@ def main() -> int:
         )
         old_draft = "只属于旧用户的未提交草稿"
         page.get_by_label("输入问题").fill(old_draft)
+        # C1：知识库是用户级列表，旧账号先放一份库资料；换账号后它必须消失。
+        library_marker = "C1 库资料标记 " + uuid.uuid4().hex[:6]
+        page.get_by_label("条目名称").fill(library_marker)
+        page.get_by_label("粘贴文本（可选）").fill("只属于旧账号的库资料正文。")
+        page.get_by_role("button", name="添加到知识库", exact=True).click()
+        expect(page.get_by_text("库资料已添加", exact=True)).to_be_visible(timeout=15000)
+        expect(page.locator(".library-item").filter(has_text=library_marker)).to_be_visible()
         page.get_by_role("button", name="退出", exact=True).click()
         expect(page.get_by_label("用户名")).to_be_visible()
+        # 扣住新账号的 /library/sources：此刻列表为空必须来自"主动清理"，
+        # 而不是刷新结果 —— 旧代码不清理，旧账号的库资料会残留在此。
+        page.evaluate("(path) => window.__lateResponseGate.addTarget(path)", "/library/sources")
         page.get_by_role("tab", name="登录").click()
         page.get_by_label("用户名").fill(second_user)
-        page.get_by_label("密码").fill("round8-scope-password")
+        page.get_by_label("密码").fill("r8-scope-pw")
         page.get_by_role("button", name="登录").click()
         expect(page.locator(".identity")).to_have_text(second_principal)
+        # 切号瞬间：旧账号的库资料必须已经被主动清空（新账号的
+        # /library/sources 仍被 gate 扣住，说明"为空"不是刷新覆盖的结果）。
+        expect(page.locator(".library-item")).to_have_count(0)
+        expect(page.get_by_text(library_marker, exact=True)).to_have_count(0)
         open_project_form(page)
         page.get_by_label("项目名称").fill("C3 新用户项目")
         page.get_by_placeholder("项目目标（可选）").fill("验证账户切换后隔离旧响应")
@@ -666,6 +682,9 @@ def main() -> int:
         expect(page.get_by_label("输入问题")).to_be_visible()
         release_late_response(page, project_a_messages_path)
         release_late_response(page, project_a_run_path)
+        wait_for_late_response(page, "/library/sources")
+        release_late_response(page, "/library/sources")
+        expect(page.locator(".library-item")).to_have_count(0)
         expect(page.get_by_text(old_answer, exact=True)).to_have_count(0)
         expect(page.get_by_text(old_draft, exact=True)).to_have_count(0)
         expect(page.get_by_text("回答已准备好", exact=True)).to_have_count(0)

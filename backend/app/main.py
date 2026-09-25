@@ -102,7 +102,6 @@ def create_app(*, platform: PlatformState | None = None) -> FastAPI:
     async def _auth_body_guard(request: Request, call_next):
         """Read and cap unauthenticated JSON bodies before Pydantic parsing."""
         if request.method == "POST" and request.url.path in {
-            "/auth/invitations/exchange",
             "/auth/register",
             "/auth/login",
         }:
