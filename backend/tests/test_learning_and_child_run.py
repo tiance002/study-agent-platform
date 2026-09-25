@@ -191,6 +191,39 @@ def test_negative_evidence_does_not_raise_level():
 
 
 @pytest.mark.invariant
+def test_self_reported_none_evidence_never_raises_mastery():
+    """自报（Direction.NONE）不改变 mastery：多次自报也不抬升 confidence/level。
+
+    容易搞错的版本：NONE 仍计入证据计数与独立组，于是"随手写几条自报"
+    就能靠独立组数量把 confidence 抬到 MEDIUM/HIGH。
+    """
+    log = EvidenceLog()
+    projector = Projector()
+
+    # 三次同一任务的自报：各自独立的自报组（group 各不相同），内容是中性裁决。
+    first = append(log, [verdict(direction=Direction.NONE, group="self-1")])
+    after_first = projector.project(log, graph_version="g/v1")
+    component = after_first.component("llm.tool_calling")
+    assert component is not None, "组件仍可见（证据事实被保留）"
+    assert component.independence_level is IndependenceLevel.UNKNOWN
+    assert component.confidence is Confidence.INSUFFICIENT
+    assert component.evidence_count == 0
+    assert component.independence_groups == 0
+
+    append(log, [verdict(direction=Direction.NONE, group="self-2")])
+    append(log, [verdict(direction=Direction.NONE, group="self-3")])
+    after_more = projector.project(log, graph_version="g/v1")
+
+    # 自报不改变掌握结论：再多几条 NONE 也不抬升独立水平与置信度。
+    component_more = after_more.component("llm.tool_calling")
+    assert component_more == component
+    assert component_more.confidence is Confidence.INSUFFICIENT
+    assert component_more.independence_level is IndependenceLevel.UNKNOWN
+    # 事件本身仍在事实源里（可回放、可追溯），只是不产生掌握证据。
+    assert first.event_id in {e.event_id for e in log.events()}
+
+
+@pytest.mark.invariant
 def test_confidence_uses_four_discrete_levels():
     """01 号规格 §1：首版不输出概率数值，只给四档。"""
     log = EvidenceLog()
