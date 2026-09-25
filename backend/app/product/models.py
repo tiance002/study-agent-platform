@@ -267,6 +267,9 @@ class LearningTask:
     def to_dict(self) -> dict:
         return {
             "task_id": self.task_id,
+            # 任务所属里程碑：前端刷新读回后要按里程碑分组渲染，缺失该字段时
+            # 只能把任务堆在计划末尾（见 frontend/views.js 的分组回退）。
+            "milestone_id": self.milestone_id,
             "order_index": self.order_index,
             "title": self.title,
             "status": str(self.status),
