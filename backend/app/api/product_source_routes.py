@@ -26,7 +26,7 @@ from app.api.product_schemas import (
     SourceContentBody,
     SourceSearchBody,
 )
-from app.core.hashing import canonical_json
+from app.core.hashing import acquisition_identity_hash
 from app.core.ids import new_id
 from app.identity.models import Principal
 from app.knowledge.acquisition import AcquisitionRequest, SourceCandidate
@@ -49,9 +49,13 @@ def _actor(request: Request) -> Principal:
 
 def _identity_hash(acquisition: dict) -> str:
     """从获取方式派生稳定标识。**由服务端计算**：客户端声称的"同一资料"
-    不算数，规范化 JSON 的哈希才算——同一 acquisition 必得同一哈希。"""
-    digest = sha256(canonical_json(acquisition).encode("utf-8")).hexdigest()
-    return f"sha256:{digest}"
+    不算数，规范化 JSON 的哈希才算——同一 acquisition 必得同一哈希。
+
+    交给 `core.hashing.acquisition_identity_hash` 而不是就地算一遍：
+    用户级知识库用**同一个**函数去重，两处各算一次就会在规范化差异出现时
+    分叉 —— 那时"知识库里那份材料"与"项目里那份材料"会被当成两份。
+    """
+    return acquisition_identity_hash(acquisition)
 
 
 def _candidate_domain(url: str) -> str:
