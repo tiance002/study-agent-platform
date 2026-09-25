@@ -172,7 +172,7 @@ $env:STUDY_PLATFORM_REGISTRATION_ENABLED = "true"
 $env:STUDY_PLATFORM_PASSWORD_LOGIN_ENABLED = "true"
 ```
 
-用户名支持 1 到 16 个规范化 Unicode 字符。密码只通过 Argon2id 摘要保存；平台不要求邮箱，因此忘记密码时目前需要管理员处置。邀请码兑换保留为兼容入口，不是开放注册的必经步骤。
+用户名支持 1 到 16 个规范化 Unicode 字符。密码只通过 Argon2id 摘要保存，长度需为 6-12 个字符；平台不要求邮箱，因此忘记密码时目前需要管理员处置。注册与密码登录是唯一的认证入口。
 
 ### 6. 校验设计知识索引与契约
 
