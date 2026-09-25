@@ -3,15 +3,22 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#102A43" />
+    <meta name="theme-color" content="#070B1A" />
     <title>学习工作台</title>
+    <link rel="stylesheet" href="/assets/vendor/antd-reset.css" />
     <link rel="stylesheet" href="/assets/app.css" />
   </head>
   <body>
     <div id="root"></div>
+    <!-- 无构建步骤：全部依赖以同源脚本标签直接加载。
+         React/ReactDOM 提供全局 React 容器；dayjs 与 antd 是 antd UMD 的
+         运行期依赖，必须排在 antd 之前；业务脚本最后装配工作台。 -->
     <script src="/assets/vendor/react.production.min.js"></script>
     <script src="/assets/vendor/react-dom.production.min.js"></script>
+    <script src="/assets/vendor/dayjs.min.js"></script>
+    <script src="/assets/vendor/antd.min.js"></script>
     <script src="/assets/api-client.js"></script>
+    <script src="/assets/terms.js"></script>
     <script src="/assets/views.js"></script>
     <script src="/assets/commands.js"></script>
     <script src="/assets/project-state.js"></script>
