@@ -28,12 +28,12 @@
 
   // ===== 登录界面（独立构图）=====
 
-  const AUTH_MODES = () => [["invite", t.auth.modes.invite], ["login", t.auth.modes.login], ["register", t.auth.modes.register]];
+  const AUTH_MODES = () => [["login", t.auth.modes.login], ["register", t.auth.modes.register]];
 
-  function AuthScreen({ mode, setMode, token, setToken, credentials, setCredentials, onInvite, onPassword, busy, error }) {
+  function AuthScreen({ mode, setMode, credentials, setCredentials, onPassword, busy, error }) {
     const passwordTooShort = mode === "register"
       && Boolean(credentials.password)
-      && (credentials.password.length < 12 || credentials.password.length > 128);
+      && (credentials.password.length < 6 || credentials.password.length > 12);
     return h("main", { className: "auth-screen" },
       h("div", { className: "starfield", "aria-hidden": true }),
       h("section", { className: "auth-hero" },
@@ -52,52 +52,38 @@
             role: "tab",
             "aria-selected": mode === value,
             className: mode === value ? "active" : "",
-            onClick: () => { setCredentials({ username: "", password: "" }); setToken(""); setMode(value); },
+            onClick: () => { setCredentials({ username: "", password: "" }); setMode(value); },
           }, label))),
         error && h("div", { className: "alert alert-error", role: "alert" }, error),
-        mode === "invite"
-          ? h("form", { className: "auth-form", onSubmit: onInvite },
-            h("label", { htmlFor: "invite-token" }, t.auth.inviteLabel),
-            h(Input, {
-              id: "invite-token",
-              value: token,
-              size: "large",
-              autoComplete: "one-time-code",
-              placeholder: t.auth.invitePlaceholder,
-              disabled: busy,
-              onChange: (event) => setToken(event.target.value),
-            }),
-            h(Button, { type: "primary", htmlType: "submit", size: "large", block: true, className: "auth-submit", loading: busy, disabled: busy || !token.trim() },
-              busy ? t.auth.entering : t.auth.enter))
-          : h("form", { className: "auth-form", onSubmit: onPassword },
-            h("label", { htmlFor: "auth-username" }, t.auth.usernameLabel),
-            h(Input, {
-              id: "auth-username",
-              value: credentials.username,
-              size: "large",
-              autoComplete: "username",
-              maxLength: 16,
-              placeholder: t.auth.usernamePlaceholder,
-              disabled: busy,
-              onChange: (event) => setCredentials({ ...credentials, username: event.target.value }),
-            }),
-            h("label", { htmlFor: "auth-password" }, t.auth.passwordLabel),
-            h(Input, {
-              id: "auth-password",
-              type: "password",
-              value: credentials.password,
-              size: "large",
-              autoComplete: mode === "register" ? "new-password" : "current-password",
-              minLength: mode === "register" ? 12 : 1,
-              maxLength: 128,
-              placeholder: mode === "register" ? t.auth.passwordPlaceholderRegister : t.auth.passwordPlaceholder,
-              disabled: busy,
-              "aria-describedby": mode === "register" ? "password-hint" : undefined,
-              onChange: (event) => setCredentials({ ...credentials, password: event.target.value }),
-            }),
-            mode === "register" && h("p", { id: "password-hint", className: `field-hint ${passwordTooShort ? "field-error" : ""}` }, t.auth.passwordHint),
-            h(Button, { type: "primary", htmlType: "submit", size: "large", block: true, className: "auth-submit", loading: busy, disabled: busy || !credentials.username.trim() || !credentials.password },
-              busy ? t.auth.submitting : mode === "register" ? t.auth.createAccount : t.auth.login))));
+        h("form", { className: "auth-form", onSubmit: onPassword },
+          h("label", { htmlFor: "auth-username" }, t.auth.usernameLabel),
+          h(Input, {
+            id: "auth-username",
+            value: credentials.username,
+            size: "large",
+            autoComplete: "username",
+            maxLength: 16,
+            placeholder: t.auth.usernamePlaceholder,
+            disabled: busy,
+            onChange: (event) => setCredentials({ ...credentials, username: event.target.value }),
+          }),
+          h("label", { htmlFor: "auth-password" }, t.auth.passwordLabel),
+          h(Input, {
+            id: "auth-password",
+            type: "password",
+            value: credentials.password,
+            size: "large",
+            autoComplete: mode === "register" ? "new-password" : "current-password",
+            minLength: mode === "register" ? 6 : 1,
+            maxLength: 12,
+            placeholder: mode === "register" ? t.auth.passwordPlaceholderRegister : t.auth.passwordPlaceholder,
+            disabled: busy,
+            "aria-describedby": mode === "register" ? "password-hint" : undefined,
+            onChange: (event) => setCredentials({ ...credentials, password: event.target.value }),
+          }),
+          mode === "register" && h("p", { id: "password-hint", className: `field-hint ${passwordTooShort ? "field-error" : ""}` }, t.auth.passwordHint),
+          h(Button, { type: "primary", htmlType: "submit", size: "large", block: true, className: "auth-submit", loading: busy, disabled: busy || !credentials.username.trim() || !credentials.password },
+            busy ? t.auth.submitting : mode === "register" ? t.auth.createAccount : t.auth.login))));
   }
 
   // ===== 左栏：项目 =====

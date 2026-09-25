@@ -73,9 +73,7 @@
 
   function App() {
     const [user, setUser] = useState(null);
-    const [authToken, setAuthToken] = useState("");
-    // Open-registration deployments should lead with the account workflow;
-    // invitation exchange remains available as a compatibility tab.
+    // 唯一认证方式是账号密码；认证界面在「登录」「注册」间切换。
     const [authMode, setAuthMode] = useState("login");
     const [authCredentials, setAuthCredentials] = useState({ username: "", password: "" });
     const [authBusy, setAuthBusy] = useState(true);
@@ -330,24 +328,6 @@
       }
       return () => controller.abort();
     }, [projectId, conversationId, principalId, user]);
-
-    async function exchangeInvite(event) {
-      event.preventDefault();
-      if (!authToken.trim()) return;
-      setAuthBusy(true);
-      setError("");
-      try {
-        await api("POST", "/auth/invitations/exchange", { token: authToken.trim() }, { idempotent: false });
-        const me = await api("GET", "/me");
-        setUser(me);
-        setAuthToken("");
-        await refreshProjects(me.principal_id);
-      } catch (caught) {
-        setError(errorText(caught));
-      } finally {
-        setAuthBusy(false);
-      }
-    }
 
     async function passwordAuth(event) {
       event.preventDefault();
@@ -950,11 +930,8 @@
     if (!user) return withTheme(h(AuthScreen, {
       mode: authMode,
       setMode: setAuthMode,
-      token: authToken,
-      setToken: setAuthToken,
       credentials: authCredentials,
       setCredentials: setAuthCredentials,
-      onInvite: exchangeInvite,
       onPassword: passwordAuth,
       busy: authBusy,
       error,
