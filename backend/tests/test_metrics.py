@@ -234,13 +234,26 @@ def test_provider_family_metric_label_is_openai_only_for_known_adapter() -> None
     assert _provider_family_label(object()) == "unknown"
 
 
-def test_metrics_migration_uses_closed_facts_and_restricted_aggregate_function() -> None:
-    migration = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "0018_acquisition_metrics.py"
-    assert migration.is_file(), "metrics migration is not implemented yet"
+def test_baseline_migration_carries_closed_metrics_facts() -> None:
+    """新基线（0001）必须自带闭集事实表、受限聚合函数与检索决策约束。
+
+    这些性质原先分散在 0018/0019 两条迁移上（各自的源码扫描用例）；
+    压成单条基线后合到一处，并把"快照函数只有一版（0019 形态）"、
+    "基线不含任何邀请码对象"作为回归锁。
+    """
+    migration = (
+        Path(__file__).resolve().parents[2]
+        / "alembic"
+        / "versions"
+        / "0001_initial_schema.py"
+    )
+    assert migration.is_file(), "baseline migration is not implemented"
     sql = migration.read_text(encoding="utf-8").lower()
 
-    assert 'revision = "0018"' in sql
-    assert 'down_revision = "0017"' in sql
+    assert 'revision = "0001"' in sql
+    assert "down_revision = none" in sql
+
+    # ---- 抓取指标事实表与受限聚合函数（原 0018） ------------------------
     assert "acquisition_fetch_observations" in sql
     assert "unique (tenant_id, project_id, acquisition_id, attempt_number)" in sql
     assert "force row level security" in sql
@@ -252,20 +265,7 @@ def test_metrics_migration_uses_closed_facts_and_restricted_aggregate_function()
     assert "grant execute on function public.study_metrics_snapshot() to study_app" in sql
     assert "grant select on acquisition_fetch_observations to study_app" not in sql
 
-
-def test_retrieval_decision_migration_is_closed_self_contained_and_guarded() -> None:
-    """0019：闭集 CHECK、自包含的两版函数体、有数据时拒绝降级。"""
-    migration = (
-        Path(__file__).resolve().parents[2]
-        / "alembic"
-        / "versions"
-        / "0019_retrieval_decision_metrics.py"
-    )
-    assert migration.is_file(), "retrieval decision migration is not implemented yet"
-    sql = migration.read_text(encoding="utf-8").lower()
-
-    assert 'revision = "0019"' in sql
-    assert 'down_revision = "0018"' in sql
+    # ---- 检索决策闭集 CHECK（原 0019） ----------------------------------
     # 列 + 闭集 CHECK：模式三元、降级原因三闭集、非降级原因必须为空串。
     assert "add column retrieval_decision jsonb" in sql
     # 字段类型约束：null / 数值型字段在 `->>` 比较下会静默通过，必须显式 typeof。
@@ -274,16 +274,17 @@ def test_retrieval_decision_migration_is_closed_self_contained_and_guarded() -> 
     assert "retrieval_decision->>'mode' in ('keyword', 'hybrid', 'degraded')" in sql
     assert "'embedding_model_version_mismatch'" in sql
     assert "retrieval_decision->>'ranking_version' <> ''" in sql
-    # 降级守卫：有存证就不许降级。
-    assert "cannot downgrade after retrieval decisions were recorded" in sql
-    # 两版函数体都由本迁移生成（自包含原则：不 import 0018 的模块）：
-    # 模板只写一份，upgrade/downgrade 各调一次不同旗标。
-    assert "_metrics_function_sql(*, with_retrieval: bool)" in sql
+
+    # ---- 快照函数只保留 0019 版（压扁后不再有 0018 双函数体模板） -------
     assert "create or replace function public.study_metrics_snapshot()" in sql
-    assert "_metrics_function_sql(with_retrieval=true)" in sql
-    # 降级必须恢复 0018 版函数体（否则 /metrics 引用被删列直接 500）。
-    assert "_metrics_function_sql(with_retrieval=false)" in sql
     assert "'retrieval_decisions'" in sql
+    assert "_metrics_function_sql" not in sql
+
+    # ---- 基线不得含任何邀请码对象（新基线的不变量） ---------------------
+    assert "invitations" not in sql
+    assert "exchange_invitation" not in sql
+    assert "invitee_principal_id" not in sql
+    assert "auth_method = 'invitation'" not in sql
 
 
 def _run_alembic(dsn: str, *arguments: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -297,38 +298,6 @@ def _run_alembic(dsn: str, *arguments: str, check: bool = True) -> subprocess.Co
     if check and result.returncode != 0:
         raise AssertionError((result.stdout or "") + (result.stderr or ""))
     return result
-
-
-@PG_ONLY
-def test_retrieval_decision_migration_round_trips_and_restores_0018_function() -> None:
-    """0019 往返：升级版 snapshot 带 retrieval_decisions；降级后 0018 函数体仍可用。
-
-    这是对 `_metrics_function_sql` 两版拼接 SQL 的真实语法验证 ——
-    升级路径已由测试库夹具隐式覆盖，这里补的是**降级恢复**路径。
-    """
-    with pg_support.temp_test_database() as database:
-        dsn = database.migration_dsn
-        with psycopg.connect(dsn) as conn:
-            upgraded = conn.execute(
-                "SELECT public.study_metrics_snapshot()"
-            ).fetchone()[0]
-        assert "retrieval_decisions" in upgraded
-        assert upgraded["retrieval_decisions"] == []
-
-        _run_alembic(dsn, "downgrade", "0018")
-        with psycopg.connect(dsn) as conn:
-            downgraded = conn.execute(
-                "SELECT public.study_metrics_snapshot()"
-            ).fetchone()[0]
-        assert "retrieval_decisions" not in downgraded
-        assert "route_decisions" in downgraded  # 0018 版函数体完整可用
-
-        _run_alembic(dsn, "upgrade", "head")
-        with psycopg.connect(dsn) as conn:
-            restored = conn.execute(
-                "SELECT public.study_metrics_snapshot()"
-            ).fetchone()[0]
-        assert restored["retrieval_decisions"] == []
 
 
 def _seed_teaching_run(dsn: str, suffix: str, retrieval_decision) -> None:
@@ -387,11 +356,12 @@ _VALID_DECISION = {
 
 
 @PG_ONLY
-def test_retrieval_decision_check_rejects_malformed_json_and_guards_downgrade() -> None:
-    """CHECK 必须拒绝字段类型错误的 JSON；有存证时降级必须失败；应用角色可读快照。
+def test_retrieval_decision_check_rejects_malformed_json_and_guards_baseline_downgrade() -> None:
+    """CHECK 必须拒绝字段类型错误的 JSON；有存证时基线降级必须失败；应用角色可读快照。
 
     `->>'x' = '...'` 对 JSON null / 数值会得到 NULL（CHECK 视为通过），
     所以 typeof 约束不是冗余 —— 这条测试就是它的反例锁。
+    压扁后"降级到 0018"已不存在，改验**基线自身的降级护栏**：库里有业务行就不许清库。
     """
     from psycopg import errors as pg_errors
 
@@ -413,12 +383,10 @@ def test_retrieval_decision_check_rejects_malformed_json_and_guards_downgrade() 
             with pytest.raises(pg_errors.CheckViolation):
                 _seed_teaching_run(dsn, f"bad{index}", malformed)
 
-        # 有存证时降级必须拒绝（先清掉合法行再降级才能成功 —— 这里只验证拒绝）。
-        result = _run_alembic(dsn, "downgrade", "0018", check=False)
+        # 库里已有业务行时，基线降级必须拒绝（不是静默清掉用户数据）。
+        result = _run_alembic(dsn, "downgrade", "base", check=False)
         assert result.returncode != 0
-        assert "cannot downgrade after retrieval decisions were recorded" in (
-            result.stdout + result.stderr
-        )
+        assert "cannot downgrade the baseline" in (result.stdout + result.stderr)
 
         # 应用角色（study_app）能执行快照函数并看到聚合行 —— 无需表级 SELECT。
         with psycopg.connect(database.app_dsn) as conn:

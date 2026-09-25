@@ -5,8 +5,8 @@
 1. **FORCE RLS 真的在生效**：`study_app` 在无上下文 / 错主体上下文下
    读 `library_sources` 得到 **0 行**（不是"读到别人的"，也不是报错）；
 2. **append-only 由 GRANT 保证**：应用角色对这两张表没有 `UPDATE`；
-3. **迁移往返**：`0021` 在随机临时库上 `downgrade → upgrade` 往返，
-   表与策略都真的消失又回来。
+3. **迁移往返**：新基线（`0001`）在随机临时库上 `downgrade base → upgrade head`
+   往返，表与策略都真的消失又回来。
 
 外加一条端到端：注册用户 → 登记知识库 → 关联到默认项目 → worker 摄取 →
 既有检索命中。用真实 cookie 会话与真实 PG 适配器，不绕过认证。
@@ -288,8 +288,12 @@ def _run_alembic(dsn: str, *arguments: str) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_0021_migration_cycle_is_reversible(pg_database):
-    """`0021` 在随机临时库上往返：表与策略真的消失又回来。"""
+def test_baseline_migration_cycle_is_reversible(pg_database):
+    """新基线（0001）在随机临时库上往返：表与策略真的消失又回来。
+
+    压扁后"降级到 0019"已不存在；基线自身在**无数据**时允许清空、
+    有数据时拒绝（护栏由 test_metrics 覆盖）。
+    """
     database = pg_support.create_test_database()
     try:
         with psycopg.connect(database.migration_dsn) as conn:
@@ -297,15 +301,20 @@ def test_0021_migration_cycle_is_reversible(pg_database):
                 "SELECT count(*) FROM information_schema.tables"
                 " WHERE table_name IN ('library_sources', 'library_documents')"
             ).fetchone()[0] == 2
+            assert conn.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0] == "0001"
 
-        _run_alembic(database.migration_dsn, "downgrade", "0019")
+        _run_alembic(database.migration_dsn, "downgrade", "base")
         with psycopg.connect(database.migration_dsn) as conn:
             assert conn.execute(
                 "SELECT count(*) FROM information_schema.tables"
                 " WHERE table_name IN ('library_sources', 'library_documents')"
             ).fetchone()[0] == 0
-            version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert version == "0019"
+            assert conn.execute(
+                "SELECT count(*) FROM information_schema.tables"
+                " WHERE table_schema = 'public' AND table_name <> 'alembic_version'"
+            ).fetchone()[0] == 0
 
         _run_alembic(database.migration_dsn, "upgrade", "head")
         with psycopg.connect(database.migration_dsn) as conn:
@@ -318,6 +327,8 @@ def test_0021_migration_cycle_is_reversible(pg_database):
                 ("library_documents", True, True),
                 ("library_sources", True, True),
             ]
-            assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0021"
+            assert conn.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0] == "0001"
     finally:
         pg_support.drop_test_database(database)
