@@ -1,31 +1,30 @@
 """认证审计的可靠中转（transactional outbox）。
 
-## 为什么需要它（审查 P1：审计失败时兑换已提交）
+## 为什么需要它（审查 P1：审计失败时业务已提交）
 
-邀请兑换的事务顺序曾是：`exchange()` 提交（消费邀请 + 建会话）→ **之后**
-才写高风险审计。审计 sink 不可用时接口返回 503，但邀请已经消费、
-会话已经创建 —— 所谓 fail-closed 实际只是响应失败，业务动作并未拒绝，
-重试也无法恢复（邀请已失效）。
+注册/登录的事务顺序曾是：`register()/complete_login()` 提交（建账号/建会话）
+→ **之后**才写高风险审计。审计 sink 不可用时接口返回 503，但会话已经创建
+—— 所谓 fail-closed 实际只是响应失败，业务动作并未拒绝。
 
 修法（transactional outbox 模式）：
 
-1. 兑换成功路径的审计事件由**仓储在业务同一事务内**写入 `auth_audit_outbox`
+1. 认证成功路径的审计事件由**仓储在业务同一事务内**写入 `auth_audit_outbox`
    （0006 迁移）—— 业务提交 = 审计事实落库，两者要么都发生要么都不发生；
 2. 投影（把 outbox 事件追加进链式 sink）在事务提交**之后**进行；
    投影失败**不回滚业务** —— 事实已可靠留存，行保持 `projected_at IS NULL`
-   可观测，待下次兑换请求或 sink 恢复后补投影。
+   可观测，待下次请求或 sink 恢复后补投影。
 
 > **名词：transactional outbox** —— 一句话定义：把"要发的消息"和"业务数据"
 > 写进同一个数据库事务，再由后台异步投递。生活类比：挂号信不是邮递员
 > 站在你家门口现写的 —— 你先把信投进邮筒（和办理业务同一个动作），
 > 邮递员随后分拣投递；邮筒丢了信才算丢，投递晚点不算。
-> 例子：兑换事务里同时写 `user_sessions` 和 `auth_audit_outbox` 两张表；
+> 例子：注册事务里同时写 `user_sessions` 和 `auth_audit_outbox` 两张表；
 > 就算链式审计文件此刻写不进去，事件也已经在库里，绝不丢。
 
 ## 与链式 sink 的关系
 
 链式 `AuditSink`（哈希链 JSONL）仍是审计的**展示与校验**载体；
-本 outbox 是兑换路径审计事实的**可靠落点**。投影是 at-least-once：
+本 outbox 是认证路径审计事实的**可靠落点**。投影是 at-least-once：
 极端情况下（append 成功后、标记 projected 前崩溃）同一事件可能被
 投影两次，链上出现重复条目 —— 这是"丢事实"与"重复事实"之间
 刻意选择的后者（审计宁重勿缺）。
@@ -81,7 +80,7 @@ class TransactionalAuditOutbox(AuditOutbox, Protocol):
 class InMemoryAuditOutbox:
     """内存实现（开发适配器）。
 
-    `stage()` 在兑换的临界区内调用（与消费邀请、建会话同锁），
+    `stage()` 在注册/登录的临界区内调用（与建账号、建会话同锁），
     语义对齐 PG 版的"同一事务"。
     """
 
@@ -100,7 +99,7 @@ class InMemoryAuditOutbox:
         project_id: str | None = None,
         request_id: str | None = None,
     ) -> None:
-        """登记一条审计事实。在兑换业务临界区内调用，绝不失败。"""
+        """登记一条审计事实。在注册/登录业务临界区内调用，绝不失败。"""
         event = OutboxEvent(
             event_id=new_id("aud"),
             event_type=event_type,
@@ -121,7 +120,7 @@ class InMemoryAuditOutbox:
         """把待投影事件依次追加进链式 sink，返回成功投影条数。
 
         sink 不可用时**停止投影并保留剩余事件**（事实不丢，行仍可观测），
-        不向上抛 —— 调用方（兑换端点）的业务已经成功，投影是尽力而为。
+        不向上抛 —— 调用方（认证端点）的业务已经成功，投影是尽力而为。
         """
         projected = 0
         with self._lock:

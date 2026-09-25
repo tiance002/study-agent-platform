@@ -237,7 +237,7 @@ def test_url_material_attach_enqueues_a_fetch_instead_of_ingestion(client, platf
     assert attached.status_code == 200, attached.text
     assert attached.json()["ingestion_job_id"] is None, "下载完成前没有摄取任务"
 
-    principal = Principal(principal_id="user_demo", tenant_id="tenant_demo")
+    principal = Principal(principal_id=demo["principal"], tenant_id=demo["tenant"])
     candidates = platform.acquisition.list_candidates(principal, project_id)
     assert [c.url for c in candidates] == [url]
     assert str(candidates[0].status) == "selected"

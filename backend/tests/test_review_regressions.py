@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import sys
 import uuid
 
 import pytest
@@ -23,20 +24,19 @@ from app.learning.evidence import (
     ObservationStrength,
     Validity,
 )
-from app.main import build_platform, create_app
+from app.main import build_platform
 from app.policy.taint import TaintSource
 from app.tenancy.context import TenantContext, tenant_scope
-from fastapi.testclient import TestClient
 
-TENANT = "tenant_demo"
 PROJECT = "proj_demo"
 MONEY = str(Dimension.CURRENCY_MICROS)
 TOOL_CALLS = str(Dimension.TOOL_CALLS)
 
 
-@pytest.fixture
-def client(tmp_path):
-    return TestClient(create_app(platform=build_platform(var_dir=tmp_path)))
+@pytest.fixture(autouse=True)
+def _registered_project(monkeypatch, demo):
+    """认证身份是真实注册得到的：把 PROJECT 换成该账号的默认项目。"""
+    monkeypatch.setattr(sys.modules[__name__], "PROJECT", demo["project"])
 
 
 # ------------------------------------- 1. 身份不再由请求体承载（比上一轮更彻底）

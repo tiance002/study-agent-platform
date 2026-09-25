@@ -28,10 +28,10 @@ LIBRARY_TEXT = (
     "事务把一组读写绑定成一个原子单元。隔离级别决定并发事务互相看得到什么，"
     "而可重复读与读已提交的差异只在并发写冲突时才显现。"
 )
-# 12 个字符：同时满足旧的 6-12 与并行轨道改成的最短 12 位。
+# 12 个字符：落在 6-12 的单一密码策略内。
 # 值里带 dev-only 标记：这是浏览器夹具的本地占位凭据，不是真实密钥
 # （项目秘密扫描要求占位值显式标注，见 tools/security/scan_secrets.py）。
-PASSWORD = "library-pass-dev-only"
+PASSWORD = "lib-dev-only"
 
 
 def main() -> int:

@@ -10,6 +10,7 @@ from app.core.hashing import content_hash
 from app.teaching.provider import ScriptedProvider
 from app.workers.teaching import run_once
 from test_teaching_api import (
+    _actor_of,
     _create_run,
     _seed_material,
     _unique,
@@ -28,7 +29,7 @@ def finished_run(platform, client, cookie_project):
         headers={"Origin": "http://testserver", "Idempotency-Key": _unique("idem")},
     )
     conversation_id = conversation.json()["conversation_id"]
-    chunk = _seed_material(platform, project_id)
+    chunk = _seed_material(platform, project_id, _actor_of(client_))
     citation = {
         "source_id": chunk.source_id,
         "document_id": chunk.document_id,

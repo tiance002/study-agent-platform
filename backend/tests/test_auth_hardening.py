@@ -5,134 +5,114 @@
 - 严格 CSRF：无 Origin 的不安全 cookie 请求必须拒绝；Referer 回退；
   可信 Origin 白名单；反代转发头只有显式声明才采信；
 - Bearer 通道可整体关闭；
-- 邀请兑换限流（429 + Retry-After）；
+- 注册/登录限流（429 + Retry-After）；
 - 认证关键事件全部进入审计事实源；
 - cookie 签名密钥轮换（旧 cookie 在轮换窗口内仍可用）；
 - 会话集中失效（logout/all）；
 - 过期 cookie 声明拒绝；
-- 内存兑换原子性（建会话失败回滚消费标记）与并发单次消费；
-- 会话 TTL 硬上限；
 - 部署配置 fail-fast 聚合。
 
 PostgreSQL 侧（TTL 约束、definer 限流函数、重启恢复、启动自检）见
 `test_auth_hardening_postgres.py`。
+
+所有身份一律通过**真实注册 / 登录**取得（`register_user` / `primary_account`
+夹具），不再有仓储直发会话或自签 Bearer 的旁路。
 """
 
 from __future__ import annotations
 
-import threading
 import uuid
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
 
 import pytest
 from app.core.clock import FixedClock
 from app.core.errors import ErrorCode, PlatformError
 from app.deployment import DeploymentSettings
 from app.identity.cookie_auth import SESSION_COOKIE_NAME, CookieAuth
-from app.identity.memory_store import (
-    InMemoryInvitationRepository,
-    InMemorySessionRepository,
-)
+from app.identity.memory_store import InMemorySessionRepository
 from app.identity.models import Principal
-from app.identity.ports import SystemContext
-from app.main import DEMO_PRINCIPAL, DEMO_TENANT, build_platform, create_app
+from app.main import build_platform, create_app
 from app.product.models import UserSession
 from fastapi.testclient import TestClient
 
 SAME_ORIGIN = "http://testserver"
-
-
-def _hash(raw: str) -> str:
-    return f"sha256:{sha256(raw.encode()).hexdigest()}"
-
-
-def _issue(platform, token: str) -> None:
-    now = platform.clock.now()
-    platform.invitations.issue(
-        SystemContext(DEMO_TENANT, "测试邀请"),
-        invitation_id="inv_" + uuid.uuid4().hex,
-        token_hash=_hash(token),
-        issued_by=DEMO_PRINCIPAL,
-        invitee_principal_id=DEMO_PRINCIPAL,
-        issued_at=now,
-        expires_at=now + timedelta(days=1),
-    )
+REGISTER_LIMIT = 5
 
 
 def _client(platform) -> TestClient:
     return TestClient(create_app(platform=platform))
 
 
-@pytest.fixture
-def ready(platform):
-    """带一条有效邀请的平台。"""
-    _issue(platform, "token-live")
-    return platform
+def _register_attempt(platform, *, xff: str | None = None):
+    """一个全新客户端发起一次注册尝试（唯一用户名，避免撞已存在的账号）。
+
+    每次用**新客户端**是为了绕开 `already_authenticated`：同一个 cookie jar
+    已有会话时注册会被 409 拒掉，测不到限流。TCP 对端都是 "testclient"，
+    因此除非可信代理配置命中，限流桶仍是同一个。
+    """
+    headers = {"Origin": SAME_ORIGIN}
+    if xff is not None:
+        headers["X-Forwarded-For"] = xff
+    return _client(platform).post(
+        "/auth/register",
+        json={"username": "u" + uuid.uuid4().hex[:10], "password": "test-pass-1"},
+        headers=headers,
+    )
 
 
 # --------------------------------------------------------------- 严格 CSRF
 
 
 @pytest.mark.invariant
-def test_unsafe_cookie_request_without_origin_is_denied(ready):
+def test_unsafe_cookie_request_without_origin_is_denied(platform, register_user):
     """审查实测：无 Origin 的 /auth/logout 曾返回 200 —— 必须转成拒绝。"""
-    client = _client(ready)
-    assert client.post("/auth/invitations/exchange", json={"token": "token-live"}).status_code == 200
-
-    denied = client.post("/auth/logout")
+    _, account = register_user()
+    denied = _client(platform).post("/auth/logout", headers={"Cookie": account.headers["Cookie"]})
     assert denied.status_code == 403
     assert denied.json()["code"] == "CSRF_DENIED"
 
 
 @pytest.mark.invariant
-def test_referer_fallback_same_origin_accepted_cross_origin_denied(ready):
+def test_referer_fallback_same_origin_accepted_cross_origin_denied(platform, register_user):
     """没有 Origin 时，同源 Referer 可接受；跨源 Referer 拒绝。"""
-    client = _client(ready)
-    client.post("/auth/invitations/exchange", json={"token": "token-live"})
-
-    ok = client.post("/auth/logout", headers={"Referer": f"{SAME_ORIGIN}/some/page"})
+    _, first = register_user()
+    cookie = {"Cookie": first.headers["Cookie"]}
+    ok = _client(platform).post("/auth/logout", headers={**cookie, "Referer": f"{SAME_ORIGIN}/some/page"})
     assert ok.status_code == 200
 
-    # 第二个会话用于恶意 Referer 探测（上个会话已退出）。
-    _issue(ready, "token-two")
-    client.post("/auth/invitations/exchange", json={"token": "token-two"})
-    evil = client.post(
+    _, second = register_user()
+    evil = _client(platform).post(
         "/auth/logout",
-        headers={"Referer": "https://evil.example/phishing"},
+        headers={"Cookie": second.headers["Cookie"], "Referer": "https://evil.example/phishing"},
     )
     assert evil.status_code == 403
     assert evil.json()["code"] == "CSRF_DENIED"
 
 
 @pytest.mark.invariant
-def test_trusted_origin_allowlist_accepted(tmp_path):
+def test_trusted_origin_allowlist_accepted(tmp_path, register_user):
     """配置的外部 Origin（反代后的外部域名）必须命中白名单。"""
     settings = DeploymentSettings.load({"STUDY_PLATFORM_TRUSTED_ORIGINS": "https://app.example.com"})
     platform = build_platform(var_dir=tmp_path, settings=settings)
-    _issue(platform, "token-x")
-    client = _client(platform)
-    client.post("/auth/invitations/exchange", json={"token": "token-x"})
-
-    ok = client.post(
+    _, account = register_user(on=platform)
+    ok = _client(platform).post(
         "/auth/logout",
-        headers={"Origin": "https://app.example.com"},
+        headers={"Cookie": account.headers["Cookie"], "Origin": "https://app.example.com"},
     )
     assert ok.status_code == 200
 
 
 @pytest.mark.invariant
-def test_forwarded_headers_ignored_unless_behind_proxy(tmp_path):
+def test_forwarded_headers_ignored_unless_behind_proxy(tmp_path, register_user):
     """未声明反代时，X-Forwarded-* 不得参与 Origin 计算（客户端可伪造）。"""
     # 默认配置（behind_proxy=False）：Host 仍是 testserver，
     # 攻击者用转发头把自己伪装成同源，必须不认。
     platform = build_platform(var_dir=tmp_path)
-    _issue(platform, "token-fwd")
-    client = _client(platform)
-    client.post("/auth/invitations/exchange", json={"token": "token-fwd"})
-    evil = client.post(
+    _, account = register_user(on=platform)
+    evil = _client(platform).post(
         "/auth/logout",
         headers={
+            "Cookie": account.headers["Cookie"],
             "Host": "testserver",
             "X-Forwarded-Host": "evil.example",
             "X-Forwarded-Proto": "https",
@@ -142,8 +122,6 @@ def test_forwarded_headers_ignored_unless_behind_proxy(tmp_path):
     assert evil.status_code == 403
 
     # 显式声明反代 + 可信代理链后，转发头参与计算，外部来源被接受。
-    # （审查修复：behind_proxy=1 必须配置 STUDY_PLATFORM_TRUSTED_PROXIES，
-    # 且只有请求确实来自可信代理时转发头才被采信。）
     settings = DeploymentSettings.load(
         {
             "STUDY_PLATFORM_BEHIND_PROXY": "1",
@@ -152,12 +130,11 @@ def test_forwarded_headers_ignored_unless_behind_proxy(tmp_path):
         }
     )
     platform2 = build_platform(var_dir=tmp_path / "p2", settings=settings)
-    _issue(platform2, "token-fwd2")
-    client2 = _client(platform2)
-    client2.post("/auth/invitations/exchange", json={"token": "token-fwd2"})
-    ok = client2.post(
+    _, account2 = register_user(on=platform2)
+    ok = _client(platform2).post(
         "/auth/logout",
         headers={
+            "Cookie": account2.headers["Cookie"],
             "X-Forwarded-Host": "external.example",
             "X-Forwarded-Proto": "https",
             "Origin": "https://external.example",
@@ -181,31 +158,24 @@ def test_xff_rotation_cannot_reset_rate_limit_bucket(tmp_path):
     """审查 P1 回归实测复现：轮换 X-Forwarded-For 首值不得重置限流桶。
 
     请求不来自可信代理（TestClient 对端 "testclient" 不在清单里）时，
-    XFF 完全不采信 —— 早先取 XFF 首值，攻击者换一个值就得一个新的
-    限流桶，429 后立即恢复 401。
+    XFF 完全不采信 —— 否则攻击者换一个值就得一个新的限流桶。
     """
     settings = DeploymentSettings.load(
         {
-            "STUDY_PLATFORM_EXCHANGE_LIMIT": "2",
             "STUDY_PLATFORM_BEHIND_PROXY": "1",
             # 可信代理只配了一个内网地址 —— testclient 不在其中。
             "STUDY_PLATFORM_TRUSTED_PROXIES": "10.9.9.9",
         }
     )
     platform = build_platform(var_dir=tmp_path, settings=settings)
-    client = _client(platform)
 
-    statuses = []
-    for i, xff in enumerate(["1.2.3.4", "5.6.7.8", "9.9.9.9"]):
-        statuses.append(
-            client.post(
-                "/auth/invitations/exchange",
-                json={"token": f"tok-{i}"},
-                headers={"X-Forwarded-For": xff},
-            ).status_code
-        )
-    # 三次请求同属一个桶（对端不可信 → 键恒为 TCP 对端）：第 3 次 429。
-    assert statuses == [401, 401, 429], f"轮换 XFF 不得重置限流桶：{statuses}"
+    statuses = [
+        _register_attempt(platform, xff=xff).status_code
+        for xff in ["1.2.3.4", "5.6.7.8", "9.9.9.9", "4.3.2.1", "8.7.6.5", "1.1.1.1"]
+    ]
+    # 六次请求同属一个桶（对端不可信 → 键恒为 TCP 对端）：第 6 次 429。
+    assert statuses[:REGISTER_LIMIT] == [201] * REGISTER_LIMIT, statuses
+    assert statuses[REGISTER_LIMIT] == 429, f"轮换 XFF 不得重置限流桶：{statuses}"
 
 
 @pytest.mark.invariant
@@ -213,43 +183,30 @@ def test_xff_is_honored_from_trusted_proxy(tmp_path):
     """可信代理转发的 XFF 参与限流：不同客户端 IP 各自计数。"""
     settings = DeploymentSettings.load(
         {
-            "STUDY_PLATFORM_EXCHANGE_LIMIT": "1",
             "STUDY_PLATFORM_BEHIND_PROXY": "1",
             "STUDY_PLATFORM_TRUSTED_PROXIES": "testclient",
         }
     )
     platform = build_platform(var_dir=tmp_path, settings=settings)
-    client = _client(platform)
 
     # 经可信代理转发的两个不同客户端：各自一个桶，互不影响。
-    first = client.post(
-        "/auth/invitations/exchange",
-        json={"token": "a"},
-        headers={"X-Forwarded-For": "203.0.113.7"},
-    )
-    second = client.post(
-        "/auth/invitations/exchange",
-        json={"token": "b"},
-        headers={"X-Forwarded-For": "203.0.113.8"},
-    )
-    assert (first.status_code, second.status_code) == (401, 401)
-    # 同一客户端第三次：429。
-    third = client.post(
-        "/auth/invitations/exchange",
-        json={"token": "c"},
-        headers={"X-Forwarded-For": "203.0.113.7"},
-    )
-    assert third.status_code == 429
+    assert [_register_attempt(platform, xff="203.0.113.7").status_code for _ in range(REGISTER_LIMIT)] == [
+        201
+    ] * REGISTER_LIMIT
+    assert [_register_attempt(platform, xff="203.0.113.8").status_code for _ in range(REGISTER_LIMIT)] == [
+        201
+    ] * REGISTER_LIMIT
+    # 同一客户端再过一次：该桶已满 → 429。
+    assert _register_attempt(platform, xff="203.0.113.7").status_code == 429
 
 
 @pytest.mark.invariant
-def test_business_endpoint_csrf_denied_for_cross_origin_cookie(ready):
+def test_business_endpoint_csrf_denied_for_cross_origin_cookie(platform, register_user):
     """cookie 认证的业务写端点同样受严格 CSRF 保护（计划补齐项）。"""
-    client = _client(ready)
-    client.post("/auth/invitations/exchange", json={"token": "token-live"})
-    response = client.post(
-        "/projects/proj_demo/interactions",
-        headers={"Origin": "https://evil.example"},
+    _, account = register_user()
+    response = _client(platform).post(
+        f"/projects/{account.project_id}/interactions",
+        headers={"Cookie": account.headers["Cookie"], "Origin": "https://evil.example"},
         json={"node_id": "diagnose", "user_input": "hi"},
     )
     assert response.status_code == 403
@@ -260,55 +217,42 @@ def test_business_endpoint_csrf_denied_for_cross_origin_cookie(ready):
 
 
 @pytest.mark.invariant
-def test_bearer_channel_can_be_disabled(ready):
+def test_bearer_channel_can_be_disabled(platform, register_user):
     """生产形态关闭 bearer：显式 Authorization 头不再是入口，cookie 仍可用。"""
-    ready.bearer_enabled = False
-    client = _client(ready)
+    platform.bearer_enabled = False
+    client = _client(platform)
 
-    token = ready.sessions.issue(
-        principal_id=DEMO_PRINCIPAL,
-        tenant_id=DEMO_TENANT,
-        issued_at=ready.clock.now(),
+    token = platform.sessions.issue(
+        principal_id="user_someone",
+        tenant_id="tenant_someone",
+        issued_at=platform.clock.now(),
     )
     bearer = client.get(
         "/me",
-        headers={"Authorization": f"Bearer {ready.sessions.serialize(token)}"},
+        headers={"Authorization": f"Bearer {platform.sessions.serialize(token)}"},
     )
     assert bearer.status_code == 401
 
-    # cookie 路径不受影响。
-    _issue(ready, "token-cookie")
-    assert client.post("/auth/invitations/exchange", json={"token": "token-cookie"}).status_code == 200
-    assert client.get("/me").status_code == 200
+    # cookie 路径不受影响（真实注册得到的会话）。
+    _, account = register_user()
+    assert client.get("/me", headers={"Cookie": account.headers["Cookie"]}).status_code == 200
 
 
 # ------------------------------------------------------- 限流
 
 
 @pytest.mark.invariant
-def test_exchange_rate_limit_returns_429_with_retry_after(tmp_path):
-    settings = DeploymentSettings.load(
-        {"STUDY_PLATFORM_EXCHANGE_LIMIT": "3", "STUDY_PLATFORM_EXCHANGE_WINDOW_SECONDS": "600"}
-    )
-    platform = build_platform(var_dir=tmp_path, settings=settings)
-    client = _client(platform)
+def test_register_rate_limit_returns_429_with_retry_after(tmp_path):
+    platform = build_platform(var_dir=tmp_path)
+    statuses = [_register_attempt(platform).status_code for _ in range(REGISTER_LIMIT + 1)]
+    assert statuses[:REGISTER_LIMIT] == [201] * REGISTER_LIMIT
+    assert statuses[REGISTER_LIMIT] == 429
 
-    statuses = [
-        client.post(
-            "/auth/invitations/exchange",
-            json={"token": f"any-token-{i}"},
-        ).status_code
-        for i in range(6)
-    ]
-    # 前 3 次进入兑换逻辑（401：令牌不存在），第 4 次起被限流（429）。
-    assert statuses[:3] == [401, 401, 401]
-    assert statuses[3:] == [429, 429, 429]
-
-    blocked = client.post("/auth/invitations/exchange", json={"token": "any-token-z"})
+    blocked = _register_attempt(platform)
     assert blocked.json()["retryable"] is True
     retry_after = blocked.headers.get("Retry-After")
     assert retry_after is not None
-    assert 0 < int(retry_after) <= 600
+    assert 0 < int(retry_after) <= 3600
 
 
 @pytest.mark.invariant
@@ -340,52 +284,41 @@ def _event_types(platform) -> list[str]:
     return [record.get("event_type") for record in platform.audit.read_all()]
 
 
-@pytest.mark.invariant
-def test_exchange_audit_redacts_session_material(ready):
-    """兑换审计可关联主体，但不得复制会话标识。"""
-    response = _client(ready).post("/auth/invitations/exchange", json={"token": "token-live"})
-    assert response.status_code == 200
+def _records(platform, event_type: str) -> list[dict]:
+    return [record for record in platform.audit.read_all() if record.get("event_type") == event_type]
 
-    records = [
-        record for record in ready.audit.read_all() if record.get("event_type") == "invitation_exchanged"
-    ]
+
+@pytest.mark.invariant
+def test_registration_audit_redacts_session_material(platform, register_user):
+    """注册审计可关联主体，但不得复制会话标识。"""
+    _, account = register_user()
+    records = _records(platform, "account_registered")
     assert len(records) == 1
     assert "session_id" not in records[0]["payload"]
-    assert records[0]["payload"]["principal_id"] == DEMO_PRINCIPAL
+    assert records[0]["payload"]["principal_id"] == account.principal_id
 
 
 @pytest.mark.invariant
-def test_authentication_critical_events_are_audited(ready):
-    client = _client(ready)
-
-    # 兑换成功
-    client.post("/auth/invitations/exchange", json={"token": "token-live"})
-    # 兑换被拒（未知令牌）
-    client.post("/auth/invitations/exchange", json={"token": "no-such-token"})
-    # 认证失败（无凭据）—— 用新客户端避免携带已有 cookie
-    _client(ready).get("/me")
+def test_authentication_critical_events_are_audited(platform, register_user):
+    client = _client(platform)
+    _, account = register_user()
+    cookie = {"Cookie": account.headers["Cookie"]}
+    # 认证失败（无凭据）
+    _client(platform).get("/me")
     # 退出
-    client.post("/auth/logout", headers={"Origin": SAME_ORIGIN})
+    client.post("/auth/logout", headers={**cookie, "Origin": SAME_ORIGIN})
 
-    types = _event_types(ready)
-    assert "invitation_exchanged" in types
-    assert "invitation_rejected" in types
+    types = _event_types(platform)
+    assert "account_registered" in types
     assert "authentication_failed" in types
     assert "session_revoked" in types
-
-    # 审计载荷不得包含令牌材料。
-    raw = ready.audit.path.read_text(encoding="utf-8")
-    assert "token-live" not in raw
-    assert _hash("token-live") not in raw
 
 
 @pytest.mark.invariant
 def test_rate_limit_event_is_audited(tmp_path):
-    settings = DeploymentSettings.load({"STUDY_PLATFORM_EXCHANGE_LIMIT": "1"})
-    platform = build_platform(var_dir=tmp_path, settings=settings)
-    client = _client(platform)
-    client.post("/auth/invitations/exchange", json={"token": "a"})
-    client.post("/auth/invitations/exchange", json={"token": "b"})
+    platform = build_platform(var_dir=tmp_path)
+    for _ in range(REGISTER_LIMIT + 1):
+        _register_attempt(platform)
     assert "auth_rate_limited" in _event_types(platform)
 
 
@@ -393,7 +326,7 @@ def test_rate_limit_event_is_audited(tmp_path):
 
 
 @pytest.mark.invariant
-def test_cookie_key_rotation_keeps_old_cookie_until_expiry(tmp_path):
+def test_cookie_key_rotation_keeps_old_cookie_until_expiry(tmp_path, register_user):
     old_secret = "old-cookie-secret-0123456789abcdef"
     new_secret = "new-cookie-secret-0123456789abcdef0"
 
@@ -408,55 +341,53 @@ def test_cookie_key_rotation_keeps_old_cookie_until_expiry(tmp_path):
         ),
     )
     # 与平台共享同一时钟，避免固定时钟与系统时钟错位导致会话过期判定漂移。
-    now = platform.clock.now()
-    session = UserSession(
-        session_id="sess_rotate",
-        tenant_id=DEMO_TENANT,
-        principal_id=DEMO_PRINCIPAL,
-        issued_at=now,
-        expires_at=now + timedelta(hours=1),
-    )
+    _, account = register_user(on=platform)
+    claims = platform.cookie_auth.verify(account.cookie, now=platform.clock.now())
+    session = platform.session_store.get_live(claims.to_principal(), claims.session_id)
+    assert session is not None, "真实注册建立的会话必须可回读"
+
     # 用旧密钥签发的 cookie（模拟轮换前已登录的用户）。
     old_auth = CookieAuth(old_secret, platform.clock)
     old_cookie = old_auth.issue(session)
-    platform.session_store.create(session)
     client = _client(platform)
 
     # 旧 cookie 仍可通过验签 + 回库。
     assert client.get("/me", cookies={SESSION_COOKIE_NAME: old_cookie}).status_code == 200
-    # 新兑换出的 cookie 由新密钥签名：旧密钥验不过。
-    _issue(platform, "token-rot")
-    exchanged = client.post("/auth/invitations/exchange", json={"token": "token-rot"})
-    new_cookie = exchanged.cookies[SESSION_COOKIE_NAME]
     # 新签发的 cookie 只由新密钥签名：旧密钥验签直接拒绝，新密钥验得过。
     with pytest.raises(PlatformError) as excinfo:
-        old_auth.verify(new_cookie, now=platform.clock.now())
+        old_auth.verify(account.cookie, now=platform.clock.now())
     assert excinfo.value.code is ErrorCode.AUTH_REQUIRED
-    assert platform.cookie_auth.verify(new_cookie, now=platform.clock.now()) is not None
+    assert platform.cookie_auth.verify(account.cookie, now=platform.clock.now()) is not None
 
 
 # ------------------------------------------------------- 集中失效
 
 
 @pytest.mark.invariant
-def test_logout_all_revokes_every_session_of_principal(ready):
-    _issue(ready, "token-a")
-    _issue(ready, "token-b")
-    client_a = _client(ready)
-    client_b = _client(ready)
-    client_a.post("/auth/invitations/exchange", json={"token": "token-a"})
-    client_b.post("/auth/invitations/exchange", json={"token": "token-b"})
-    assert client_a.get("/me").status_code == 200
-    assert client_b.get("/me").status_code == 200
+def test_logout_all_revokes_every_session_of_principal(platform, register_user):
+    session_a, account = register_user()
+    # 同一账号第二次登录（新客户端，避免 already_authenticated）→ 第二个会话。
+    login_client = _client(platform)
+    logged_in = login_client.post(
+        "/auth/login",
+        json={"username": account.username, "password": account.password},
+        headers={"Origin": SAME_ORIGIN},
+    )
+    assert logged_in.status_code == 200
+    cookie_b = login_client.cookies.get(SESSION_COOKIE_NAME)
 
-    response = client_a.post("/auth/logout/all", headers={"Origin": SAME_ORIGIN})
+    cookie_a = account.headers["Cookie"]
+    assert session_a.get("/me", headers={"Cookie": cookie_a}).status_code == 200
+    assert login_client.get("/me", headers={"Cookie": f"study_session={cookie_b}"}).status_code == 200
+
+    response = session_a.post("/auth/logout/all", headers={"Cookie": cookie_a, "Origin": SAME_ORIGIN})
     assert response.status_code == 200
     assert response.json()["revoked"] >= 2
 
     # 两份 cookie 都立即失效。
-    assert client_a.get("/me").status_code == 401
-    assert client_b.get("/me").status_code == 401
-    assert "sessions_revoked_all" in _event_types(ready)
+    assert session_a.get("/me", headers={"Cookie": cookie_a}).status_code == 401
+    assert login_client.get("/me", headers={"Cookie": f"study_session={cookie_b}"}).status_code == 401
+    assert "sessions_revoked_all" in _event_types(platform)
 
 
 @pytest.mark.invariant
@@ -466,25 +397,21 @@ def test_revoke_all_for_contract_memory():
     actor = Principal(principal_id="u1", tenant_id="t1")
     other = Principal(principal_id="u2", tenant_id="t1")
     now = clock.now()
-    for sid in ("s1", "s2", "s3"):
-        store.create(
-            UserSession(
-                session_id=sid,
-                tenant_id="t1",
-                principal_id="u1",
-                issued_at=now,
-                expires_at=now + timedelta(hours=1),
-            )
-        )
-    store.create(
-        UserSession(
-            session_id="s4",
+
+    def _session(sid: str, principal_id: str) -> UserSession:
+        return UserSession(
+            session_id=sid,
             tenant_id="t1",
-            principal_id="u2",
+            principal_id=principal_id,
             issued_at=now,
             expires_at=now + timedelta(hours=1),
+            credential_id="cred_" + principal_id,
+            security_generation=1,
         )
-    )
+
+    for sid in ("s1", "s2", "s3"):
+        store.create(_session(sid, "u1"))
+    store.create(_session("s4", "u2"))
     # 保留当前会话 s1，撤掉其余两台设备。
     assert store.revoke_all_for(actor, at=now, except_session_id="s1") == 2
     assert store.get_live(actor, "s1") is not None
@@ -504,120 +431,25 @@ def test_revoke_all_for_contract_memory():
 
 
 @pytest.mark.invariant
-def test_expired_cookie_claims_rejected(ready):
-    now = ready.clock.now()
+def test_expired_cookie_claims_rejected(platform, register_user):
+    _, account = register_user()
+    now = platform.clock.now()
     expired = UserSession(
         session_id="sess_expired",
-        tenant_id=DEMO_TENANT,
-        principal_id=DEMO_PRINCIPAL,
+        tenant_id=account.tenant_id,
+        principal_id=account.principal_id,
         issued_at=now - timedelta(hours=2),
         expires_at=now - timedelta(minutes=1),
+        credential_id="cred_expired",
+        security_generation=1,
     )
-    ready.session_store.create(expired)
-    cookie = ready.cookie_auth.issue(expired)
-    client = _client(ready)
-    response = client.get("/me", cookies={SESSION_COOKIE_NAME: cookie})
+    cookie = platform.cookie_auth.issue(expired)
+    with pytest.raises(PlatformError) as excinfo:
+        platform.cookie_auth.verify(cookie, now=now)
+    assert excinfo.value.code is ErrorCode.AUTH_REQUIRED
+
+    response = _client(platform).get("/me", cookies={SESSION_COOKIE_NAME: cookie})
     assert response.status_code == 401
-
-
-# ------------------------------------------------------- TTL 与原子性
-
-
-@pytest.mark.invariant
-def test_memory_exchange_rejects_session_beyond_ttl_cap(ready):
-    """服务端传入超上限的会话期限：拒绝，且邀请保持可用。"""
-    now = ready.clock.now()
-    with pytest.raises(Exception) as exc_info:
-        ready.invitations.exchange(
-            _hash("token-live"),
-            session_id="sess_bad",
-            session_expires_at=now + timedelta(days=36500),
-        )
-    assert exc_info.value.code is ErrorCode.INTERNAL_CONSISTENCY_ERROR
-
-    # 邀请没有被消费：随后用合法期限兑换成功。
-    session = ready.invitations.exchange(
-        _hash("token-live"),
-        session_id="sess_ok",
-        session_expires_at=now + timedelta(hours=8),
-    )
-    assert session is not None and session.session_id == "sess_ok"
-
-
-class _FailingSessionStore(InMemorySessionRepository):
-    """第一次 create 必失败，之后恢复正常 —— 模拟会话登记失败。"""
-
-    def __init__(self, clock) -> None:
-        super().__init__(clock=clock)
-        self.calls = 0
-
-    def create(self, session) -> None:
-        self.calls += 1
-        if self.calls == 1:
-            raise RuntimeError("boom")
-        super().create(session)
-
-
-@pytest.mark.invariant
-def test_memory_exchange_rolls_back_consumption_when_session_create_fails():
-    """建会话失败时邀请必须回到未消费状态（P2 原子性）。"""
-    clock = FixedClock(datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc))
-    sessions = _FailingSessionStore(clock)
-    invitations = InMemoryInvitationRepository(clock=clock, sessions=sessions)
-    now = clock.now()
-    invitations.issue(
-        SystemContext("t1", "t"),
-        invitation_id="inv_1",
-        token_hash=_hash("tok"),
-        issued_by="u1",
-        invitee_principal_id="u1",
-        issued_at=now,
-        expires_at=now + timedelta(days=1),
-    )
-
-    with pytest.raises(RuntimeError, match="boom"):
-        invitations.exchange(
-            _hash("tok"),
-            session_id="sess_first",
-            session_expires_at=now + timedelta(hours=8),
-        )
-    # 第二次兑换成功 —— 证明邀请没有被悬空消费。
-    session = invitations.exchange(
-        _hash("tok"),
-        session_id="sess_second",
-        session_expires_at=now + timedelta(hours=8),
-    )
-    assert session is not None and session.session_id == "sess_second"
-
-
-@pytest.mark.invariant
-def test_memory_concurrent_exchange_consumes_once(ready, racy_scheduling):
-    """同一邀请并发兑换：恰好一次成功（与 PG 行锁语义对齐）。"""
-    barrier = threading.Barrier(8)
-    results: list = []
-    errors: list[BaseException] = []
-
-    def worker(i: int) -> None:
-        try:
-            barrier.wait()
-            session = ready.invitations.exchange(
-                _hash("token-live"),
-                session_id=f"sess_conc_{i}",
-                session_expires_at=ready.clock.now() + timedelta(hours=8),
-            )
-            results.append(session)
-        except BaseException as exc:  # noqa: BLE001 - 并发测试要收集一切异常
-            errors.append(exc)
-
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    assert errors == []
-    successes = [s for s in results if s is not None]
-    assert len(successes) == 1, f"并发兑换必须只成功一次，实际 {len(successes)}"
 
 
 # ------------------------------------------------------- 部署配置自检
@@ -812,3 +644,9 @@ def test_optional_local_query_rewriter_requires_literal_loopback_and_short_timeo
 def test_ttl_over_hard_cap_rejected_at_configuration():
     settings = DeploymentSettings.load({"STUDY_PLATFORM_SESSION_TTL_MINUTES": str(60 * 24 * 31)})
     assert any("TTL" in p for p in settings.configuration_problems())
+
+
+@pytest.mark.invariant
+def test_auth_attempt_limit_must_be_positive():
+    settings = DeploymentSettings.load({"STUDY_PLATFORM_AUTH_ATTEMPT_LIMIT": "0"})
+    assert any("AUTH_ATTEMPT_LIMIT" in p for p in settings.configuration_problems())

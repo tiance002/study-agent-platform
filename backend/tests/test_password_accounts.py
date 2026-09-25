@@ -8,6 +8,7 @@ from app.identity.passwords import (
     hash_password,
     needs_rehash,
     normalize_username,
+    validate_password,
     verify_password,
     verify_password_diagnostic,
 )
@@ -93,14 +94,34 @@ def test_fullwidth_ascii_letter_collides_with_ascii_lookup_value():
     assert normalize_username("Ａ").normalized == normalize_username("a").normalized == "a"
 
 
-@pytest.mark.parametrize("password", ["p" * 11, "p" * 129, "密码" * 65])
+@pytest.mark.parametrize("password", ["p" * 5, "p" * 13, "密码" * 7])
 def test_password_length_is_checked_as_original_codepoints(password):
     with pytest.raises(ValueError):
         hash_password(password)
 
 
+@pytest.mark.parametrize("password", ["p" * 5, "p" * 13])
+def test_validate_password_rejects_out_of_range_length(password):
+    with pytest.raises(ValueError):
+        validate_password(password)
+
+
+@pytest.mark.parametrize("password", ["p" * 6, "p" * 12])
+def test_validate_password_accepts_boundary_lengths(password):
+    validate_password(password)
+    assert verify_password(password, hash_password(password)) is True
+
+
+def test_validate_password_rejects_lone_surrogates():
+    """孤立代理项不是合法 UTF-8：必须在策略层拒绝，而不是让 Argon2 抛 500。"""
+    with pytest.raises(ValueError):
+        validate_password("abcdef\ud800")
+    with pytest.raises(ValueError):
+        hash_password("abcdef\ud800")
+
+
 def test_password_hash_uses_argon2id_and_frozen_parameters():
-    password = "correct horse battery staple dev-only"
+    password = "Argon2id1234"
     encoded = hash_password(password)
     assert encoded.startswith("$argon2id$")
     assert ARGON2_PARAMETERS == {
@@ -109,7 +130,7 @@ def test_password_hash_uses_argon2id_and_frozen_parameters():
         "parallelism": 1,
     }
     assert verify_password(password, encoded) is True
-    assert verify_password("wrong", encoded) is False
+    assert verify_password("wrong!", encoded) is False
 
 
 def test_verify_password_has_uniform_false_for_malformed_or_missing_hash():
@@ -136,9 +157,10 @@ def test_verify_password_uses_dummy_hash_for_missing_or_malformed_hash(monkeypat
 
 
 def test_password_preserves_leading_trailing_space_and_unicode_codepoints():
-    password = "  密码密码abcd dev-only  "
+    password = "  密码ab12  "
     encoded = hash_password(password)
     assert verify_password(password, encoded) is True
+    # 不 strip：去掉首尾空格是**另一个**合法长度的口令，必须验证失败。
     assert verify_password(password.strip(), encoded) is False
 
 
@@ -149,9 +171,9 @@ def test_needs_rehash_exposes_argon2_check():
 
 
 def test_registration_takes_username_and_password_only_and_copies_display_name():
-    account = register_account(username="Alice_1", password="password-123-dev-only")
+    account = register_account(username="Alice_1", password="password-123")
     assert account.username_original == "Alice_1"
     assert account.username_normalized == "alice_1"
     assert account.display_name == "Alice_1"
     with pytest.raises(TypeError):
-        register_account(username="Alice_1", password="password-123-dev-only", display_name="other")
+        register_account(username="Alice_1", password="password-123", display_name="other")

@@ -466,12 +466,6 @@ def error_response(exc: PlatformError):
         response = JSONResponse(status_code=status, content=payload)
         response.headers["Retry-After"] = str(max(int(exc.details.get("retry_after_seconds", 1)), 1))
         return response
-    elif exc.code is ErrorCode.INVITATION_INVALID:
-        # 邀请兑换失败：401，但**保留** INVITATION_INVALID 码与统一话术 ——
-        # 未知 / 已过期 / 已消费共用这一个码与同一句话，
-        # 区分原因等于告诉探测者"这个 token 存在过"。
-        status = 401
-        payload = public_error_payload(exc.code.value, exc.message, request_id=request_id)
     elif exc.code is ErrorCode.IDEMPOTENCY_VIOLATION:
         # 幂等键被复用于不同内容：409 —— 客户端要换 key，不是重新登录。
         status = 409

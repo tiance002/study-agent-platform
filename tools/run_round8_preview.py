@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import sys
 import threading
 import time
-from datetime import timedelta
 from pathlib import Path
 
 import uvicorn
@@ -15,8 +13,7 @@ import uvicorn
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from app.deployment import DeploymentSettings
-from app.identity.ports import SystemContext
-from app.main import DEMO_TENANT, build_platform, create_app
+from app.main import build_platform, create_app
 from app.teaching.models import RawCitation
 from app.teaching.provider import completed_result
 from app.workers.ingestion import run_once as run_ingestion_once
@@ -49,7 +46,6 @@ class PreviewProvider:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8008)
-    parser.add_argument("--invite", default="round8-preview-invite")
     parser.add_argument("--var-dir", default="var/round8-preview")
     args = parser.parse_args()
 
@@ -63,16 +59,6 @@ def main() -> None:
         ),
     )
     platform.teaching_provider = PreviewProvider()
-    now = platform.clock.now()
-    platform.invitations.issue(
-        SystemContext(DEMO_TENANT, "round 8 browser preview"),
-        invitation_id="inv_round8_preview",
-        token_hash="sha256:" + hashlib.sha256(args.invite.encode()).hexdigest(),
-        issued_by="round8-preview-issuer",
-        invitee_principal_id="round8-preview-user",
-        issued_at=now,
-        expires_at=now + timedelta(hours=1),
-    )
 
     def workers() -> None:
         while True:
