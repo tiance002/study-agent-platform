@@ -7,13 +7,13 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:15f5bd55f0780d38517b41cab54436a43619b352bd2448f176bbaa6e2f9e9592, generated_at=2026-09-24T07:47:18Z -->
-> 生成时间：2026-09-24T07:47:18Z
+<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:fc63ced8e6f45237671d00d1553b34b0d5ca195006268bead2e2e6ed7969952f, generated_at=2026-09-25T05:52:44Z -->
+> 生成时间：2026-09-25T05:52:44Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
 
-当前 head：`0019`
+当前 head：`0021`
 
 ### 表总览
 
@@ -32,6 +32,8 @@
 | `invitations` | 0002 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 9 |
 | `learning_plans` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
 | `learning_tasks` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
+| `library_documents` | 0021 | 租户+主体 | SELECT, INSERT | — | 9 |
+| `library_sources` | 0021 | 租户+主体 | SELECT, INSERT | — | 8 |
 | `messages` | 0002 | 租户+项目 | SELECT, INSERT | INSERT | 8 |
 | `milestones` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
 | `principals` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 4 |
@@ -188,6 +190,23 @@
 | `learning_tasks` | `order_index` | `integer` |
 | `learning_tasks` | `title` | `text` |
 | `learning_tasks` | `status` | `text` |
+| `library_documents` | `library_document_id` | `text` |
+| `library_documents` | `tenant_id` | `text` |
+| `library_documents` | `principal_id` | `text` |
+| `library_documents` | `library_source_id` | `text` |
+| `library_documents` | `version` | `integer` |
+| `library_documents` | `content` | `text` |
+| `library_documents` | `content_hash` | `text` |
+| `library_documents` | `parser_version` | `text` |
+| `library_documents` | `observed_at` | `timestamptz` |
+| `library_sources` | `library_source_id` | `text` |
+| `library_sources` | `tenant_id` | `text` |
+| `library_sources` | `principal_id` | `text` |
+| `library_sources` | `display_name` | `text` |
+| `library_sources` | `media_type` | `text` |
+| `library_sources` | `identity_hash` | `text` |
+| `library_sources` | `acquisition` | `jsonb` |
+| `library_sources` | `registered_at` | `timestamptz` |
 | `messages` | `message_id` | `text` |
 | `messages` | `tenant_id` | `text` |
 | `messages` | `project_id` | `text` |
