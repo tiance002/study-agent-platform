@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from app.core.errors import ErrorCode, PlatformError
 from app.identity.models import Principal
 from app.knowledge.retrieval import ScoredChunk
-from app.knowledge.store import KnowledgeRepository
+from app.knowledge.store import HybridSearchResult, KnowledgeRepository
 from app.product.models import Message
 from app.teaching.models import MaterialSnippet, PromptMessage
 from app.teaching.prompts import build_messages
@@ -71,6 +71,10 @@ class TeachingContext:
     run: TeachingRun
     snapshot: RetrievalSnapshot
     messages: tuple[PromptMessage, ...]
+    #: 检索过程事实（模式 / 降级原因 / 排序规则版本）。它随 run 存证：
+    #: "这次回答的资料是怎么检索的"与候选本身同样是回答的一部分 ——
+    #: 用户看到"关键词"结果时，必须能区分它是基线还是降级。
+    retrieval: HybridSearchResult
 
 
 def build_snapshot(
@@ -138,6 +142,7 @@ def build_context(
     *,
     knowledge: KnowledgeRepository,
     history: tuple[Message, ...],
+    retrieval_query: str | None = None,
 ) -> TeachingContext:
     """组装派发上下文。检索与历史预算在这里收口（服务层不再自己裁）。"""
     if len(run.question) > MAX_QUESTION_CHARS:
@@ -145,17 +150,30 @@ def build_context(
             ErrorCode.PARAMS_INVALID,
             f"问题超过 {MAX_QUESTION_CHARS} 字符上限；请拆分后再问",
         )
-    hits = knowledge.search(actor, project_id, run.question, limit=DEFAULT_MAX_MATERIALS)
+    hits = knowledge.search_hybrid(
+        actor,
+        project_id,
+        retrieval_query or run.question,
+        limit=DEFAULT_MAX_MATERIALS,
+    )
     snapshot = build_snapshot(
         actor,
         project_id,
         knowledge=knowledge,
-        hits=hits,
-        ranking_version=run.ranking_version,
+        hits=hits.hits,
+        # 快照冻结**本次检索实际使用**的排序版本（keyword/v1 或
+        # hybrid-rrf/v1），而不是 run 行建行时的预期 —— 混合模式下
+        # 两者可能不同，重放与归因都要以实际版本为准。
+        ranking_version=hits.ranking_version,
     )
     messages = build_messages(
         question=run.question,
         history=history_window(history),
         materials=snapshot.items,
     )
-    return TeachingContext(run=run, snapshot=snapshot, messages=messages)
+    return TeachingContext(
+        run=run,
+        snapshot=snapshot,
+        messages=messages,
+        retrieval=hits,
+    )

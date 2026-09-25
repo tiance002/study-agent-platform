@@ -50,13 +50,14 @@ from app.identity.models import Principal
 from app.identity.passwords import (
     DUMMY_PASSWORD_HASH,
     hash_password,
+    hash_registration_password,
     needs_rehash,
     normalize_username,
     verify_password_diagnostic,
 )
 
-if TYPE_CHECKING:  # 类型标注用，运行时不导入（避免与 main 循环依赖）
-    from app.main import PlatformState
+if TYPE_CHECKING:  # 类型标注用，运行时不导入（避免与装配模块循环依赖）
+    from app.platform import PlatformState
 
 router = APIRouter()
 
@@ -522,10 +523,10 @@ def register_account(request: Request, body: PasswordAuthBody) -> JSONResponse:
         raise deny(ErrorCode.PARAMS_INVALID, "用户名格式不符合要求") from exc
     try:
         password_hash = _argon2(state).run(
-            lambda: hash_password(body.password), priority="registration"
+            lambda: hash_registration_password(body.password), priority="registration"
         )
     except ValueError as exc:
-        raise deny(ErrorCode.PARAMS_INVALID, "密码长度不符合要求") from exc
+        raise deny(ErrorCode.PARAMS_INVALID, "密码长度需为 6-12 个字符") from exc
     result = state.accounts.register(
         username_original=username.original,
         username_normalized=username.normalized,

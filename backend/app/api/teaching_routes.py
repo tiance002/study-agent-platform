@@ -108,11 +108,7 @@ def create_teaching_run(
 
     with idempotent_write(request, body) as guard:
         if guard.replay:
-            return JSONResponse(
-                status_code=guard.cached_status_code,
-                content=guard.cached_body,
-                headers={"X-Idempotent-Replay": "true"},
-            )
+            return guard.replay_response()
         state = _state(request)
         _require_provider(state)
         budget_micro, max_input, max_output = _budget_limits(state)

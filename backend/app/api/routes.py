@@ -158,9 +158,7 @@ def healthz(request: Request) -> dict:
         },
         # 审计 outbox 里尚未投影进链式 sink 的事件数。
         # >0 不是错误（事实已可靠落库），但是必须被消化的积压信号。
-        "audit_outbox_pending": (
-            state.audit_outbox.pending_count() if state.audit_outbox else 0
-        ),
+        "audit_outbox_pending": (state.audit_outbox.pending_count() if state.audit_outbox else 0),
     }
 
 
@@ -223,11 +221,7 @@ def ingest(request: Request, project_id: str, body: IngestBody) -> dict | JSONRe
     state = _state(request)
     with idempotent_write(request, body) as guard:
         if guard.replay:
-            return JSONResponse(
-                status_code=guard.cached_status_code,
-                content=guard.cached_body,
-                headers={"X-Idempotent-Replay": "true"},
-            )
+            return guard.replay_response()
         principal = guard.principal
         state.membership.get(principal, project_id)
         context = TenantContext(
@@ -264,9 +258,7 @@ def ingest(request: Request, project_id: str, body: IngestBody) -> dict | JSONRe
 
 
 @legacy_router.post("/projects/{project_id}/confirmations", response_model=None)
-def create_confirmation(
-    request: Request, project_id: str, body: ConfirmationBody
-) -> dict | JSONResponse:
+def create_confirmation(request: Request, project_id: str, body: ConfirmationBody) -> dict | JSONResponse:
     """创建服务端确认记录。
 
     这是「用户点了确认」在服务端的落点。回应包含确认界面必须展示的内容：
@@ -280,11 +272,7 @@ def create_confirmation(
     state = _state(request)
     with idempotent_write(request, body) as guard:
         if guard.replay:
-            return JSONResponse(
-                status_code=guard.cached_status_code,
-                content=guard.cached_body,
-                headers={"X-Idempotent-Replay": "true"},
-            )
+            return guard.replay_response()
         principal = guard.principal
         state.membership.get(principal, project_id)
         context = TenantContext(
@@ -337,9 +325,7 @@ def create_confirmation(
 
 
 @legacy_router.post("/projects/{project_id}/interactions", response_model=None)
-def interact(
-    request: Request, project_id: str, body: InteractionBody
-) -> dict | JSONResponse:
+def interact(request: Request, project_id: str, body: InteractionBody) -> dict | JSONResponse:
     """执行一次交互。node 必须已注册，否则拒绝且不留预算。
 
     追踪 id **复用中间件绑定的那个**，不在这里另生成：否则响应头、响应体、
@@ -354,11 +340,7 @@ def interact(
     state = _state(request)
     with idempotent_write(request, body) as guard:
         if guard.replay:
-            return JSONResponse(
-                status_code=guard.cached_status_code,
-                content=guard.cached_body,
-                headers={"X-Idempotent-Replay": "true"},
-            )
+            return guard.replay_response()
         principal = guard.principal
         state.membership.get(principal, project_id)
         context = TenantContext(
@@ -392,9 +374,7 @@ def mastery(request: Request, project_id: str) -> dict:
     state = _state(request)
     principal, context = _project_scope(request, project_id)
     persisted = state.evidence.events_for(principal, project_id)
-    runtime_events = state.evidence_log.events_scoped(
-        tenant_id=context.tenant_id, project_id=project_id
-    )
+    runtime_events = state.evidence_log.events_scoped(tenant_id=context.tenant_id, project_id=project_id)
     event_ids = {event.event_id for event in (*persisted, *runtime_events)}
     corrections = (
         *state.evidence.corrections_for(principal, project_id, event_ids),
@@ -417,9 +397,7 @@ def audit_view(request: Request, project_id: str) -> dict:
     state = _state(request)
     _, context = _project_scope(request, project_id)
     with tenant_scope(context):
-        records = state.audit.read_scoped(
-            tenant_id=context.tenant_id, project_id=project_id
-        )
+        records = state.audit.read_scoped(tenant_id=context.tenant_id, project_id=project_id)
     return {
         "records": len(records),
         "chain_valid": state.audit.verify_chain(),
@@ -435,9 +413,7 @@ def budget_view(request: Request, project_id: str) -> dict:
     state = _state(request)
     _, context = _project_scope(request, project_id)
     with tenant_scope(context):
-        reservations = state.ledger.reservations_scoped(
-            tenant_id=context.tenant_id, project_id=project_id
-        )
+        reservations = state.ledger.reservations_scoped(tenant_id=context.tenant_id, project_id=project_id)
         pending = state.machine.actions_needing_reconciliation(
             tenant_id=context.tenant_id, project_id=project_id
         )
@@ -478,9 +454,7 @@ def error_response(exc: PlatformError):
     if exc.code is ErrorCode.AUTH_REQUIRED:
         status = 401
         # 对外不复用内部错误码，也不透露具体失败原因。
-        payload = public_error_payload(
-            "UNAUTHENTICATED", "未认证或凭据无效", request_id=request_id
-        )
+        payload = public_error_payload("UNAUTHENTICATED", "未认证或凭据无效", request_id=request_id)
     elif exc.code is ErrorCode.ACCOUNT_ALREADY_AUTHENTICATED:
         status = 409
     elif exc.code is ErrorCode.USERNAME_TAKEN:
@@ -497,15 +471,11 @@ def error_response(exc: PlatformError):
         # 未知 / 已过期 / 已消费共用这一个码与同一句话，
         # 区分原因等于告诉探测者"这个 token 存在过"。
         status = 401
-        payload = public_error_payload(
-            exc.code.value, exc.message, request_id=request_id
-        )
+        payload = public_error_payload(exc.code.value, exc.message, request_id=request_id)
     elif exc.code is ErrorCode.IDEMPOTENCY_VIOLATION:
         # 幂等键被复用于不同内容：409 —— 客户端要换 key，不是重新登录。
         status = 409
-        payload = public_error_payload(
-            exc.code.value, exc.message, request_id=request_id
-        )
+        payload = public_error_payload(exc.code.value, exc.message, request_id=request_id)
     elif exc.code is ErrorCode.IDEMPOTENCY_IN_PROGRESS:
         # 并发重试撞上未完成的占用：409 + Retry-After。
         # 审查发现的缺陷：这里早先复制的还是 IDEMPOTENCY_VIOLATION 分支，
@@ -518,39 +488,34 @@ def error_response(exc: PlatformError):
     elif exc.code is ErrorCode.IDEMPOTENCY_KEY_REQUIRED:
         # 缺 Idempotency-Key：客户端 bug（缺请求头），400 可修复。
         status = 400
-        payload = public_error_payload(
-            exc.code.value, exc.message, request_id=request_id
-        )
+        payload = public_error_payload(exc.code.value, exc.message, request_id=request_id)
     elif exc.code is ErrorCode.PARAMS_INVALID:
         # 参数非法（含 key 超长）：400 —— 可修复的客户端错误，不是 403 禁止。
         status = 400
-        payload = public_error_payload(
-            exc.code.value, exc.message, request_id=request_id
-        )
+        payload = public_error_payload(exc.code.value, exc.message, request_id=request_id)
     elif exc.code is ErrorCode.VERSION_CONFLICT:
         # 乐观锁冲突：409。404 会让客户端误判成权限问题去重新登录；
         # 412 语义上也贴切但极少用 —— 409 是编辑冲突的事实标准。
         status = 409
-        payload = public_error_payload(
-            exc.code.value, exc.message, request_id=request_id
-        )
+        payload = public_error_payload(exc.code.value, exc.message, request_id=request_id)
     elif exc.code is ErrorCode.CSRF_DENIED:
         # CSRF 拦截：凭据本身有效，是"来源不对" —— 401 会让客户端去重新登录，
         # 那是误导；403 说的是"这个请求不被接受"。
         status = 403
-        payload = public_error_payload(
-            exc.code.value, exc.message, request_id=request_id
-        )
+        payload = public_error_payload(exc.code.value, exc.message, request_id=request_id)
     elif exc.code in (
         ErrorCode.CROSS_TENANT_DENIED,
         ErrorCode.CROSS_PROJECT_DENIED,
         ErrorCode.TENANT_CONTEXT_MISSING,
     ):
         status = 404
-        payload = public_error_payload(
-            "NOT_FOUND", "资源不存在", request_id=request_id
-        )
-    elif exc.code in (ErrorCode.AUDIT_SINK_UNAVAILABLE, ErrorCode.POLICY_GATEWAY_UNAVAILABLE):
+        payload = public_error_payload("NOT_FOUND", "资源不存在", request_id=request_id)
+    elif exc.code in (
+        ErrorCode.AUDIT_SINK_UNAVAILABLE,
+        ErrorCode.POLICY_GATEWAY_UNAVAILABLE,
+        ErrorCode.SOURCE_SEARCH_UNAVAILABLE,
+        ErrorCode.SOURCE_SEARCH_DISABLED,
+    ):
         status = 503
     elif exc.code is ErrorCode.TEACHING_PROVIDER_DISABLED:
         # 教学功能未启用：配置事实，不是权限问题（403 会误导客户端去
@@ -567,9 +532,7 @@ def error_response(exc: PlatformError):
     elif exc.code is ErrorCode.INTERNAL_CONSISTENCY_ERROR:
         # 内部不变量破裂：对外只给通用 500，绝不回显 session_id / 约束名等细节。
         status = 500
-        payload = public_error_payload(
-            "INTERNAL_ERROR", "服务器内部错误", request_id=request_id
-        )
+        payload = public_error_payload("INTERNAL_ERROR", "服务器内部错误", request_id=request_id)
     elif exc.code is ErrorCode.RECONCILIATION_REQUIRED:
         # 409：请求本身没问题，是动作处于「结果未知」，必须先对账。
         # 用 403 等于说「你不被允许」，那是误导；用 5xx 又会被客户端当故障重试，

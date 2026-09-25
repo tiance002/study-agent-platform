@@ -58,6 +58,7 @@ from app.identity.models import Principal
 from app.identity.ports import MembershipRepository
 from app.knowledge.models import (
     ACQUISITION_METHOD_UPLOAD,
+    ACQUISITION_METHOD_WEB,
     DOCUMENT_PARSER_VERSION,
     IngestionJob,
     IngestionStatus,
@@ -71,7 +72,8 @@ from app.policy.taint import TaintSource
 _DOCUMENT_COLUMNS = (
     "document_id, tenant_id, project_id, source_id, version, document_title,"
     " content, content_hash, media_type, language, parser_version,"
-    " acquisition_method, taint_sources, derived_from, observed_at"
+    " acquisition_method, taint_sources, derived_from, observed_at, fetch_attempt_id,"
+    " source_content_type, raw_content_hash"
 )
 
 _JOB_COLUMNS = (
@@ -115,6 +117,9 @@ def _document_from_row(row: tuple) -> SourceDocument:
         taint_sources=tuple(TaintSource(item) for item in row[12]),
         derived_from=tuple(row[13]),
         observed_at=row[14],
+        fetch_attempt_id=row[15] or "",
+        source_content_type=row[16] or "",
+        raw_content_hash=row[17] or "",
     )
     _assert_hash_matches(row[7], document.content_hash, "source_documents", row[0])
     return document
@@ -217,6 +222,12 @@ class PostgresIngestionRepository:
         content: str,
         media_type: str,
         language: str,
+        acquisition_method: str = ACQUISITION_METHOD_UPLOAD,
+        taint_sources: tuple = (),
+        parser_version: str = DOCUMENT_PARSER_VERSION,
+        fetch_attempt_id: str = "",
+        source_content_type: str = "",
+        raw_content_hash: str = "",
     ) -> tuple[SourceDocument, IngestionJob]:
         self.membership.get(actor, project_id)
         now = self._clock.now()
@@ -231,16 +242,16 @@ class PostgresIngestionRepository:
             media_type=media_type,
             language=language,
             observed_at=now,
-            parser_version=DOCUMENT_PARSER_VERSION,
-            acquisition_method=ACQUISITION_METHOD_UPLOAD,
+            parser_version=parser_version,
+            acquisition_method=acquisition_method,
+            taint_sources=taint_sources or (TaintSource.UPLOADED_SOURCE,),
+            fetch_attempt_id=fetch_attempt_id,
+            source_content_type=source_content_type,
+            raw_content_hash=raw_content_hash,
         )
         try:
-            with tenant_transaction(
-                tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
-            ) as conn:
-                exists = conn.execute(
-                    "SELECT 1 FROM sources WHERE source_id = %s", (source_id,)
-                ).fetchone()
+            with tenant_transaction(tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn) as conn:
+                exists = conn.execute("SELECT 1 FROM sources WHERE source_id = %s", (source_id,)).fetchone()
                 if exists is None:
                     # RLS 已按租户 + 项目过滤：查不到只剩"不属于本项目"一种解释。
                     raise deny(
@@ -248,9 +259,44 @@ class PostgresIngestionRepository:
                         "无权访问该项目",
                         source_id=source_id,
                     )
+                if acquisition_method == ACQUISITION_METHOD_WEB:
+                    # Serialize web version allocation for one source so two
+                    # workers cannot both miss the same fingerprint and insert
+                    # duplicate versions.
+                    conn.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (source_id,),
+                    )
+                    duplicate = conn.execute(
+                        "SELECT d.document_id, j.job_id"
+                        " FROM source_documents AS d"
+                        " JOIN ingestion_jobs AS j ON j.document_id = d.document_id"
+                        " WHERE d.source_id = %s AND d.content_hash = %s"
+                        " AND d.parser_version = %s"
+                        " AND d.acquisition_method = %s"
+                        " AND j.status <> 'failed'"
+                        " ORDER BY d.version DESC LIMIT 1",
+                        (source_id, document.content_hash, parser_version, acquisition_method),
+                    ).fetchone()
+                    if duplicate is not None:
+                        duplicate_document = conn.execute(
+                            "SELECT " + _DOCUMENT_COLUMNS + " FROM source_documents WHERE document_id = %s",
+                            (duplicate[0],),
+                        ).fetchone()
+                        duplicate_job = conn.execute(
+                            "SELECT " + _JOB_COLUMNS + " FROM ingestion_jobs WHERE job_id = %s",
+                            (duplicate[1],),
+                        ).fetchone()
+                        assert duplicate_document is not None and duplicate_job is not None
+                        stored_document = _document_from_row(duplicate_document)
+                        if stored_document.content != content:
+                            raise deny(
+                                ErrorCode.INTERNAL_CONSISTENCY_ERROR,
+                                "相同资料指纹对应了不同正文",
+                            )
+                        return stored_document, _job_from_row(duplicate_job)
                 version_row = conn.execute(
-                    "SELECT COALESCE(MAX(version), 0) FROM source_documents"
-                    " WHERE source_id = %s",
+                    "SELECT COALESCE(MAX(version), 0) FROM source_documents WHERE source_id = %s",
                     (source_id,),
                 ).fetchone()
                 assert version_row is not None, "聚合查询必返回一行（COALESCE 保证非 NULL）"
@@ -259,7 +305,7 @@ class PostgresIngestionRepository:
                     "INSERT INTO source_documents ("
                     + _DOCUMENT_COLUMNS
                     + ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
-                    " %s::jsonb, %s::jsonb, %s)",
+                    " %s::jsonb, %s::jsonb, %s, %s, %s, %s)",
                     (
                         document.document_id,
                         document.tenant_id,
@@ -276,6 +322,9 @@ class PostgresIngestionRepository:
                         _jsonb_list(document.taint_sources),
                         _jsonb_list(document.derived_from),
                         document.observed_at,
+                        document.fetch_attempt_id or None,
+                        document.source_content_type or None,
+                        document.raw_content_hash or None,
                     ),
                 )
                 job = IngestionJob(
@@ -315,27 +364,20 @@ class PostgresIngestionRepository:
 
     def get_job(self, actor: Principal, project_id: str, job_id: str) -> IngestionJob:
         self.membership.get(actor, project_id)
-        with tenant_transaction(
-            tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
-        ) as conn:
+        with tenant_transaction(tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn) as conn:
             row = conn.execute(
                 "SELECT " + _JOB_COLUMNS + " FROM ingestion_jobs WHERE job_id = %s",
                 (job_id,),
             ).fetchone()
         if row is None:
-            raise deny(
-                ErrorCode.CROSS_TENANT_DENIED, "无权访问该项目", job_id=job_id
-            )
+            raise deny(ErrorCode.CROSS_TENANT_DENIED, "无权访问该项目", job_id=job_id)
         return _job_from_row(row)
 
     def list_jobs(self, actor: Principal, project_id: str) -> tuple[IngestionJob, ...]:
         self.membership.get(actor, project_id)
-        with tenant_transaction(
-            tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
-        ) as conn:
+        with tenant_transaction(tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn) as conn:
             rows = conn.execute(
-                "SELECT " + _JOB_COLUMNS
-                + " FROM ingestion_jobs WHERE project_id = %s"
+                "SELECT " + _JOB_COLUMNS + " FROM ingestion_jobs WHERE project_id = %s"
                 " ORDER BY created_at DESC, job_id DESC",
                 (project_id,),
             ).fetchall()
@@ -346,8 +388,7 @@ class PostgresIngestionRepository:
             tenant_id=job.tenant_id, project_id=job.project_id, dsn=self._worker_dsn
         ) as conn:
             row = conn.execute(
-                "SELECT " + _DOCUMENT_COLUMNS
-                + " FROM source_documents WHERE document_id = %s",
+                "SELECT " + _DOCUMENT_COLUMNS + " FROM source_documents WHERE document_id = %s",
                 (job.document_id,),
             ).fetchone()
         if row is None:
@@ -379,11 +420,10 @@ class PostgresIngestionRepository:
                 " WHERE d.project_id = %s"
                 " ORDER BY d.source_id, d.version DESC)"
             )
-        with tenant_transaction(
-            tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
-        ) as conn:
+        with tenant_transaction(tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn) as conn:
             rows = conn.execute(
-                "SELECT " + _CHUNK_COLUMNS
+                "SELECT "
+                + _CHUNK_COLUMNS
                 + " FROM source_chunks WHERE project_id = %s"
                 + scope
                 + " ORDER BY document_id, chunk_index",
@@ -401,12 +441,9 @@ class PostgresIngestionRepository:
     ) -> StoredChunk | None:
         """按不可变标识精确回读（见端口契约：禁止"挑第一条"）。"""
         self.membership.get(actor, project_id)
-        with tenant_transaction(
-            tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn
-        ) as conn:
+        with tenant_transaction(tenant_id=actor.tenant_id, project_id=project_id, dsn=self._dsn) as conn:
             row = conn.execute(
-                "SELECT " + _CHUNK_COLUMNS
-                + " FROM source_chunks"
+                "SELECT " + _CHUNK_COLUMNS + " FROM source_chunks"
                 " WHERE project_id = %s AND document_id = %s"
                 "   AND span_start = %s AND span_end = %s",
                 (project_id, document_id, span[0], span[1]),
@@ -422,9 +459,7 @@ class PostgresIngestionRepository:
         `study_worker`，用应用角色连接会一条也看不到。
         """
         with worker_transaction(dsn=self._worker_dsn) as conn:
-            conn.execute(
-                "SELECT set_config('app.worker_id', %s, true)", (worker_id,)
-            )
+            conn.execute("SELECT set_config('app.worker_id', %s, true)", (worker_id,))
             selected = conn.execute(_CLAIM_SELECT).fetchone()
             if selected is None:
                 return None
@@ -569,17 +604,14 @@ class PostgresIngestionRepository:
             (job.job_id,),
         ).fetchone()
         if current is None:
-            raise deny(
-                ErrorCode.CROSS_TENANT_DENIED, "任务不存在", job_id=job.job_id
-            )
+            raise deny(ErrorCode.CROSS_TENANT_DENIED, "任务不存在", job_id=job.job_id)
         if current[0] == str(IngestionStatus.SUCCEEDED):
             return
         if action == "fail" and current[0] == str(IngestionStatus.FAILED):
             return
         raise deny(
             ErrorCode.ILLEGAL_STATE_TRANSITION,
-            "这次认领已经失效（租约过期后任务被重新认领）；"
-            f"不得用 {action} 改写当前持有者的任务",
+            f"这次认领已经失效（租约过期后任务被重新认领）；不得用 {action} 改写当前持有者的任务",
             job_id=job.job_id,
         )
 

@@ -48,6 +48,33 @@ LATERAL_ALLOWED: dict[tuple[str, str], str] = {
     ("execution", "registry"): "执行器必须查注册表才能知道工具边界",
 }
 
+# Current package dependency boundary. Entries are explicit so a new package or
+# cross-package edge must be reviewed instead of silently escaping the layer test.
+# `platform` is the composition root: it may import any non-HTTP layer, and
+# api/workers depend on it instead of the HTTP entry `main`.
+ALLOWED_IMPORTS: dict[str, set[str]] = {
+    "api": {"audit", "budget", "core", "deployment", "execution", "identity", "knowledge", "learning", "platform", "policy", "product", "teaching", "tenancy", "workflow"},
+    "audit": {"core"},
+    "budget": {"core"},
+    "core": set(),
+    "db": {"audit", "budget", "core", "execution", "identity", "knowledge", "learning", "policy", "product", "teaching"},
+    "deployment": {"db", "identity"},
+    "execution": {"audit", "budget", "core", "policy", "registry"},
+    "identity": {"audit", "core"},
+    "knowledge": {"core", "identity", "policy", "product", "tenancy"},
+    "learning": {"core", "identity", "product"},
+    "main": {"api", "core", "metrics", "platform"},
+    "metrics": set(),
+    "platform": {"audit", "budget", "core", "db", "deployment", "execution", "identity", "knowledge", "learning", "policy", "product", "registry", "teaching", "workflow"},
+    "policy": {"core"},
+    "product": {"core", "identity"},
+    "registry": {"core"},
+    "teaching": {"budget", "core", "deployment", "identity", "knowledge", "product"},
+    "tenancy": {"core"},
+    "workers": {"core", "deployment", "identity", "knowledge", "platform", "policy", "teaching"},
+    "workflow": {"audit", "budget", "core", "execution", "knowledge", "learning", "policy", "registry", "tenancy"},
+}
+
 
 def module_files() -> list[Path]:
     return sorted(path for path in APP_ROOT.rglob("*.py") if path.name != "__init__.py")
@@ -55,6 +82,27 @@ def module_files() -> list[Path]:
 
 def module_name(path: Path) -> str:
     return path.relative_to(APP_ROOT).with_suffix("").parts[0]
+
+
+@pytest.mark.invariant
+def test_all_packages_and_dependency_edges_are_reviewed():
+    modules = {
+        name.removesuffix(".py")
+        for path in APP_ROOT.rglob("*.py")
+        if (name := path.relative_to(APP_ROOT).parts[0]) != "__init__.py"
+    }
+    assert modules == ALLOWED_IMPORTS.keys(), (
+        f"模块清单变化：新增 {modules - ALLOWED_IMPORTS.keys()}，"
+        f"已删除 {ALLOWED_IMPORTS.keys() - modules}"
+    )
+    violations = [
+        f"{path.relative_to(APP_ROOT)} -> {target}"
+        for path in module_files()
+        for target in imported_app_modules(path)
+        if target != module_name(path).removesuffix(".py")
+        and target not in ALLOWED_IMPORTS[module_name(path).removesuffix(".py")]
+    ]
+    assert not violations, "未审查的跨模块导入：\n" + "\n".join(violations)
 
 
 def imported_app_modules(path: Path) -> set[str]:
@@ -173,6 +221,24 @@ def test_memory_mode_import_does_not_require_psycopg():
 
 
 @pytest.mark.invariant
+def test_entry_packages_do_not_import_http_composition_root():
+    """`api/` 与 `workers/` 不得静态导入 `app.main`（HTTP 组成根）。
+
+    `app.main` 在导入期就会创建应用实例（`app = create_app()`）。
+    worker CLI 或路由模块导入它，等于让"后台进程/路由层"反过来拖起整个
+    Web 入口。平台装配应从 `app.platform` 取得。
+    """
+    violations = [
+        f"{path.relative_to(APP_ROOT)} -> {target}"
+        for package in ("api", "workers")
+        for path in sorted((APP_ROOT / package).rglob("*.py"))
+        for target in imported_app_paths(path)
+        if target == "app.main" or target.startswith("app.main.")
+    ]
+    assert not violations, "api/workers 反向依赖 app.main：\n" + "\n".join(violations)
+
+
+@pytest.mark.invariant
 def test_adapter_boundaries_do_not_regress_to_direct_cycles():
     violations: list[str] = []
     forbidden_package_edges = {
@@ -191,3 +257,14 @@ def test_adapter_boundaries_do_not_regress_to_direct_cycles():
         violations.append("db/learning_store.py -> app.learning.loop_store")
 
     assert not violations, "适配器边界发生回退：\n" + "\n".join(violations)
+
+
+@pytest.mark.invariant
+def test_database_adapters_do_not_import_http_layer():
+    violations = [
+        f"{path.relative_to(APP_ROOT)} -> {target}"
+        for path in (APP_ROOT / "db").rglob("*.py")
+        for target in imported_app_paths(path)
+        if target == "app.api" or target.startswith("app.api.")
+    ]
+    assert not violations, "数据适配器依赖 HTTP 接入层：\n" + "\n".join(violations)

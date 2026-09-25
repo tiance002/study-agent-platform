@@ -1,0 +1,38 @@
+# Project-only Codex MCP servers. This file is loaded for trusted projects.
+
+model_verbosity = "medium"
+[mcp_servers.serena]
+command = "powershell.exe"
+args = [
+  "-NoProfile",
+  "-ExecutionPolicy", "Bypass",
+  "-File", "E:/codex_workspace/study-plan/.codex/scripts/serena-mcp.ps1",
+  "start-mcp-server",
+  "--context=codex",
+  "--project-from-cwd",
+  "--enable-web-dashboard", "False",
+  "--open-web-dashboard", "False",
+]
+cwd = "E:/codex_workspace/study-plan"
+startup_timeout_sec = 180
+tool_timeout_sec = 120
+enabled = true
+
+[mcp_servers.serena.env]
+SERENA_USAGE_REPORTING = "false"
+
+[mcp_servers.playwright]
+command = "powershell.exe"
+args = [
+  "-NoProfile",
+  "-ExecutionPolicy", "Bypass",
+  "-File", "E:/codex_workspace/study-plan/.codex/scripts/playwright-mcp.ps1",
+  "--headless",
+  "--isolated",
+  "--no-webmcp",
+  "--file-paths=absolute",
+]
+cwd = "E:/codex_workspace/study-plan"
+startup_timeout_sec = 45
+tool_timeout_sec = 120
+enabled = true

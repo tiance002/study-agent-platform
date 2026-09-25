@@ -51,7 +51,7 @@ def test_openai_responses_adapter_parses_answer_and_usage(response_server):
         "usage": {"input_tokens": 12, "output_tokens": 7},
     }
     provider = OpenAIResponsesProvider(
-        api_key="test-secret",
+        api_key="test-secret-dev-only",
         base_url=f"http://127.0.0.1:{response_server.server_port}/v1",
     )
 
@@ -61,7 +61,7 @@ def test_openai_responses_adapter_parses_answer_and_usage(response_server):
     assert result.provider_request_id == "resp_test"
     assert result.usage == TokenUsage(input_tokens=12, output_tokens=7)
     assert result.answer_text == "答案"
-    assert _ResponsesHandler.seen_headers["authorization"] == "Bearer test-secret"
+    assert _ResponsesHandler.seen_headers["authorization"] == "Bearer test-secret-dev-only"
 
 
 def test_openai_responses_adapter_allows_plain_text_only_without_materials(response_server):
@@ -73,7 +73,7 @@ def test_openai_responses_adapter_allows_plain_text_only_without_materials(respo
         "usage": {"input_tokens": 12, "output_tokens": 7},
     }
     provider = OpenAIResponsesProvider(
-        api_key="test-secret",
+        api_key="test-secret-dev-only",
         base_url=f"http://127.0.0.1:{response_server.server_port}/v1",
     )
 
@@ -94,7 +94,7 @@ def test_openai_responses_adapter_keeps_plain_text_malformed_with_materials(resp
         "usage": {"input_tokens": 12, "output_tokens": 7},
     }
     provider = OpenAIResponsesProvider(
-        api_key="test-secret",
+        api_key="test-secret-dev-only",
         base_url=f"http://127.0.0.1:{response_server.server_port}/v1",
     )
 
@@ -107,7 +107,7 @@ def test_openai_responses_adapter_treats_server_error_as_unknown(response_server
     _ResponsesHandler.response_status = 503
     _ResponsesHandler.response_body = {"error": {"message": "hidden"}}
     provider = OpenAIResponsesProvider(
-        api_key="test-secret",
+        api_key="test-secret-dev-only",
         base_url=f"http://127.0.0.1:{response_server.server_port}/v1",
     )
 

@@ -108,9 +108,7 @@ def test_referer_fallback_same_origin_accepted_cross_origin_denied(ready):
 @pytest.mark.invariant
 def test_trusted_origin_allowlist_accepted(tmp_path):
     """配置的外部 Origin（反代后的外部域名）必须命中白名单。"""
-    settings = DeploymentSettings.load(
-        {"STUDY_PLATFORM_TRUSTED_ORIGINS": "https://app.example.com"}
-    )
+    settings = DeploymentSettings.load({"STUDY_PLATFORM_TRUSTED_ORIGINS": "https://app.example.com"})
     platform = build_platform(var_dir=tmp_path, settings=settings)
     _issue(platform, "token-x")
     client = _client(platform)
@@ -174,9 +172,7 @@ def test_behind_proxy_without_trusted_proxies_is_rejected():
 
     没有可信清单时 XFF 完全由客户端可控（限流键、转发头都可轮换伪造）。
     """
-    problems = DeploymentSettings.load(
-        {"STUDY_PLATFORM_BEHIND_PROXY": "1"}
-    ).configuration_problems()
+    problems = DeploymentSettings.load({"STUDY_PLATFORM_BEHIND_PROXY": "1"}).configuration_problems()
     assert any("TRUSTED_PROXIES" in p for p in problems)
 
 
@@ -282,10 +278,7 @@ def test_bearer_channel_can_be_disabled(ready):
 
     # cookie 路径不受影响。
     _issue(ready, "token-cookie")
-    assert (
-        client.post("/auth/invitations/exchange", json={"token": "token-cookie"}).status_code
-        == 200
-    )
+    assert client.post("/auth/invitations/exchange", json={"token": "token-cookie"}).status_code == 200
     assert client.get("/me").status_code == 200
 
 
@@ -350,15 +343,11 @@ def _event_types(platform) -> list[str]:
 @pytest.mark.invariant
 def test_exchange_audit_redacts_session_material(ready):
     """兑换审计可关联主体，但不得复制会话标识。"""
-    response = _client(ready).post(
-        "/auth/invitations/exchange", json={"token": "token-live"}
-    )
+    response = _client(ready).post("/auth/invitations/exchange", json={"token": "token-live"})
     assert response.status_code == 200
 
     records = [
-        record
-        for record in ready.audit.read_all()
-        if record.get("event_type") == "invitation_exchanged"
+        record for record in ready.audit.read_all() if record.get("event_type") == "invitation_exchanged"
     ]
     assert len(records) == 1
     assert "session_id" not in records[0]["payload"]
@@ -654,7 +643,7 @@ def test_production_rejects_cookie_secret_equal_session_secret():
         {
             "STUDY_PLATFORM_ENV": "production",
             # 占位 DSN：带上 password 标记（dev-only）以免秘密扫描误报，仅测配置解析。
-        "STUDY_PLATFORM_DSN": "postgresql://study_app:dev-only-change-me@h/db",
+            "STUDY_PLATFORM_DSN": "postgresql://study_app:dev-only-change-me@h/db",
             "STUDY_PLATFORM_SESSION_SECRET": "same-secret-0123456789abcdef0000",
             "STUDY_PLATFORM_COOKIE_SECRET": "same-secret-0123456789abcdef0000",
             "STUDY_PLATFORM_TOKEN_SECRET": "token-secret-0123456789abcdef00000",
@@ -768,15 +757,58 @@ def test_production_requires_a_separate_worker_credential():
 def test_unknown_mode_and_bad_origin_are_rejected():
     with pytest.raises(RuntimeError):
         DeploymentSettings.load({"STUDY_PLATFORM_ENV": "prod"})
-    settings = DeploymentSettings.load(
-        {"STUDY_PLATFORM_TRUSTED_ORIGINS": "not-a-url"}
-    )
+    settings = DeploymentSettings.load({"STUDY_PLATFORM_TRUSTED_ORIGINS": "not-a-url"})
     assert any("Origin" in p for p in settings.configuration_problems())
+
+
+def test_source_search_provider_requires_key_and_keeps_it_out_of_repr():
+    settings = DeploymentSettings.load({"STUDY_PLATFORM_SOURCE_SEARCH_PROVIDER": "tavily"})
+    assert any("SOURCE_SEARCH_API_KEY" in problem for problem in settings.configuration_problems())
+
+    configured = DeploymentSettings.load(
+        {
+            "STUDY_PLATFORM_SOURCE_SEARCH_PROVIDER": "tavily",
+            "STUDY_PLATFORM_SOURCE_SEARCH_API_KEY": "private-search-key",
+        }
+    )
+    assert not configured.configuration_problems()
+    assert "private-search-key" not in repr(configured)
+
+    with pytest.raises(RuntimeError, match="SOURCE_SEARCH_PROVIDER"):
+        DeploymentSettings.load({"STUDY_PLATFORM_SOURCE_SEARCH_PROVIDER": "tavilly"})
+
+
+def test_optional_local_query_rewriter_requires_literal_loopback_and_short_timeout():
+    disabled = DeploymentSettings.load({})
+    assert not any("本地查询改写" in problem for problem in disabled.configuration_problems())
+
+    configured = DeploymentSettings.load(
+        {
+            "STUDY_PLATFORM_LOCAL_QUERY_REWRITER_URL": ("http://127.0.0.1:11434/v1/chat/completions"),
+            "STUDY_PLATFORM_LOCAL_QUERY_REWRITER_MODEL": "qwen-local",
+        }
+    )
+    assert not any("本地查询改写" in problem for problem in configured.configuration_problems())
+
+    remote = DeploymentSettings.load(
+        {
+            "STUDY_PLATFORM_LOCAL_QUERY_REWRITER_URL": ("http://192.168.1.10:11434/v1/chat/completions"),
+            "STUDY_PLATFORM_LOCAL_QUERY_REWRITER_MODEL": "qwen-local",
+        }
+    )
+    assert any("loopback" in problem for problem in remote.configuration_problems())
+
+    unbounded = DeploymentSettings.load(
+        {
+            "STUDY_PLATFORM_LOCAL_QUERY_REWRITER_URL": ("http://127.0.0.1:11434/v1/chat/completions"),
+            "STUDY_PLATFORM_LOCAL_QUERY_REWRITER_MODEL": "qwen-local",
+            "STUDY_PLATFORM_LOCAL_QUERY_REWRITER_TIMEOUT_SECONDS": "4",
+        }
+    )
+    assert any("超时" in problem for problem in unbounded.configuration_problems())
 
 
 @pytest.mark.invariant
 def test_ttl_over_hard_cap_rejected_at_configuration():
-    settings = DeploymentSettings.load(
-        {"STUDY_PLATFORM_SESSION_TTL_MINUTES": str(60 * 24 * 31)}
-    )
+    settings = DeploymentSettings.load({"STUDY_PLATFORM_SESSION_TTL_MINUTES": str(60 * 24 * 31)})
     assert any("TTL" in p for p in settings.configuration_problems())

@@ -103,6 +103,19 @@ def _redirect(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 @pytest.mark.invariant
+def test_application_schema_version_matches_migration_head():
+    from app.main import EXPECTED_SCHEMA_VERSION
+
+    revisions, problems = cm.load_revisions()
+    cm.check(revisions, problems)
+    assert not problems
+    referenced = {parent for parents in revisions.values() for parent in parents}
+    assert [revision for revision in revisions if revision not in referenced] == [
+        EXPECTED_SCHEMA_VERSION
+    ]
+
+
+@pytest.mark.invariant
 def test_main_reports_skip_without_alembic(monkeypatch, tmp_path, capsys):
     """没有迁移工具时必须明确说「跳过」，且不能让读者误以为通过了。"""
     monkeypatch.setattr(cm, "ALEMBIC_INI", tmp_path / "alembic.ini")

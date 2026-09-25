@@ -6,7 +6,6 @@ import argparse
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 repo_root = Path(__file__).resolve().parents[1]
@@ -14,7 +13,7 @@ sys.path.insert(0, str(repo_root / "backend"))
 sys.path.insert(0, str(repo_root / "backend" / "tests"))
 sys.path.insert(0, str(repo_root / "tools"))
 import pg_support  # noqa: E402
-from pytest_gate_support import read_junit_stats  # noqa: E402
+from pytest_gate_support import read_junit_skips, read_junit_stats  # noqa: E402
 
 
 def run(command: list[str], environment: dict[str, str]) -> int:
@@ -35,7 +34,12 @@ def main() -> int:
 
     gate_dir = repo_root / "var" / "round8-gate"
     gate_dir.mkdir(parents=True, exist_ok=True)
-    temp_root = Path(os.environ.get("ROUND8_GATE_TEMP_ROOT", tempfile.gettempdir())) / "study-plan-round8"
+    configured_temp_root = os.environ.get("ROUND8_GATE_TEMP_ROOT")
+    temp_root = (
+        Path(configured_temp_root)
+        if configured_temp_root
+        else repo_root / "var" / "round8-gate" / f"tmp-{os.getpid()}"
+    )
     temp_root.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
     for variable in ("TEMP", "TMP", "TMPDIR"):
@@ -60,17 +64,41 @@ def main() -> int:
         ],
         [python, "-m", "ruff", "check", "backend", "tools"],
         [python, "-m", "mypy", "backend/app"],
+        [python, "-m", "compileall", "-q", "backend", "tools", "alembic"],
+        ["node", "--check", "frontend/api-client.js"],
+        ["node", "--check", "frontend/views.js"],
+        ["node", "--check", "frontend/commands.js"],
+        ["node", "--check", "frontend/project-state.js"],
         ["node", "--check", "frontend/app.js"],
+        [python, "tools/skills/gen_contracts.py", "--all", "--check"],
         [python, "tools/check_round8_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts, "--invite", args.invite],
+        # P9 证据栏浏览器回归：验证检索/路由标签与窄屏布局（复用同一预览）。
+        [python, "tools/check_p9_evidence_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts],
+        [python, "tools/check_round8_process_recovery.py"],
     ]
     for command in commands:
         if run(command, environment) != 0:
             print("ROUND8_GATE_FAILED:", " ".join(command))
             return 1
 
+    full_stats = read_junit_stats(full_xml)
+    full_skips = read_junit_skips(full_xml)
+    if full_stats.tests <= 0 or full_stats.failures or full_stats.errors:
+        print(f"ROUND8_GATE_FAILED: invalid full-suite evidence {full_stats}")
+        return 1
+    print(f"FULL_PYTEST_EVIDENCE: {full_stats}")
+    for detail in full_skips:
+        print("FULL_PYTEST_SKIP:", detail)
+
     postgres_stats = read_junit_stats(postgres_xml)
     if postgres_stats.tests <= 0 or postgres_stats.failures or postgres_stats.errors or postgres_stats.skipped:
         print(f"ROUND8_GATE_FAILED: invalid PostgreSQL evidence {postgres_stats}")
+        return 1
+    diff_check = subprocess.run(
+        ["git", "diff", "--check"], check=False, cwd=repo_root, env=environment
+    )
+    if diff_check.returncode != 0:
+        print("ROUND8_GATE_FAILED: git diff --check")
         return 1
     print(f"ROUND8_GATE_PASSED: PostgreSQL evidence {postgres_stats}; browser and static checks passed.")
     return 0

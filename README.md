@@ -21,8 +21,8 @@
 | ~~客户端自报确认~~ | **已实现**：确认是服务端记录，绑定主体 / 项目 / 工具 / 参数 / 有效期，单次消费 | 批量确认与确认疲劳限流未实现 |
 | KMS / Secret Manager | 环境变量 + 开发密钥 | 密钥管理与轮换缺失 |
 | 隔离沙箱（gVisor/Firecracker） | `run_in_sandbox` 为占位，**不执行任何代码** | 无代码执行能力 |
-| Fetcher / Package Proxy | 仅域名白名单示意，**不真的出网** | 无 SSRF 防护实现 |
-| 资料解析格式 | **只有** UTF-8 纯文本与 Markdown，单版本上限 1 MiB（按字节） | 无 PDF / Office / OCR / 网页抓取 —— 这些都需要新的解析边界，且会引入"解析结果不可复现" |
+| Fetcher / Package Proxy | **已实现受限网页获取**：worker 在 URL/DNS 校验、重定向逐跳校验和地址固定连接后请求网页 | 通用包代理未实现；抓取仅支持受限的 HTTP/HTML 路径 |
+| 资料解析格式 | 支持 UTF-8 纯文本、Markdown 与受限 HTML 文本抽取，内容大小有界 | 无 PDF / Office / OCR；网页解析结果受远端内容变化影响 |
 | 语义检索 | **不是**：检索是 `keyword/v1` 关键词基线（NFKC 归一 + 中文 2-gram + 整数权重），结果确定性可复现 | 同义改写命中不了；无 pgvector、无 reranker、无中文分词器 |
 | 模型调用（L0/L1/L2） | 已接入 OpenAI Responses 兼容 provider，并完成 DeepSeek 生产联调 | 无资料时明确降级为 `inference_only`；尚无原生 token 流 |
 | ~~durable 摄取队列~~ | **已实现**：`ingestion_jobs` + lease + `FOR UPDATE SKIP LOCKED`；崩溃后租约到期可回收，重复完成幂等 | outbox（面向外部副作用的持久化派发）仍未实现 |
@@ -30,7 +30,7 @@
 | ~~认领围栏~~ | **已实现**：每次认领产生不可复用的 `claim_token`（迁移 `0009`）；`complete` / `fail` 在**一条条件更新**里比对状态 + token + 租约期限 | 落定后 token 清空，因此"旧持有者的迟到 `complete`"与"重复投递"事后不可区分（不改变状态、不重复写片段） |
 | ~~模型教学交互~~ | **已实现**：durable teaching run（`claim_token` 围栏）+ provider attempt 存证 + 整数微单位预算 + 引用三道关卡 + SSE 事件回放 | 原生 token 流未实现 |
 | 前端 | React 单页工作台，由同源 FastAPI 静态托管 | 尚未拆分为独立构建产物和组件包 |
-| 可观测性 | 健康检查、审计 outbox、systemd 日志和备份恢复记录 | 尚无 OTel、集中指标与告警 |
+| 可观测性 | 健康检查、审计 outbox、systemd 日志，以及可选的受保护 `/metrics` 聚合指标 | 无 OTel 与告警；指标端点默认关闭，需显式配置访问令牌 |
 | 学习闭环题型/评分/复测 | 有诊断、计划生成、任务流转、自报提交与证据投影 | 无题库、无自动评分、无复测分级 |
 
 这些不是「顺手没做」，而是**按设计有意延后**：先让边界可证明，再逐项换掉适配器。
@@ -71,6 +71,14 @@ python -m venv .venv
 > 见下一节 `scripts\dev.cmd` 的说明。
 
 ### 2. 跑测试
+
+日常开发先运行受影响的测试；例如修改导入边界时：
+
+```bash
+.venv/Scripts/python -m pytest backend/tests/test_import_direction.py -q
+```
+
+具体测试文件应按本次变更选择。里程碑、发布或任务计划明确要求完整回归时，再运行全量测试；PR 的全量测试由 CI 执行：
 
 ```bash
 .venv/Scripts/python -m pytest -q
@@ -234,11 +242,11 @@ L1 接入  api/
 L2 边界  tenancy/（身份与租户上下文） · policy/（Policy Gateway）
 L3 编排  workflow/ · learning/（投影写入）
 L4 能力  registry/ · knowledge/ · execution/
-L5 事实  tenancy/ports.py 定义的适配器
+L5 事实  各领域 ports.py 定义仓储端口，db/ 提供 PostgreSQL 适配器
 旁路     audit/（审计） · learning/（Evidence → 投影）
 ```
 
-**依赖单向**：上层可依赖下层，反向依赖由测试机械拒绝（见 `test_registry_boundaries` 与 CI 计划）。
+**依赖检查**：`backend/tests/test_import_direction.py` 显式列出跨包导入边，拒绝未知模块和未经审查的新边；组合根回调仍列为待消除的历史依赖。
 层间通信规则见 `docs/superpowers/specs/2026-09-18-06-layered-architecture-and-module-contracts.md`。
 
 ---

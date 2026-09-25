@@ -31,7 +31,7 @@ class AuthMethod(StrEnum):
     """How a persistent browser session was authenticated."""
 
     INVITATION = "invitation"
-    PASSWORD = "password"
+    PASSWORD = "password"  # dev-only: 认证方式标签，非凭据
 
 
 @dataclass(frozen=True)

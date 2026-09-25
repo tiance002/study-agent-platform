@@ -1,0 +1,8 @@
+{
+  "name": "study-plan-codex-context7",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "ctx7": "0.5.11"
+  }
+}

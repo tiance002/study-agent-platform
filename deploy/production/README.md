@@ -69,7 +69,13 @@ set +a
   --principal u_first_release
 ```
 
-Open `https://120.55.115.162`, exchange the token once, and create a project.
+Open `https://120.55.115.162` and use the **注册账号** tab. Registration and
+password login are enabled in the current first-release configuration; after
+registration the server creates the user's initial project automatically.
+
+The invitation command remains an optional operator path for deployments that
+choose to disable open registration. It is not required for ordinary users in
+the current release.
 
 ## Operations
 

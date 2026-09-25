@@ -37,15 +37,138 @@ from dataclasses import dataclass
 
 from app.core.evidence_issues import EvidenceAssessment
 from app.identity.models import Principal
+from app.knowledge.embedding import (
+    EmbeddingProvider,
+    VectorIndex,
+    embed_chunk_key,
+    embedding_scope,
+)
 from app.knowledge.evidence_state import (
     RetrievalHealth,
     RetrievalSignals,
     assess_retrieval,
     assess_retrieval_health,
 )
+from app.knowledge.fusion import HYBRID_RANKING_VERSION, fuse_rrf
 from app.knowledge.models import StoredChunk
 from app.knowledge.ports import IngestionRepository
-from app.knowledge.retrieval import RELEVANCE_FLOOR, ScoredChunk, rank_chunks
+from app.knowledge.retrieval import RANKING_VERSION, RELEVANCE_FLOOR, ScoredChunk, rank_chunks
+
+#: 检索模式闭集（R9 任务 3 / 任务 6 的指标标签）。
+#:
+#: - `keyword`：向量组件未注入，走 `keyword/v1` 基线 —— 这是**正常**状态，
+#:   不是降级；
+#: - `hybrid`：关键词与向量两路候选经确定性 RRF 融合；
+#: - `degraded`：配置了向量组件但失败回退关键词。降级必须携带原因
+#:   （`DEGRADED_REASONS`），否则"回退发生了"只是日志里的一句陈述，
+#:   既进不了指标，也无法回答"为什么用户拿到的是关键词结果"。
+RETRIEVAL_MODES = ("keyword", "hybrid", "degraded")
+
+#: 降级原因闭集。与 `RETRIEVAL_MODES` 一样是指标标签，取值变化
+#: 等同于指标口径变化，必须显式更新。
+DEGRADED_REASONS = (
+    "embedding_provider_failed",
+    "vector_index_unavailable",
+    "embedding_model_version_mismatch",
+)
+
+
+@dataclass(frozen=True)
+class HybridSearchResult:
+    """一次检索的**结果与过程事实**（`search_hybrid` 的返回值）。
+
+    `hits` 与 `search()` 的返回同形（`ScoredChunk` 序列，融合后的顺序）；
+    其余字段回答"这次检索是怎么跑的"：模式、降级原因、排序规则版本、
+    每个候选的召回来源。它们一起进入 run 存证与指标 —— 检索模式
+    只有跟着结果一起被记录，事后才分得清"关键词结果"是基线还是回退。
+    """
+
+    hits: tuple[ScoredChunk, ...]
+    mode: str
+    degraded_reason: str
+    ranking_version: str
+    #: `(chunk_id, 来源标签)`，来源标签为 `keyword` / `vector` / `keyword+vector`。
+    recall_sources: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.mode not in RETRIEVAL_MODES:
+            raise ValueError(f"mode 必须是 {RETRIEVAL_MODES} 之一，收到 {self.mode!r}")
+        if self.mode == "degraded":
+            if self.degraded_reason not in DEGRADED_REASONS:
+                raise ValueError(
+                    f"degraded 必须携带 {DEGRADED_REASONS} 之一的原因，"
+                    f"收到 {self.degraded_reason!r}"
+                )
+        elif self.degraded_reason:
+            raise ValueError(f"只有 degraded 模式可以携带降级原因，当前 mode 是 {self.mode!r}")
+        if not self.ranking_version:
+            raise ValueError("ranking_version 不能为空")
+
+    def as_decision(self) -> RetrievalDecision:
+        """转成教学 run 的存证视图（模式 / 原因 / 排序规则版本）。"""
+        return RetrievalDecision(
+            mode=self.mode,
+            reason_code=self.degraded_reason,
+            ranking_version=self.ranking_version,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalDecision:
+    """一次检索的**存证视图**（教学 run 持久化用，与 `RoutingDecision` 同构）。
+
+    为什么不直接存 `HybridSearchResult`：那个对象携带候选与召回来源
+    （随每次检索变化、体积大），而 run 存证需要的是**可聚合的稳定事实**
+    —— 模式、原因、排序规则版本。字段收敛进闭集，指标渲染才能用
+    白名单而不是透传任意标签。
+    """
+
+    mode: str
+    reason_code: str
+    ranking_version: str
+    policy_version: str = "retrieval-route/v1"
+
+    def __post_init__(self) -> None:
+        if self.mode not in RETRIEVAL_MODES:
+            raise ValueError(f"mode 必须是 {RETRIEVAL_MODES} 之一，收到 {self.mode!r}")
+        if self.mode == "degraded":
+            if self.reason_code not in DEGRADED_REASONS:
+                raise ValueError(
+                    f"degraded 的 reason_code 必须是 {DEGRADED_REASONS} 之一，"
+                    f"收到 {self.reason_code!r}"
+                )
+        elif self.reason_code != "":
+            raise ValueError(f"{self.mode} 模式不携带原因，收到 {self.reason_code!r}")
+        if not self.ranking_version:
+            raise ValueError("ranking_version 不能为空")
+        if self.policy_version != "retrieval-route/v1":
+            raise ValueError("不支持的检索存证策略版本")
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "policy_version": self.policy_version,
+            "mode": self.mode,
+            "reason_code": self.reason_code,
+            "ranking_version": self.ranking_version,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> RetrievalDecision:
+        if not isinstance(raw, dict) or set(raw) != {
+            "policy_version",
+            "mode",
+            "reason_code",
+            "ranking_version",
+        }:
+            raise ValueError("检索存证字段无效")
+        if not all(isinstance(value, str) for value in raw.values()):
+            raise ValueError("检索存证值必须是文本")
+        return cls(
+            policy_version=raw["policy_version"],
+            mode=raw["mode"],
+            reason_code=raw["reason_code"],
+            ranking_version=raw["ranking_version"],
+        )
 
 
 @dataclass(frozen=True)
@@ -79,15 +202,34 @@ class RetrievalAssessment:
 class KnowledgeRepository:
     """项目内检索的**唯一**入口。
 
-    注意这里是"仓储"而不是"适配器"：它的两个方法都没有后端分支，
+    注意这里是"仓储"而不是"适配器"：它的方法都没有后端分支，
     后端差异全部由注入的 `IngestionRepository` 承担。
     """
 
     def __init__(
-        self, *, ingestion: IngestionRepository, relevance_floor: int = RELEVANCE_FLOOR
+        self,
+        *,
+        ingestion: IngestionRepository,
+        relevance_floor: int = RELEVANCE_FLOOR,
+        embedding_provider: EmbeddingProvider | None = None,
+        vector_index: VectorIndex | None = None,
     ) -> None:
+        """向量组件**成对注入、或都不注入**。
+
+        只配一半（例如有 provider 没有 index）意味着混合路径注定拿不到
+        向量候选 —— 那不是"尽力而为"，而是装配错误。与其在每次检索时
+        静默降级，不如在构造期拒绝：错误配置应该当场炸，而不是变成
+        一条"所有请求都 degraded"的运行时指标。
+        """
         self._ingestion = ingestion
         self._relevance_floor = relevance_floor
+        if (embedding_provider is None) != (vector_index is None):
+            raise ValueError(
+                "embedding_provider 与 vector_index 必须成对注入或同时缺省；"
+                "只配一半的混合检索注定降级，应在装配期暴露"
+            )
+        self._embedding_provider = embedding_provider
+        self._vector_index = vector_index
 
     def search(
         self,
@@ -102,11 +244,128 @@ class KnowledgeRepository:
         `actor` 是必需的：作用域过滤要按主体判定成员关系（未授予的主体
         连"这个项目有几条片段"都不该知道）。把它做成可选参数会立刻出现
         "忘了传"的调用点，而那种调用默认拿到什么，取决于实现者的心情。
+
+        本方法是 `search_hybrid()` 的薄封装（只取 `hits`）：现有调用方
+        （teaching 上下文、测试）不需要检索模式事实，签名与语义保持
+        与第 4 轮基线完全一致。
+        """
+        return self.search_hybrid(actor, project_id, query, limit=limit).hits
+
+    def search_hybrid(
+        self,
+        actor: Principal,
+        project_id: str,
+        query: str,
+        *,
+        limit: int = 10,
+    ) -> HybridSearchResult:
+        """混合检索：关键词基线 + 可选向量候选 + 确定性 RRF 融合。
+
+        ## 降级规则（R9 任务 3 退出门）
+
+        以下任一情况**不产生异常**，而是回退关键词结果并记录原因 ——
+        向量路径的任何失败都不许弄丢关键词路径已经拿到的答案：
+
+        1. provider 的 `model_revision` 与索引的 revision 不一致
+           → `embedding_model_version_mismatch`（换模型后旧索引整体失效）；
+        2. provider 调用抛任何异常（超时、网络、限流）→ `embedding_provider_failed`；
+        3. 作用域内**没有任何**片段在索引中有向量，或索引本身的
+           `has` / `search` 抛异常 → `vector_index_unavailable`
+           （索引整体未建或不可用；部分缺失只是该片段不进向量候选，
+           不触发降级）。
+
+        向量组件未注入时返回 `keyword` 模式 —— 基线是正常状态，不是降级。
+
+        ## 作用域不变量
+
+        向量候选与关键词候选来自**同一个** `stored_chunks` 收窄结果：
+        租户 / 项目 / 最新版本过滤发生在 SQL / RLS 边界内（02 号规格 §7），
+        索引只对已收窄的键排序，不存在"向量路径绕过 RLS"的第二条入口。
+        索引键还把 `(tenant_id, project_id)` 烙进 `input_hash` ——
+        跨项目同内容不共用缓存身份（计划不变量：跨项目不能复用缓存）。
         """
         # 默认就是最新版本（`latest_only=True`）：这是**检索**该有的语义，
         # 历史版本由引用按 `document_id` 精确回读，不经检索。
         scoped = self._ingestion.stored_chunks(actor, project_id, latest_only=True)
-        return rank_chunks(scoped, query, limit=limit)
+        keyword_hits = rank_chunks(scoped, query, limit=limit)
+
+        provider = self._embedding_provider
+        index = self._vector_index
+        if provider is None or index is None:
+            return HybridSearchResult(
+                hits=keyword_hits,
+                mode="keyword",
+                degraded_reason="",
+                ranking_version=RANKING_VERSION,
+                recall_sources=tuple(
+                    (hit.chunk.chunk_id, "keyword") for hit in keyword_hits
+                ),
+            )
+
+        def _degraded(reason: str) -> HybridSearchResult:
+            return HybridSearchResult(
+                hits=keyword_hits,
+                mode="degraded",
+                degraded_reason=reason,
+                ranking_version=RANKING_VERSION,
+                recall_sources=tuple(
+                    (hit.chunk.chunk_id, "keyword") for hit in keyword_hits
+                ),
+            )
+
+        if provider.model_revision != index.model_revision:
+            return _degraded("embedding_model_version_mismatch")
+
+        try:
+            query_embedding = provider.embed_texts((query,))[0]
+        except Exception:  # noqa: BLE001 - 任何 provider 失败都降级，绝不上抛
+            return _degraded("embedding_provider_failed")
+
+        # 键按 `stored_chunks` 的稳定顺序（document_id, chunk_index）派生。
+        # 同 input_hash 可能对应多个片段（同内容不同 chunk）：向量命中按
+        # 稳定顺序**展开**为连续排名，而不是只保留顺序在前的那个 ——
+        # 否则同内容的第二、三个片段永远拿不到向量候选，RRF 得分
+        # 被存储顺序单方面决定。
+        scope = embedding_scope(actor.tenant_id, project_id)
+        index_keys: list = []
+        chunks_by_input_hash: dict[str, list[StoredChunk]] = {}
+        for chunk in scoped:
+            key = embed_chunk_key(
+                chunk_content_hash=chunk.content_hash,
+                chunk_parser_version=chunk.parser_version,
+                model_revision=provider.model_revision,
+                scope=scope,
+            )
+            index_keys.append(key)
+            chunks_by_input_hash.setdefault(key.input_hash, []).append(chunk)
+
+        try:
+            indexed = any(index.has(key) for key in index_keys)
+        except Exception:  # noqa: BLE001 - 索引故障视同不可用，不让它弄丢答案
+            return _degraded("vector_index_unavailable")
+        if not indexed:
+            return _degraded("vector_index_unavailable")
+
+        try:
+            matches = index.search(tuple(index_keys), query_embedding, limit=limit)
+        except Exception:  # noqa: BLE001 - 同上：索引故障 = 降级，不上抛
+            return _degraded("vector_index_unavailable")
+        vector_hits: list[tuple[StoredChunk, int]] = []
+        for match in matches:
+            for chunk in chunks_by_input_hash[match.key.input_hash]:
+                vector_hits.append((chunk, len(vector_hits) + 1))
+        fused = fuse_rrf(keyword_hits, tuple(vector_hits), limit=limit)
+        recall_sources = tuple(
+            (candidate.chunk.chunk_id, "+".join(candidate.recalled_from))
+            for candidate in fused
+        )
+        return HybridSearchResult(
+            hits=tuple(candidate.as_scored_chunk() for candidate in fused),
+            mode="hybrid",
+            degraded_reason="",
+            ranking_version=HYBRID_RANKING_VERSION,
+            recall_sources=recall_sources,
+        )
 
     def read_span(
         self,

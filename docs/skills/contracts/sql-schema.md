@@ -7,18 +7,19 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:c813b473e05c6391372eb213382069d35a3f48f149afc0504c3e97742df50b29, generated_at=2026-09-22T07:54:23Z -->
-> 生成时间：2026-09-22T07:54:23Z
+<!-- BEGIN GENERATED: source=由 alembic 迁移导出（数据库的权威定义）, source_hash=sha256:15f5bd55f0780d38517b41cab54436a43619b352bd2448f176bbaa6e2f9e9592, generated_at=2026-09-24T07:47:18Z -->
+> 生成时间：2026-09-24T07:47:18Z
 
 > 由 `tools/skills/gen_contracts.py` 从 **alembic 迁移**导出，请勿手工编辑本区。
 > 迁移是数据库的权威定义，本区是它的生成视图。
 
-当前 head：`0013`
+当前 head：`0019`
 
 ### 表总览
 
 | 表 | 来源迁移 | 隔离级别 | 应用角色权限 | worker 角色权限 | 列数 |
 |---|---|---|---|---|---:|
+| `acquisition_jobs` | 0014 → 0014 改写 | 租户+项目 | SELECT, INSERT | SELECT, UPDATE | 20 |
 | `action_intents` | 0001 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 11 |
 | `auth_attempt_counters` | 0004 | 系统级（无租户，认证前设施） | 无表权限（仅 SECURITY DEFINER 函数 EXECUTE） | — | 4 |
 | `auth_audit_outbox` | 0006 → 0006 改写 | 系统级（认证前审计事实中转；应用 INSERT/SELECT/UPDATE，无 DELETE） | SELECT, INSERT, UPDATE | — | 9 |
@@ -37,15 +38,17 @@
 | `project_grants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 4 |
 | `projects` | 0001 → 0002 改写 | 成员感知 | SELECT, INSERT, UPDATE, DELETE | — | 7 |
 | `provider_attempts` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 13 |
+| `source_candidates` | 0014 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 10 |
 | `source_chunks` | 0007 | 租户+项目 | SELECT, INSERT | SELECT, INSERT | 15 |
-| `source_documents` | 0007 | 租户+项目 | SELECT, INSERT | SELECT | 15 |
+| `source_documents` | 0007 | 租户+项目 | SELECT, INSERT | SELECT | 18 |
+| `source_fetch_artifacts` | 0016 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 8 |
 | `sources` | 0002 | 租户+项目 | SELECT, INSERT, UPDATE, DELETE | — | 8 |
 | `task_assessments` | 0005 | 租户+项目 | SELECT, INSERT | — | 8 |
 | `task_submissions` | 0005 | 租户+项目+主体 | SELECT, INSERT | — | 8 |
 | `teaching_budgets` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 11 |
 | `teaching_events` | 0010 | 租户+项目 | SELECT, INSERT | SELECT, INSERT | 7 |
 | `teaching_reservations` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | 12 |
-| `teaching_runs` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 22 |
+| `teaching_runs` | 0010 | 租户+项目 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 24 |
 | `teaching_tenant_budgets` | 0010 | 租户 | SELECT, INSERT, UPDATE | SELECT, UPDATE | 8 |
 | `tenants` | 0001 | 租户 | SELECT, INSERT, UPDATE, DELETE | — | 3 |
 | `user_sessions` | 0002 | 租户+主体 | SELECT, INSERT, UPDATE, DELETE | — | 6 |
@@ -54,6 +57,26 @@
 
 | 表 | 列 | 类型 |
 |---|---|---|
+| `acquisition_jobs` | `acquisition_id` | `text` |
+| `acquisition_jobs` | `tenant_id` | `text` |
+| `acquisition_jobs` | `project_id` | `text` |
+| `acquisition_jobs` | `source_id` | `text` |
+| `acquisition_jobs` | `candidate_id` | `text` |
+| `acquisition_jobs` | `requested_by` | `text` |
+| `acquisition_jobs` | `url` | `text` |
+| `acquisition_jobs` | `title` | `text` |
+| `acquisition_jobs` | `media_type` | `text` |
+| `acquisition_jobs` | `language` | `text` |
+| `acquisition_jobs` | `idempotency_key` | `text` |
+| `acquisition_jobs` | `status` | `text` |
+| `acquisition_jobs` | `attempt_count` | `integer` |
+| `acquisition_jobs` | `lease_owner` | `text` |
+| `acquisition_jobs` | `lease_until` | `timestamptz` |
+| `acquisition_jobs` | `claim_token` | `uuid` |
+| `acquisition_jobs` | `error_code` | `text` |
+| `acquisition_jobs` | `error_detail` | `text` |
+| `acquisition_jobs` | `created_at` | `timestamptz` |
+| `acquisition_jobs` | `updated_at` | `timestamptz` |
 | `action_intents` | `logical_action_id` | `text` |
 | `action_intents` | `tenant_id` | `text` |
 | `action_intents` | `project_id` | `text` |
@@ -208,6 +231,16 @@
 | `provider_attempts` | `created_at` | `timestamptz` |
 | `provider_attempts` | `updated_at` | `timestamptz` |
 | `provider_attempts` | `request_payload` | `jsonb` |
+| `source_candidates` | `candidate_id` | `text` |
+| `source_candidates` | `tenant_id` | `text` |
+| `source_candidates` | `project_id` | `text` |
+| `source_candidates` | `url` | `text` |
+| `source_candidates` | `title` | `text` |
+| `source_candidates` | `snippet` | `text` |
+| `source_candidates` | `source_domain` | `text` |
+| `source_candidates` | `status` | `text` |
+| `source_candidates` | `discovered_at` | `timestamptz` |
+| `source_candidates` | `expires_at` | `timestamptz` |
 | `source_chunks` | `chunk_id` | `text` |
 | `source_chunks` | `tenant_id` | `text` |
 | `source_chunks` | `project_id` | `text` |
@@ -238,6 +271,17 @@
 | `source_documents` | `taint_sources` | `jsonb` |
 | `source_documents` | `derived_from` | `jsonb` |
 | `source_documents` | `observed_at` | `timestamptz` |
+| `source_documents` | `fetch_attempt_id` | `text` |
+| `source_documents` | `source_content_type` | `text` |
+| `source_documents` | `raw_content_hash` | `text` |
+| `source_fetch_artifacts` | `acquisition_id` | `text` |
+| `source_fetch_artifacts` | `tenant_id` | `text` |
+| `source_fetch_artifacts` | `project_id` | `text` |
+| `source_fetch_artifacts` | `content_type` | `text` |
+| `source_fetch_artifacts` | `raw_content` | `bytea` |
+| `source_fetch_artifacts` | `content_hash` | `text` |
+| `source_fetch_artifacts` | `parser_version` | `text` |
+| `source_fetch_artifacts` | `fetched_at` | `timestamptz` |
 | `sources` | `source_id` | `text` |
 | `sources` | `tenant_id` | `text` |
 | `sources` | `project_id` | `text` |
@@ -314,6 +358,8 @@
 | `teaching_runs` | `error_detail` | `text` |
 | `teaching_runs` | `created_at` | `timestamptz` |
 | `teaching_runs` | `updated_at` | `timestamptz` |
+| `teaching_runs` | `routing_decision` | `jsonb` |
+| `teaching_runs` | `retrieval_decision` | `jsonb` |
 | `teaching_tenant_budgets` | `tenant_id` | `text` |
 | `teaching_tenant_budgets` | `total_micro` | `bigint` |
 | `teaching_tenant_budgets` | `reserved_micro` | `bigint` |

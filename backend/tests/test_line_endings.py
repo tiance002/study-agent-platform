@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 
 import pytest
@@ -40,7 +41,8 @@ CRLF_SUFFIXES = frozenset({".cmd", ".bat"})
 SKIP_DIRS = frozenset(
     {
         ".venv", "__pycache__", ".git", "var", "node_modules",
-        ".mypy_cache", ".pytest_cache", ".ruff_cache",
+        ".mypy_cache", ".pytest_cache", ".ruff_cache", ".agents", ".codex",
+        ".planning", ".serena", ".trae",
     }
 )
 #: 测试报告是 pytest-html 生成的产物（已在 `.gitignore` 里）。
@@ -48,14 +50,16 @@ SKIP_FILES = frozenset({"pytest_html_report.html"})
 
 
 def _candidate_files(suffixes: frozenset[str]):
-    for path in sorted(ROOT.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in suffixes:
-            continue
-        if set(path.parts) & SKIP_DIRS or path.name in SKIP_FILES:
-            continue
-        if any(part.endswith(".egg-info") for part in path.parts):
-            continue
-        yield path
+    for directory, child_dirs, filenames in os.walk(ROOT):
+        child_dirs[:] = sorted(
+            name
+            for name in child_dirs
+            if name not in SKIP_DIRS and not name.endswith(".egg-info")
+        )
+        for filename in sorted(filenames):
+            path = pathlib.Path(directory) / filename
+            if path.suffix.lower() in suffixes and path.name not in SKIP_FILES:
+                yield path
 
 
 @pytest.mark.invariant

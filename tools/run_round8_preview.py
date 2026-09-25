@@ -14,6 +14,7 @@ import uvicorn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
+from app.deployment import DeploymentSettings
 from app.identity.ports import SystemContext
 from app.main import DEMO_TENANT, build_platform, create_app
 from app.teaching.models import RawCitation
@@ -52,7 +53,15 @@ def main() -> None:
     parser.add_argument("--var-dir", default="var/round8-preview")
     args = parser.parse_args()
 
-    platform = build_platform(var_dir=Path(args.var_dir))
+    platform = build_platform(
+        var_dir=Path(args.var_dir),
+        settings=DeploymentSettings.load(
+            {
+                "STUDY_PLATFORM_REGISTRATION_ENABLED": "true",
+                "STUDY_PLATFORM_PASSWORD_LOGIN_ENABLED": "true",
+            }
+        ),
+    )
     platform.teaching_provider = PreviewProvider()
     now = platform.clock.now()
     platform.invitations.issue(

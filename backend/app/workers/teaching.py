@@ -33,8 +33,8 @@ from typing import TYPE_CHECKING, Literal
 from app.core.errors import ErrorCode, PlatformError
 from app.teaching.service import TeachingService
 
-if TYPE_CHECKING:  # 只在类型检查时导入：`app.main` 在导入期就会装配应用实例
-    from app.main import PlatformState
+if TYPE_CHECKING:  # 只在类型检查时导入：装配模块导入期无副作用，但保持延迟以省启动开销
+    from app.platform import PlatformState
 
 #: 租约时长（秒）。要大于一次"上下文构建 + provider 调用"的最坏耗时：
 #: 太短会让仍在调模型的 worker 被回收（两个 worker 同时处理一个运行），
@@ -45,13 +45,9 @@ DEFAULT_LEASE_SECONDS = 600
 DEFAULT_IDLE_SLEEP_SECONDS = 2.0
 
 #: 围栏失效 / 运行不属于我们：不写终态，直接放手。
-_STALE_CODES = frozenset(
-    {ErrorCode.ILLEGAL_STATE_TRANSITION, ErrorCode.CROSS_TENANT_DENIED}
-)
+_STALE_CODES = frozenset({ErrorCode.ILLEGAL_STATE_TRANSITION, ErrorCode.CROSS_TENANT_DENIED})
 
-WorkerOutcome = Literal[
-    "idle", "stale", "succeeded", "failed", "reconciliation_required"
-]
+WorkerOutcome = Literal["idle", "stale", "succeeded", "failed", "reconciliation_required"]
 
 
 def run_once(
@@ -74,6 +70,7 @@ def run_once(
         clock=platform.clock,
         platform_budget=_platform_budget_for_worker(platform),
         platform_provider=_provider_name(platform),
+        local_query_rewriter=getattr(platform, "local_query_rewriter", None),
     )
     try:
         # attempt 是 durable 派发事实：没有结果不等于没有派发。
@@ -157,9 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="队列为空时继续等待，供 systemd 等监管进程运行常驻 worker",
     )
-    parser.add_argument(
-        "--worker-id", default=f"teaching-worker-{time.time_ns() % 1_000_000}"
-    )
+    parser.add_argument("--worker-id", default=f"teaching-worker-{time.time_ns() % 1_000_000}")
     parser.add_argument("--lease-seconds", type=int, default=DEFAULT_LEASE_SECONDS)
     parser.add_argument("--idle-sleep", type=float, default=DEFAULT_IDLE_SLEEP_SECONDS)
     args = parser.parse_args(argv)
@@ -170,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.once and args.daemon:
         parser.error("--once 与 --daemon 不能同时使用")
 
-    from app.main import build_platform
+    from app.platform import build_platform
 
     platform = build_platform()
     if platform.teaching_provider is None:
@@ -180,9 +175,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     while True:
-        outcome = run_once(
-            platform, worker_id=args.worker_id, lease_seconds=args.lease_seconds
-        )
+        outcome = run_once(platform, worker_id=args.worker_id, lease_seconds=args.lease_seconds)
         if outcome == "idle":
             if not args.daemon:
                 return 0
