@@ -32,10 +32,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path
 
 import pg_support
@@ -45,7 +43,6 @@ from app.core.errors import ErrorCode, PlatformError
 from app.core.hashing import content_hash
 from app.deployment import DeploymentSettings
 from app.identity.models import Principal
-from app.identity.ports import SystemContext
 from app.knowledge.processor import DocumentProcessor
 from app.knowledge.retrieval import RANKING_VERSION
 from app.main import PlatformState, build_platform, create_app
@@ -162,45 +159,25 @@ def _expire_lease(job_id: str) -> None:
     assert updated == 1, "租约没被改到 —— 后面那句'token 已过期'就没有意义"
 
 
-def _seed_tenant(prefix: str, name: str) -> tuple[str, str]:
-    """建租户与主体（运维动作，用超级用户写）。返回 `(tenant_id, principal_id)`。
+def _register(platform: PlatformState, prefix: str) -> tuple[TestClient, str, str, str]:
+    """通过真实 HTTP 注册拿一个 cookie 会话。
 
-    租户 id 每次运行唯一：PG 是跨运行持久的，固定 id 会让第二次运行撞上
-    上一次留下的项目、成员与唯一约束，而报错指向上一次的数据。
+    返回 `(client, cookie, tenant_id, principal_id)`：身份全部来自服务端响应
+    （`/me`），没有任何一处是测试自己拼出来的。不绕过认证 —— 绕过等于用
+    另一种形式把"客户端自报身份"放回来。
     """
-    suffix = uuid.uuid4().hex
-    tenant_id, principal_id = f"t_{prefix}_{suffix}", f"u_{prefix}_{suffix}"
-    with psycopg.connect(pg_support.migration_dsn()) as conn, conn.transaction():
-        conn.execute(
-            "INSERT INTO tenants (tenant_id, name) VALUES (%s, %s)", (tenant_id, name)
-        )
-        conn.execute(
-            "INSERT INTO principals (principal_id, tenant_id) VALUES (%s, %s)",
-            (principal_id, tenant_id),
-        )
-    return tenant_id, principal_id
-
-
-def _login(platform: PlatformState, tenant_id: str, principal_id: str) -> tuple[TestClient, str]:
-    """走完整认证路径拿一个 cookie 会话（签发邀请 → 兑换）。
-
-    不绕过认证：绕过等于用另一种形式把"客户端自报身份"放回来。
-    """
-    token = "invite-r4-" + uuid.uuid4().hex
-    now = platform.clock.now()
-    platform.invitations.issue(
-        SystemContext(tenant_id, "Round 4 exit gate"),
-        invitation_id="inv_" + uuid.uuid4().hex[:8],
-        token_hash="sha256:" + hashlib.sha256(token.encode()).hexdigest(),
-        issued_by=principal_id,
-        invitee_principal_id=principal_id,
-        issued_at=now,
-        expires_at=now + timedelta(hours=1),
-    )
     client = TestClient(create_app(platform=platform))
-    exchanged = client.post("/auth/invitations/exchange", json={"token": token})
-    assert exchanged.status_code == 200, exchanged.text
-    return client, exchanged.cookies["study_session"]
+    registered = client.post(
+        "/auth/register",
+        json={"username": f"{prefix}-" + uuid.uuid4().hex[:10], "password": "r4-pass-1234"},
+        headers={"Origin": ORIGIN},
+    )
+    assert registered.status_code == 201, registered.text
+    cookie = client.cookies["study_session"]
+    me = client.get("/me")
+    assert me.status_code == 200, me.text
+    identity = me.json()
+    return client, cookie, identity["tenant_id"], identity["principal_id"]
 
 
 def _stage(tmp_path: Path) -> _Stage:
@@ -210,12 +187,11 @@ def _stage(tmp_path: Path) -> _Stage:
     这正是用例 1/2/3 分岔的地方。
     """
     suffix = uuid.uuid4().hex
-    tenant_id, principal_id = _seed_tenant("r4", "Round 4 exit gate")
     settings = DeploymentSettings.load(
-        {"STUDY_PLATFORM_PERSISTENCE": "postgres", "STUDY_PLATFORM_EXCHANGE_LIMIT": "100000"}
+        {"STUDY_PLATFORM_PERSISTENCE": "postgres", "STUDY_PLATFORM_AUTH_ATTEMPT_LIMIT": "100000"}
     )
     platform = build_platform(var_dir=tmp_path / "a", settings=settings)
-    client, cookie = _login(platform, tenant_id, principal_id)
+    client, cookie, tenant_id, principal_id = _register(platform, "r4")
 
     project = client.post(
         "/projects",
@@ -410,8 +386,7 @@ def test_another_project_and_another_tenant_cannot_retrieve_or_read(tmp_path):
     ).status_code == 404
 
     # ------------------------------------------------------------ 另一个租户
-    other_tenant, other_principal = _seed_tenant("r4b", "Round 4 other tenant")
-    outsider, outsider_cookie = _login(stage.platform, other_tenant, other_principal)
+    outsider, outsider_cookie, _, _ = _register(stage.platform, "r4b")
     assert outsider_cookie != stage.cookie
 
     denied = outsider.post(

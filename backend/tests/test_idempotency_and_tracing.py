@@ -11,9 +11,19 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 from app.core.errors import ErrorCode
 from app.workflow.runtime import InteractionRequest
+
+#: 认证身份改为真实注册后，端到端用例必须操作该身份能访问的项目。
+PROJECT = "proj_demo"
+
+
+@pytest.fixture(autouse=True)
+def _registered_project(monkeypatch, demo):
+    monkeypatch.setattr(sys.modules[__name__], "PROJECT", demo["project"])
 
 
 def _request(demo, **overrides) -> InteractionRequest:
@@ -163,10 +173,11 @@ def test_audit_events_carry_the_same_tracing_id(platform, demo):
 
     **写下的断言也是断言，必须实测。**
     """
+    before = len(platform.audit.read_all())
     result = platform.runtime.run(_request(demo, request_id="req_trace_audit"))
     assert result.status == "ok", result.error
 
-    records = platform.audit.read_all()
+    records = platform.audit.read_all()[before:]
     assert records, "本次交互应当产生审计事件"
     assert [r["request_id"] for r in records] == ["req_trace_audit"] * len(records)
 
@@ -198,7 +209,7 @@ def test_idempotency_key_is_bounded_in_length(client, auth_headers):
     同类字段（`user_input`）早有 `MAX_INPUT_CHARS`，这里不该成为例外。
     """
     response = client.post(
-        "/projects/proj_demo/interactions",
+        f"/projects/{PROJECT}/interactions",
         json={
             "node_id": "intake_goal",
             "user_input": "x",
@@ -217,7 +228,7 @@ def test_tracing_id_is_identical_across_header_body_and_error(client, auth_heade
     """响应头、响应体、错误体必须是**同一个**追踪 id，且审计用同一个。"""
     headers = {**auth_headers(), "Idempotency-Key": "trace-id-1"}
     response = client.post(
-        f"/projects/{'proj_demo'}/interactions",
+        f"/projects/{PROJECT}/interactions",
         json={"node_id": "nonexistent_node", "user_input": "x"},
         headers=headers,
     )
@@ -236,12 +247,12 @@ def test_http_requests_never_share_a_tracing_id(client, auth_headers):
     headers = auth_headers()
     payload = {"node_id": "nonexistent_node", "user_input": "x"}
     first = client.post(
-        "/projects/proj_demo/interactions",
+        f"/projects/{PROJECT}/interactions",
         json=payload,
         headers={**headers, "Idempotency-Key": "trace-id-2"},
     )
     second = client.post(
-        "/projects/proj_demo/interactions",
+        f"/projects/{PROJECT}/interactions",
         json=payload,
         headers={**headers, "Idempotency-Key": "trace-id-3"},
     )
@@ -264,12 +275,12 @@ def test_idempotency_key_is_accepted_through_the_api(client, auth_headers):
         "idempotency_key": "client-key-1",
     }
     first = client.post(
-        "/projects/proj_demo/interactions",
+        f"/projects/{PROJECT}/interactions",
         json=payload,
         headers={**headers, "Idempotency-Key": "http-key-1"},
     )
     second = client.post(
-        "/projects/proj_demo/interactions",
+        f"/projects/{PROJECT}/interactions",
         json=payload,
         headers={**headers, "Idempotency-Key": "http-key-2"},
     )

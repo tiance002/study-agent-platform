@@ -64,7 +64,7 @@ def test_http_teaching_and_ingestion_survive_reconstructed_platform(
             "STUDY_PLATFORM_PERSISTENCE": "postgres",
             "STUDY_PLATFORM_REGISTRATION_ENABLED": "true",
             "STUDY_PLATFORM_PASSWORD_LOGIN_ENABLED": "true",
-            "STUDY_PLATFORM_EXCHANGE_LIMIT": "100000",
+            "STUDY_PLATFORM_AUTH_ATTEMPT_LIMIT": "100000",
             "STUDY_PLATFORM_TEACHING_PROVIDER": "openai",
             "STUDY_PLATFORM_TEACHING_MODEL": "round8-test-model",
             "STUDY_PLATFORM_TEACHING_API_KEY": "round8-test-key",

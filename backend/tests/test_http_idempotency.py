@@ -21,8 +21,7 @@ from app.api.http_idempotency import (
 )
 from app.db.idempotency_store import PostgresHttpIdempotencyStore
 from app.identity.models import Principal
-from app.identity.ports import SystemContext
-from app.main import DEMO_PRINCIPAL, DEMO_TENANT, create_app
+from app.main import create_app
 from fastapi.testclient import TestClient
 
 ORIGIN = {"Origin": "http://testserver"}
@@ -48,22 +47,15 @@ def _pg_reachable() -> bool:
 
 
 def _login(platform) -> TestClient:
-    token = "idem-" + uuid.uuid4().hex
-    import hashlib
-    from datetime import timedelta
-
-    now = platform.clock.now()
-    platform.invitations.issue(
-        SystemContext(DEMO_TENANT, "幂等测试"),
-        invitation_id="inv_" + uuid.uuid4().hex[:8],
-        token_hash="sha256:" + hashlib.sha256(token.encode()).hexdigest(),
-        issued_by=DEMO_PRINCIPAL,
-        invitee_principal_id=DEMO_PRINCIPAL,
-        issued_at=now,
-        expires_at=now + timedelta(days=1),
-    )
+    """真实注册一个账号并返回持有会话 cookie 的客户端。"""
     client = TestClient(create_app(platform=platform))
-    assert client.post("/auth/invitations/exchange", json={"token": token}).status_code == 200
+    username = "u" + uuid.uuid4().hex[:10]
+    registered = client.post(
+        "/auth/register",
+        json={"username": username, "password": "test-pass-1"},
+        headers=ORIGIN,
+    )
+    assert registered.status_code == 201, registered.text
     return client
 
 

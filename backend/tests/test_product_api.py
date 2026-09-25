@@ -9,9 +9,6 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from app.identity.ports import SystemContext
-from app.main import DEMO_PRINCIPAL, DEMO_TENANT
-from fastapi.testclient import TestClient
 
 ORIGIN = {"Origin": "http://testserver"}
 
@@ -22,27 +19,11 @@ def _keyed() -> dict:
     return {**ORIGIN, "Idempotency-Key": "prod-" + uuid.uuid4().hex}
 
 
-def _hash(raw: str) -> str:
-    import hashlib
-
-    return f"sha256:{hashlib.sha256(raw.encode()).hexdigest()}"
-
-
 @pytest.fixture
-def user_with_project(client, platform):
-    """登录用户 + 一个已创建的项目，返回 (client, project_id)。"""
-    token = "prod-api-" + uuid.uuid4().hex
-    now = platform.clock.now()
-    platform.invitations.issue(
-        SystemContext(DEMO_TENANT, "产品 API 测试"),
-        invitation_id="inv_" + uuid.uuid4().hex[:8],
-        token_hash=_hash(token),
-        issued_by=DEMO_PRINCIPAL,
-        invitee_principal_id=DEMO_PRINCIPAL,
-        issued_at=now,
-        expires_at=now + __import__("datetime").timedelta(days=1),
-    )
-    assert client.post("/auth/invitations/exchange", json={"token": token}).status_code == 200
+def user_with_project(client, register_user):
+    """真实注册的登录用户 + 一个已创建的项目，返回 (client, project_id)。"""
+    _, account = register_user()
+    client.cookies.set("study_session", account.cookie)
     created = client.post("/projects", json={"name": "产品 API 项目"}, headers=_keyed())
     assert created.status_code == 201
     return client, created.json()["project_id"]
@@ -175,29 +156,14 @@ def test_source_registration_is_idempotent_on_same_acquisition(user_with_project
 
 
 @pytest.mark.invariant
-def test_products_are_invisible_to_other_users(platform, client, user_with_project):
+def test_products_are_invisible_to_other_users(register_user, user_with_project):
     client_a, project_id = user_with_project
 
     conversation_id = client_a.post(
         f"/projects/{project_id}/conversations", json={}, headers=_keyed()
     ).json()["conversation_id"]
 
-    other_token = "other-" + uuid.uuid4().hex
-    from datetime import timedelta
-
-    now = platform.clock.now()
-    platform.invitations.issue(
-        SystemContext(DEMO_TENANT, "第二用户"),
-        invitation_id="inv_" + uuid.uuid4().hex[:8],
-        token_hash=_hash(other_token),
-        issued_by="seed",
-        invitee_principal_id="user_other_prod",
-        issued_at=now,
-        expires_at=now + timedelta(days=1),
-    )
-    other = TestClient(client.app)
-    assert other.post("/auth/invitations/exchange", json={"token": other_token}).status_code == 200
-
+    other, _ = register_user()
     assert other.get(f"/projects/{project_id}/conversations").status_code == 404
     assert (
         other.post(

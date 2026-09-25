@@ -73,6 +73,25 @@ def pg_database() -> Iterator[pg_support.TestDatabase | None]:
         pg_support.drop_test_database(database)
 
 
+@pytest.fixture(autouse=True)
+def _reset_pg_rate_limits(pg_database) -> Iterator[None]:
+    """共享临时库上的认证限流桶会跨用例累积：每个用例前清空，保持用例独立。
+
+    内存装配每次都是全新限流器；PostgreSQL 装配把计数写进
+    `auth_attempt_counters`，不清理会让后续用例（注册限额 5 次/窗口）
+    意外撞 429 —— 那是夹具耦合，不是被测行为。
+    """
+    if pg_database is None:
+        yield
+        return
+    import psycopg
+
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
+        conn.execute("TRUNCATE public.auth_attempt_counters")
+        conn.commit()
+    yield
+
+
 @pytest.fixture
 def racy_scheduling():
     """把 GIL 的线程切换间隔压到最小，让竞态真的有机会发生。
@@ -164,10 +183,15 @@ def register_user(platform):
     用于"另一个用户"的隔离用例（越权、确认转让等）。每个账号在**独立**
     的 TestClient 上注册 —— 同一个客户端的 cookie jar 已有会话时会命中
     `already_authenticated`，无法再注册第二个账号。
+
+    `on=<platform>` 可在自定义平台上注册（默认用当前 `platform` 夹具）。
     """
 
-    def _make(password: str | None = None) -> tuple[TestClient, RegisteredAccount]:
-        session_client = TestClient(create_app(platform=platform))
+    def _make(
+        password: str | None = None, *, on=None
+    ) -> tuple[TestClient, RegisteredAccount]:
+        target = on if on is not None else platform
+        session_client = TestClient(create_app(platform=target))
         return session_client, _register_http(session_client, password=password)
 
     return _make
