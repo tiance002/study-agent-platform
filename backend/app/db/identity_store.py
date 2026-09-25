@@ -256,18 +256,14 @@ class PostgresSessionRepository:
                 conn.execute(
                     "INSERT INTO user_sessions"
                     " (session_id, tenant_id, principal_id, issued_at, expires_at, "
-                    "auth_method, credential_id, security_generation)"
-                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    "credential_id, security_generation)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s)",
                     (
                         session.session_id,
                         session.tenant_id,
                         session.principal_id,
                         session.issued_at,
                         session.expires_at,
-                        # 单一登录方式：模型已无 auth_method 字段，但 schema 的
-                        # `user_sessions_auth_shape_check` 仍要求该列非空且等于
-                        # 'password'（数据库基线的既有契约），故在持久化边界钉死。
-                        "password",
                         session.credential_id,
                         session.security_generation,
                     ),

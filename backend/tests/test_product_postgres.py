@@ -162,8 +162,8 @@ def test_cross_tenant_principal_reference_is_rejected_physically(seeded):
             conn.execute(
                 "INSERT INTO user_sessions"
                 " (session_id, tenant_id, principal_id, issued_at, expires_at,"
-                " auth_method, credential_id, security_generation)"
-                " VALUES (%s, %s, %s, %s, %s, 'password', %s, 1)",
+                " credential_id, security_generation)"
+                " VALUES (%s, %s, %s, %s, %s, %s, 1)",
                 (
                     "sess_0003_bad",
                     TENANT,

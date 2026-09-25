@@ -1617,10 +1617,10 @@ BEGIN
 
     INSERT INTO public.user_sessions (
         session_id, tenant_id, principal_id, issued_at, expires_at,
-        auth_method, credential_id, security_generation
+        credential_id, security_generation
     ) VALUES (
         v_session_id, v_tenant_id, v_principal_id, now(), p_session_expires_at,
-        'password', v_credential_id, v_security_generation
+        v_credential_id, v_security_generation
     );
 
     PERFORM set_config('app.tenant_id', v_tenant_id, true);
@@ -1767,10 +1767,10 @@ BEGIN
 
     INSERT INTO public.user_sessions (
         session_id, tenant_id, principal_id, issued_at, expires_at,
-        auth_method, credential_id, security_generation
+        credential_id, security_generation
     ) VALUES (
         v_session_id, v_tenant_id, v_principal_id, now(), p_session_expires_at,
-        'password', p_credential_id, v_security_generation
+        p_credential_id, v_security_generation
     );
 
     PERFORM set_config('app.tenant_id', v_tenant_id, true);
@@ -2309,10 +2309,10 @@ CREATE POLICY account_credentials_isolation ON public.account_credentials
     )
 
     # 会话的凭据绑定列（`public.` 前缀保持原写法，见模块说明）。
-    op.execute("ALTER TABLE public.user_sessions ADD COLUMN auth_method text")
+    # 单一登录方式：不再有"会话来源"列 —— 它只用于区分邀请码会话与密码会话，
+    # 随邀请码链路一并消失；凭据绑定由 `credential_id` 承担。
     op.execute("ALTER TABLE public.user_sessions ADD COLUMN credential_id text")
     op.execute("ALTER TABLE public.user_sessions ADD COLUMN security_generation bigint")
-    op.execute("ALTER TABLE public.user_sessions ALTER COLUMN auth_method SET NOT NULL")
     op.execute(
         "ALTER TABLE public.user_sessions ALTER COLUMN security_generation SET NOT NULL"
     )
@@ -2323,14 +2323,13 @@ ALTER TABLE public.user_sessions
     CHECK (security_generation > 0)
 """
     )
-    # 只保留密码会话：邀请码会话分支随邀请码链路一并移除。
+    # 唯一登录方式下的会话不变量：每个会话都必须绑定一份凭据
+    # （邀请码会话分支已随链路移除，因此不再需要"会话来源"判定）。
     op.execute(
         """
 ALTER TABLE public.user_sessions
     ADD CONSTRAINT user_sessions_auth_shape_check
-    CHECK (
-        auth_method = 'password' AND credential_id IS NOT NULL
-    )
+    CHECK (credential_id IS NOT NULL)
 """
     )
     op.execute(

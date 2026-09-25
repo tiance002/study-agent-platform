@@ -102,7 +102,7 @@ def test_baseline_source_has_no_invitation_objects() -> None:
         "invitations",
         "invitee_principal_id",
         "exchange_invitation",
-        "auth_method = 'invitation'",
+        "auth_method",
     ):
         assert forbidden not in lowered, f"baseline still references {forbidden!r}"
 
