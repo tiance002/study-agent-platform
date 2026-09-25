@@ -294,9 +294,8 @@ class PostgresProductRepository:
                 (plan.plan_id,),
             ).fetchall()
             tasks = conn.execute(
-                "SELECT t.task_id, t.tenant_id, t.project_id, t.milestone_id,"
-                " t.order_index, t.title, t.status"
-                " FROM learning_tasks t"
+                "SELECT " + _TASK_COLUMNS_T
+                + " FROM learning_tasks t"
                 " JOIN milestones m ON m.milestone_id = t.milestone_id"
                 " WHERE m.plan_id = %s ORDER BY t.order_index",
                 (plan.plan_id,),
@@ -310,13 +309,7 @@ class PostgresProductRepository:
                 )
                 for r in milestones
             ),
-            tasks=tuple(
-                LearningTask(
-                    task_id=r[0], tenant_id=r[1], project_id=r[2], milestone_id=r[3],
-                    order_index=r[4], title=r[5], status=TaskStatus(r[6]),
-                )
-                for r in tasks
-            ),
+            tasks=tuple(_task_from_row(r) for r in tasks),
         )
 
     def replace_plan(
@@ -379,8 +372,12 @@ class PostgresProductRepository:
             for task in tasks:
                 conn.execute(
                         "INSERT INTO learning_tasks (task_id, tenant_id, project_id,"
-                        " milestone_id, order_index, title, status)"
-                        " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        " milestone_id, order_index, title, status, objective,"
+                        " instruction, task_type, estimated_minutes, deliverable,"
+                        " acceptance_criteria, evidence_required, prerequisites,"
+                        " related_skill_id)"
+                        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
+                        " %s::jsonb, %s::jsonb, %s::jsonb, %s)",
                         (
                             task.task_id,
                             actor.tenant_id,
@@ -389,6 +386,15 @@ class PostgresProductRepository:
                             task.order_index,
                             task.title,
                             str(task.status),
+                            task.objective,
+                            task.instruction,
+                            task.task_type,
+                            task.estimated_minutes,
+                            task.deliverable,
+                            _jsonb(task.acceptance_criteria),
+                            _jsonb(task.evidence_required),
+                            _jsonb(task.prerequisites),
+                            task.related_skill_id,
                         ),
                     )
         except pg_errors.UniqueViolation as exc:
@@ -546,15 +552,20 @@ class PostgresProductRepository:
         return _task_from_row(row)
 
 
-def _jsonb(value: dict) -> str:
+def _jsonb(value: object) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-_TASK_COLUMNS = (
-    "task_id, tenant_id, project_id, milestone_id, order_index, title, status"
+_TASK_COLUMN_NAMES = (
+    "task_id", "tenant_id", "project_id", "milestone_id", "order_index", "title", "status",
+    "objective", "instruction", "task_type", "estimated_minutes", "deliverable",
+    "acceptance_criteria", "evidence_required", "prerequisites", "related_skill_id",
 )
+_TASK_COLUMNS = ", ".join(_TASK_COLUMN_NAMES)
+#: `current_plan` 里任务与里程碑 join，`order_index` 等列名会二义 —— 带表别名。
+_TASK_COLUMNS_T = ", ".join(f"t.{name}" for name in _TASK_COLUMN_NAMES)
 
 
 def _task_from_row(row: tuple) -> LearningTask:
@@ -566,6 +577,15 @@ def _task_from_row(row: tuple) -> LearningTask:
         order_index=row[4],
         title=row[5],
         status=TaskStatus(row[6]),
+        objective=row[7],
+        instruction=row[8],
+        task_type=row[9],
+        estimated_minutes=row[10],
+        deliverable=row[11],
+        acceptance_criteria=tuple(row[12]),
+        evidence_required=tuple(row[13]),
+        prerequisites=tuple(row[14]),
+        related_skill_id=row[15],
     )
 
 

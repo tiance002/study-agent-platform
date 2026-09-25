@@ -40,12 +40,20 @@ def validate_submission_content(content: str) -> None:
 
 
 def self_report_verdict(component_id: str, submission_id: str) -> ComponentVerdict:
+    """自报证据的裁决：**中性**，不是正向。
+
+    A03：自报只是"用户声称完成了"，它既不能让任务变 `verified`，
+    也不能作为正向证据更新掌握度 —— 否则"随便写一段自报 → 已验证"
+    就是一个可被用户自由推翻的假信号。事件仍然照常落库（保留审计事实），
+    只是它的 `direction` 取中性值 `NONE`：投影器只对 `POSITIVE` 提升
+    独立水平，因此自报不会抬高掌握度，但证据本身可被回放与追溯。
+    """
     return ComponentVerdict(
         component_id=component_id,
         assessment_validity=Validity.VALID,
         observation_strength=ObservationStrength.OBS_1,
         source_reliability_ok=True,
         independence_level=IndependenceLevel.INTRODUCED,
-        direction=Direction.POSITIVE,
+        direction=Direction.NONE,
         independence_group=submission_id,
     )

@@ -1,29 +1,74 @@
-/* global React, ReactDOM */
+/* global React, ReactDOM, antd */
 
 (function () {
   "use strict";
 
   const { useEffect, useRef, useState } = React;
   const h = React.createElement;
-  const { LoadingScreen, AuthScreen, ProjectRail, WorkspaceTabs, EmptyProject, MainView, EvidenceRail } = window.StudyViews;
+  const { ConfigProvider } = antd;
+  const t = window.StudyTerms;
+  const {
+    LoadingScreen, AuthScreen, ProjectRail, KnowledgeBasePanel, WorkspaceTabs,
+    EmptyProject, MainView, EvidenceRail, SettingsDrawer,
+  } = window.StudyViews;
 
   const { ApiError, runStorageKey, api } = window.StudyApi;
   const { useScopedCommands } = window.StudyCommands;
   const { useProjectState } = window.StudyProjectState;
 
+  // 星空主题 token —— 与 app.css 顶部的 --star-* 变量必须保持一致。
+  const starfieldTheme = {
+    algorithm: antd.theme.darkAlgorithm,
+    token: {
+      colorPrimary: "#2ee6d6",
+      colorInfo: "#2ee6d6",
+      colorSuccess: "#34d399",
+      colorWarning: "#fbbf24",
+      colorError: "#fb7185",
+      colorBgBase: "#05070f",
+      colorBgContainer: "rgba(17, 24, 48, 0.72)",
+      colorBgElevated: "rgba(20, 28, 56, 0.94)",
+      colorBgLayout: "transparent",
+      colorBorder: "rgba(122, 162, 255, 0.28)",
+      colorBorderSecondary: "rgba(122, 162, 255, 0.16)",
+      colorText: "#e7ecff",
+      colorTextSecondary: "#aab7dd",
+      colorTextTertiary: "#7f8cb6",
+      borderRadius: 10,
+      fontSize: 14,
+      // 关闭 antd 全局动效：既贴合"星空静止"的 reduced-motion 取向，也避免
+      // 按钮 loading 图标在离场动画里残留（它会污染按钮的可访问名）。
+      motion: false,
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif',
+      wireframe: false,
+    },
+    components: {
+      Button: { primaryShadow: "0 0 18px rgba(46, 230, 214, 0.28)" },
+      Drawer: { colorBgElevated: "#0b1226" },
+      Input: { colorBgContainer: "rgba(9, 14, 32, 0.72)" },
+      Select: { colorBgContainer: "rgba(9, 14, 32, 0.72)" },
+      Tag: { defaultBg: "rgba(122, 162, 255, 0.16)" },
+      Divider: { colorSplit: "rgba(122, 162, 255, 0.18)" },
+    },
+  };
+
+  // antd 默认会在两个中文字之间插入空格（"退出" → "退 出"），
+  // 那会让可访问名与门禁断言的精确文案不一致；这里显式关闭。
+  // 同时关掉点击波纹：它会插入一层绝对定位覆盖元素，既与"无多余动效"的
+  // 星空主题不一致，也会让自动化点击的命中测试变得不确定。
+  const withTheme = (node) => h(ConfigProvider, {
+    theme: starfieldTheme,
+    button: { autoInsertSpace: false },
+    autoInsertSpaceInButton: false,
+    wave: { disabled: true },
+  }, node);
+
   function errorText(error) {
-    if (!(error instanceof ApiError)) return "网络连接失败，请稍后重试";
+    if (!(error instanceof ApiError)) return t.errors.network;
     const code = error.payload && error.payload.code;
-    if (code === "TEACHING_PROVIDER_DISABLED") return "教学服务尚未启用";
-    if (code === "RECONCILIATION_REQUIRED") return "这次请求的结果待对账，暂时不能自动重试";
-    if (code === "BUDGET_EXCEEDED") return "项目预算不足，请减少资料或稍后再试";
-    if (code === "CSRF_DENIED") return "页面来源校验失败，请刷新后重试";
-    if (code === "already_authenticated") return "当前浏览器已有会话，请先退出后再切换账号";
-    if (code === "USERNAME_TAKEN") return "用户名已注册，请换一个用户名";
-    if (code === "REGISTRATION_DISABLED") return "注册暂未开放";
-    if (code === "PASSWORD_LOGIN_DISABLED") return "密码登录暂未启用";
-    if (error.status === 401) return "用户名或密码错误，或会话已失效";
-    return (error.payload && error.payload.message) || `请求失败（${error.status}）`;
+    if (code && t.errors.byCode[code]) return t.errors.byCode[code];
+    if (error.status === 401) return t.errors.unauthorized;
+    return (error.payload && error.payload.message) || t.errors.fallback(error.status);
   }
 
   function App() {
@@ -43,6 +88,7 @@
     const [notice, writeNotice] = useState("");
     const [error, writeError] = useState("");
     const [loading, writeLoading] = useState(false);
+    const [settingsOpen, setSettingsOpen] = useState(false);
     const pollControllerRef = useRef(null);
 
     const [newProject, setNewProject] = useState({ name: "", goal: "" });
@@ -57,6 +103,22 @@
     });
     const [candidateForm, setCandidateForm] = useState({ url: "", title: "", snippet: "" });
     const [sourceSearchQuery, setSourceSearchQuery] = useState("");
+
+    // 学习闭环：诊断 → 生成计划 → 任务流转 → 自报提交。
+    const [diagnosisForm, setDiagnosisForm] = useState({ experience_level: "beginner", weekly_hours: 6, preferred_style: "practice" });
+    // planGenerated 只在本会话显式生成过计划时置真：刷新后是否可交互由
+    // 服务端返回的任务字段决定，不靠本地猜测。
+    const [planGenerated, setPlanGenerated] = useState(false);
+    const [taskStates, setTaskStates] = useState({});
+    const [submissionsByTask, setSubmissionsByTask] = useState({});
+    const [taskBusyId, setTaskBusyId] = useState("");
+
+    // 知识库（用户级）
+    const [libraryForm, setLibraryForm] = useState({ name: "", url: "", content: "" });
+    const [libraryLoading, setLibraryLoading] = useState(false);
+    const [libraryError, setLibraryError] = useState("");
+    const [libraryBusy, setLibraryBusy] = useState(false);
+    const [libraryBusyId, setLibraryBusyId] = useState("");
 
     const principalId = user?.principal_id || "";
 
@@ -95,6 +157,8 @@
       setMessages,
       plan,
       setPlan,
+      diagnosis,
+      setDiagnosis,
       sources,
       setSources,
       ingestionJobs,
@@ -103,6 +167,8 @@
       setCandidates,
       acquisitionJobs,
       setAcquisitionJobs,
+      librarySources,
+      refreshLibrary,
       currentConversation,
       refreshProjects,
       refreshProjectData,
@@ -148,7 +214,20 @@
       setCandidateForm({ url: "", title: "", snippet: "" });
       setSourceSearchQuery("");
       setPlanForm({ goal: "", milestone: "" });
+      setPlanGenerated(false);
+      setTaskStates({});
+      setSubmissionsByTask({});
+      setTaskBusyId("");
+      setDiagnosisForm({ experience_level: "beginner", weekly_hours: 6, preferred_style: "practice" });
     }, [principalId, projectId, clearProjectData]);
+
+    useEffect(() => {
+      if (!principalId) return;
+      // 冷启动/刷新时 /me 已能识别账号，但此刻 scope epoch 会随 principalId
+      // 首次落地而变化；登录回调里那次 refreshProjects 因此会被 guard 丢弃。
+      // 这里在 principalId **稳定后**再读一次项目列表，刷新/重登才能读回项目。
+      refreshProjects(principalId).catch((caught) => setError(errorText(caught)));
+    }, [principalId, refreshProjects]);
 
     useEffect(() => {
       if (pollControllerRef.current) {
@@ -170,6 +249,18 @@
         localStorage.setItem(`study:selection:${principalId}`, JSON.stringify({ projectId, conversationId }));
       }
     }, [principalId, projectId, conversationId]);
+
+    useEffect(() => {
+      if (!principalId) {
+        setLibraryForm({ name: "", url: "", content: "" });
+        return;
+      }
+      setLibraryError("");
+      setLibraryLoading(true);
+      refreshLibrary()
+        .catch((caught) => setLibraryError(errorText(caught)))
+        .finally(() => setLibraryLoading(false));
+    }, [principalId, refreshLibrary]);
 
     useEffect(() => {
       const expired = () => {
@@ -292,11 +383,18 @@
         setConversations([]);
         setMessages([]);
         setPlan(null);
+        setDiagnosis(null);
         setSources([]);
         setIngestionJobs([]);
         setActiveRun(null);
         setNotice("");
         setCitationReading(null);
+        setSettingsOpen(false);
+        setPlanGenerated(false);
+        setTaskStates({});
+        setSubmissionsByTask({});
+        setLibraryForm({ name: "", url: "", content: "" });
+        setLibraryError("");
         resetCommands();
         setNewProject({ name: "", goal: "" });
       }
@@ -308,12 +406,12 @@
       setLoading(true);
       setError("");
       try {
-        await executeCommand("create-project", "创建项目", "POST", "/projects", {
+        await executeCommand("create-project", t.commands.createProject, "POST", "/projects", {
           name: newProject.name.trim(),
           goal: newProject.goal.trim(),
         }, async (created) => {
           setNewProject({ name: "", goal: "" });
-          setNotice("项目已创建");
+          setNotice(t.notices.projectCreated);
           await refreshProjects();
           if (scopeRef.current.epoch !== renderEpoch) return;
           setProjectFormOpen(false);
@@ -334,13 +432,13 @@
       try {
         await executeCommand(
           `create-conversation:${projectId}`,
-          "创建会话",
+          t.commands.createConversation,
           "POST",
           `/projects/${projectId}/conversations`,
           { title: newConversation.trim() },
           async (created) => {
             setNewConversation("");
-            setNotice("会话已创建");
+            setNotice(t.workspace.conversationCreated);
             await refreshProjectData(projectId);
             if (scopeRef.current.epoch !== renderEpoch) return;
             setConversationId(created.conversation_id);
@@ -362,7 +460,7 @@
         } catch (caught) {
           if (signal?.aborted || !isViewCurrent(scope)) return null;
           if (caught instanceof ApiError && caught.status < 500) throw caught;
-          setError("连接暂时中断，正在继续查询回答进度");
+          setError(t.conversation.polling);
           await new Promise((resolve) => setTimeout(resolve, 1500));
           continue;
         }
@@ -371,12 +469,12 @@
         setActiveRun(current);
         if (["succeeded", "failed", "reconciliation_required"].includes(current.status)) {
           await refreshMessages(selectedProjectId, selectedConversationId, signal);
-          if (isViewCurrent(scope) && current.status === "succeeded") setNotice("回答已准备好");
+          if (isViewCurrent(scope) && current.status === "succeeded") setNotice(t.conversation.answerReady);
           return current;
         }
         await new Promise((resolve) => setTimeout(resolve, 1500));
       }
-      if (isViewCurrent(scope)) setError("运行仍在处理中，刷新工作区即可继续查看");
+      if (isViewCurrent(scope)) setError(t.conversation.pollTimeout);
       return null;
     }
 
@@ -392,7 +490,7 @@
         const scope = { principalId, projectId: selectedProjectId, conversationId: selectedConversationId, epoch: scopeRef.current.epoch };
         await executeCommand(
           `teaching-run:${selectedProjectId}:${selectedConversationId}`,
-          "发送问题",
+          t.commands.sendQuestion,
           "POST",
           `/projects/${selectedProjectId}/conversations/${selectedConversationId}/teaching-runs`,
           { question: question.trim() },
@@ -433,17 +531,131 @@
       if (plan || !projectId || !planForm.goal.trim() || !planForm.milestone.trim()) return;
       setLoading(true);
       try {
-        await executeCommand("create-plan", "创建计划", "PUT", `/projects/${projectId}/plan`, {
+        await executeCommand("create-plan", t.commands.createPlan, "PUT", `/projects/${projectId}/plan`, {
           goal: planForm.goal.trim(),
           milestones: [{ title: planForm.milestone.trim(), description: "", tasks: [] }],
         }, async (saved) => {
           setPlan(saved);
-          setNotice("计划已创建");
+          setNotice(t.plan.create);
         });
       } catch (caught) {
         setError(errorText(caught));
       } finally {
         setLoading(false);
+      }
+    }
+
+    async function saveDiagnosis(event) {
+      event.preventDefault();
+      if (!projectId) return;
+      const selectedProjectId = projectId;
+      setLoading(true);
+      try {
+        await executeCommand(
+          `diagnosis:${selectedProjectId}`,
+          t.commands.saveDiagnosis,
+          "POST",
+          `/projects/${selectedProjectId}/diagnosis`,
+          {
+            experience_level: diagnosisForm.experience_level,
+            weekly_hours: diagnosisForm.weekly_hours,
+            preferred_style: diagnosisForm.preferred_style,
+          },
+          async (saved) => {
+            setDiagnosis(saved);
+            setNotice(t.diagnosis.saved);
+          }
+        );
+      } catch (caught) {
+        setError(errorText(caught));
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    async function generatePlan() {
+      if (!projectId || !diagnosis) return;
+      const selectedProjectId = projectId;
+      setLoading(true);
+      setError("");
+      try {
+        await executeCommand(
+          `generate-plan:${selectedProjectId}`,
+          t.commands.generatePlan,
+          "POST",
+          `/projects/${selectedProjectId}/plan/generate`,
+          {},
+          async (bundle) => {
+            setPlan(bundle);
+            setPlanGenerated(true);
+            setTaskStates({});
+            setSubmissionsByTask({});
+            setNotice(t.plan.generated);
+          }
+        );
+      } catch (caught) {
+        setError(errorText(caught));
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    async function transitionTask(task, nextStatus) {
+      if (!projectId) return;
+      const selectedProjectId = projectId;
+      const expected = (taskStates[task.task_id] && taskStates[task.task_id].status) || task.status || "pending";
+      setTaskBusyId(task.task_id);
+      try {
+        await executeCommand(
+          `task-transition:${selectedProjectId}:${task.task_id}:${nextStatus}`,
+          t.commands.transitionTask,
+          "POST",
+          `/projects/${selectedProjectId}/tasks/${task.task_id}/transition`,
+          { expected_status: expected, next_status: nextStatus },
+          async (updated) => {
+            setTaskStates((previous) => ({ ...previous, [task.task_id]: { status: updated.status, verified: updated.verified } }));
+            setNotice(nextStatus === "done" ? t.tasks.completed : t.tasks.started);
+          }
+        );
+      } catch (caught) {
+        setError(errorText(caught));
+      } finally {
+        setTaskBusyId("");
+      }
+    }
+
+    async function submitTask(task, content, reset) {
+      if (!projectId) return;
+      const selectedProjectId = projectId;
+      setTaskBusyId(task.task_id);
+      try {
+        await executeCommand(
+          `task-submit:${selectedProjectId}:${task.task_id}`,
+          t.commands.submitTask,
+          "POST",
+          `/projects/${selectedProjectId}/tasks/${task.task_id}/submissions`,
+          { mode: "self_report", content },
+          async (result) => {
+            if (result && result.submission) {
+              setSubmissionsByTask((previous) => ({
+                ...previous,
+                [task.task_id]: [...(previous[task.task_id] || []), { ...result.submission, task_id: task.task_id }],
+              }));
+            }
+            if (reset) reset();
+            setNotice(t.submission.recorded);
+            // verified 只用服务端值：提交后重新读取任务详情，绝不由本地推断。
+            const scope = { principalId, projectId: selectedProjectId, conversationId, epoch: scopeRef.current.epoch };
+            const detail = await api("GET", `/projects/${selectedProjectId}/tasks/${task.task_id}`);
+            if (isViewCurrent(scope)) {
+              setTaskStates((previous) => ({ ...previous, [task.task_id]: { status: detail.status, verified: detail.verified } }));
+            }
+          }
+        );
+      } catch (caught) {
+        setError(errorText(caught));
+      } finally {
+        setTaskBusyId("");
       }
     }
 
@@ -502,13 +714,13 @@
       try {
         await executeCommand(
           `register-source:${projectId}:${sourceForm.displayName.trim()}`,
-          "登记资料",
+          t.commands.registerSource,
           "POST",
           `/projects/${projectId}/sources`,
           {
-          display_name: sourceForm.displayName.trim(),
-          media_type: sourceForm.mediaType,
-          acquisition: { kind: "user_input", label: sourceForm.displayName.trim() },
+            display_name: sourceForm.displayName.trim(),
+            media_type: sourceForm.mediaType,
+            acquisition: { kind: "user_input", label: sourceForm.displayName.trim() },
           },
           async (source) => {
             const contentBody = {
@@ -519,7 +731,7 @@
             };
             await executeCommand(
               `upload-source:${projectId}:${source.source_id}`,
-              "上传资料正文",
+              t.commands.uploadSource,
               "POST",
               `/projects/${projectId}/sources/${source.source_id}/content`,
               contentBody,
@@ -527,7 +739,7 @@
                 setIngestionJobs((previous) => [uploaded.job, ...previous.filter((item) => item.job_id !== uploaded.job.job_id)]);
                 setSourceForm({ displayName: "", title: "", content: "", mediaType: "text/markdown" });
                 await refreshProjectData(projectId);
-                setNotice("资料已登记，正在处理");
+                setNotice(t.sources.registered);
                 pollIngestionJob(projectId, uploaded.job.job_id).catch((caught) => setError(errorText(caught)));
               }
             );
@@ -547,7 +759,7 @@
       try {
         await executeCommand(
           `create-candidate:${projectId}:${candidateForm.url.trim()}`,
-          "登记候选资料",
+          t.commands.registerCandidate,
           "POST",
           `/projects/${projectId}/source-candidates`,
           {
@@ -558,7 +770,7 @@
           async (candidate) => {
             setCandidates((previous) => [candidate, ...previous.filter((item) => item.candidate_id !== candidate.candidate_id)]);
             setCandidateForm({ url: "", title: "", snippet: "" });
-            setNotice("候选资料已登记，请确认后下载");
+            setNotice(t.sources.candidateAdded);
           }
         );
       } catch (caught) {
@@ -576,7 +788,7 @@
       try {
         await executeCommand(
           `source-search:${projectId}:${query}`,
-          "搜索资料",
+          t.commands.sourceSearch,
           "POST",
           `/projects/${projectId}/source-search`,
           { query, limit: 8 },
@@ -586,7 +798,7 @@
               ...found,
               ...previous.filter((item) => !found.some((candidate) => candidate.candidate_id === item.candidate_id)),
             ]);
-            setNotice(found.length ? `找到 ${found.length} 条候选资料，请确认后下载` : "没有找到可用资料候选");
+            setNotice(found.length ? t.sources.found(found.length) : t.sources.noneFound);
           }
         );
       } catch (caught) {
@@ -608,14 +820,14 @@
       try {
         await executeCommand(
           `select-candidate:${projectId}:${candidate.candidate_id}`,
-          "开始下载资料",
+          t.commands.selectCandidate,
           "POST",
           `/projects/${projectId}/source-candidates/${candidate.candidate_id}/select`,
           { display_name: candidate.title, media_type: "text/markdown", language: "zh" },
           async (result) => {
             setAcquisitionJobs((previous) => [result.acquisition, ...previous.filter((item) => item.acquisition_id !== result.acquisition.acquisition_id)]);
             await refreshProjectData(projectId);
-            setNotice("资料已加入下载队列");
+            setNotice(t.sources.queuedNotice);
             pollAcquisitionJob(projectId, result.acquisition.acquisition_id).catch((caught) => setError(errorText(caught)));
           }
         );
@@ -623,6 +835,86 @@
         setError(errorText(caught));
       } finally {
         setLoading(false);
+      }
+    }
+
+    async function addLibrarySource(event) {
+      event.preventDefault();
+      const name = libraryForm.name.trim();
+      const url = libraryForm.url.trim();
+      const content = libraryForm.content.trim();
+      if (!name) {
+        setLibraryError(t.library.invalidName);
+        return;
+      }
+      if (!url && !content) {
+        setLibraryError(t.library.invalidInput);
+        return;
+      }
+      const body = {
+        display_name: name,
+        media_type: "text/markdown",
+        acquisition: url ? { kind: "url", url, label: name } : { kind: "user_input", label: name },
+      };
+      if (content) body.content = content;
+      setLibraryBusy(true);
+      setLibraryError("");
+      try {
+        await executeCommand(
+          `library-source:${name}`,
+          t.commands.addLibrarySource,
+          "POST",
+          "/library/sources",
+          body,
+          async () => {
+            setLibraryForm({ name: "", url: "", content: "" });
+            setNotice(t.library.added);
+            await refreshLibrary();
+          }
+        );
+      } catch (caught) {
+        setLibraryError(errorText(caught));
+      } finally {
+        setLibraryBusy(false);
+      }
+    }
+
+    async function attachLibrarySource(source) {
+      if (!projectId) return;
+      const selectedProjectId = projectId;
+      setLibraryBusyId(source.library_source_id);
+      setLibraryError("");
+      try {
+        await executeCommand(
+          `library-attach:${selectedProjectId}:${source.library_source_id}`,
+          t.commands.attachLibrarySource,
+          "POST",
+          `/projects/${selectedProjectId}/library-sources/${source.library_source_id}/attach`,
+          {},
+          async (result) => {
+            setNotice(result && result.created ? t.library.attached : t.library.alreadyAttached);
+            await refreshProjectData(selectedProjectId);
+            if (result && result.ingestion_job_id) {
+              pollIngestionJob(selectedProjectId, result.ingestion_job_id).catch((caught) => setError(errorText(caught)));
+            }
+          }
+        );
+      } catch (caught) {
+        setLibraryError(errorText(caught));
+      } finally {
+        setLibraryBusyId("");
+      }
+    }
+
+    async function reloadLibrary() {
+      setLibraryLoading(true);
+      setLibraryError("");
+      try {
+        await refreshLibrary();
+      } catch (caught) {
+        setLibraryError(errorText(caught));
+      } finally {
+        setLibraryLoading(false);
       }
     }
 
@@ -634,6 +926,7 @@
         await refreshProjects();
         await refreshProjectData(projectId);
         await refreshMessages(projectId, conversationId);
+        await refreshLibrary();
         const stored = window.localStorage.getItem(runStorageKey(principalId, projectId, conversationId));
         if (stored) {
           const pointer = JSON.parse(stored);
@@ -645,7 +938,7 @@
             }
           }
         }
-        setNotice("已刷新");
+        setNotice(t.notices.refreshed);
       } catch (caught) {
         setError(errorText(caught));
       } finally {
@@ -653,8 +946,8 @@
       }
     }
 
-    if (authBusy && !user) return h(LoadingScreen);
-    if (!user) return h(AuthScreen, {
+    if (authBusy && !user) return withTheme(h(LoadingScreen));
+    if (!user) return withTheme(h(AuthScreen, {
       mode: authMode,
       setMode: setAuthMode,
       token: authToken,
@@ -665,41 +958,128 @@
       onPassword: passwordAuth,
       busy: authBusy,
       error,
-    });
+    }));
 
-    return h(
-      "div",
-      { className: "app-shell" },
-      h(
-        "header",
-        { className: "topbar" },
-        h("div", { className: "brand" }, h("span", { className: "brand-mark", "aria-hidden": true }, "学"), h("span", null, "学习工作台")),
-        h("div", { className: "topbar-actions" },
-          h("span", { className: "identity" }, user.display_name || user.principal_id),
-          h("button", { className: "icon-button", onClick: reloadWorkspace, disabled: loading, title: "刷新工作区", "aria-label": "刷新工作区" }, "↻"),
-          h("button", { className: "quiet-button", onClick: logout }, "退出")
-        )
-      ),
-      h(
-        "div",
-        { className: "workspace" },
-        h(ProjectRail, {
-          projects, projectId, setProjectId: (id) => { setConversationId(""); setProjectId(id); }, newProject, setNewProject, createProject, loading, projectFormOpen, setProjectFormOpen,
-        }),
-        h("main", { className: "main-column" },
-          error && h("div", { className: "alert alert-error", role: "alert" }, h("span", null, error), h("button", { onClick: () => setError("") , "aria-label": "关闭错误" }, "×")),
-          pendingCommand && h("div", { className: "alert alert-warning", role: "status" }, h("span", null, `${pendingCommand.label}结果未知，请确认后重试。`), h("button", { className: "secondary-button compact", onClick: retryPendingCommand, disabled: loading }, pendingCommand.retrying ? "重试中…" : "用同一请求重试")),
-          notice && h("div", { className: "alert alert-success", role: "status" }, notice),
-          h("div", { className: "workspace-heading" },
-            h("div", null, h("p", { className: "eyebrow" }, project ? "当前项目" : "学习空间"), h("h1", null, project ? project.name : "选择一个项目"), project && h("p", { className: "subheading" }, project.goal || "还没有写下项目目标")),
-            project && h("form", { className: "new-conversation", onSubmit: createConversation }, h("input", { value: newConversation, onChange: (event) => setNewConversation(event.target.value), placeholder: "新会话名称", "aria-label": "新会话名称" }), h("button", { className: "primary-button compact", disabled: loading }, "+ 新会话"))
-          ),
-          project && h(WorkspaceTabs, { view, setView }),
-          project ? h(MainView, { view, projectId, conversations, conversationId, setConversationId, currentConversation, messages, question, setQuestion, askQuestion, loading, activeRun, plan, planForm, setPlanForm, savePlan, sources, ingestionJobs, candidates, acquisitionJobs, sourceForm, setSourceForm, saveSource, candidateForm, setCandidateForm, saveCandidate, sourceSearchQuery, setSourceSearchQuery, searchSourceCandidates, selectCandidate }) : h(EmptyProject, { onFocus: () => document.querySelector(".project-create summary")?.click() })
-        ),
-        project && h(EvidenceRail, { activeRun, sources, projectId, plan, view, onReadCitation: readCitation, citationReading })
-      )
-    );
+    return withTheme(
+      h("div", { className: "app-shell" },
+        h("div", { className: "starfield", "aria-hidden": true }),
+        h("div", { className: "starfield-glow", "aria-hidden": true }),
+        h("header", { className: "topbar" },
+          h("div", { className: "brand" },
+            h("span", { className: "brand-mark", "aria-hidden": true }, t.app.brandMark),
+            h("span", null, t.app.name)),
+          h("div", { className: "topbar-actions" },
+            h("span", { className: "identity" }, user.display_name || user.principal_id),
+            h(antd.Button, {
+              className: "icon-button",
+              onClick: reloadWorkspace,
+              disabled: loading,
+              title: t.app.refreshing,
+              "aria-label": t.app.refreshing,
+            }, "↻"),
+            h(antd.Button, { className: "quiet-button", onClick: () => setSettingsOpen(true) }, t.app.settings),
+            h(antd.Button, { className: "quiet-button", onClick: logout }, t.app.logout))),
+        h("div", { className: "workspace" },
+          h(ProjectRail, {
+            projects,
+            projectId,
+            setProjectId: (id) => { setConversationId(""); setProjectId(id); },
+            newProject,
+            setNewProject,
+            createProject,
+            loading,
+            projectFormOpen,
+            setProjectFormOpen,
+          }, h(KnowledgeBasePanel, {
+            sources: librarySources,
+            loading: libraryLoading,
+            error: libraryError,
+            projectId,
+            busy: libraryBusy,
+            form: libraryForm,
+            setForm: setLibraryForm,
+            onAdd: addLibrarySource,
+            onAttach: attachLibrarySource,
+            onRefresh: reloadLibrary,
+            attachedIds: { busyId: libraryBusyId },
+          })),
+          h("main", { className: "main-column" },
+            error && h("div", { className: "alert alert-error", role: "alert" },
+              h("span", null, error),
+              h("button", { type: "button", onClick: () => setError(""), "aria-label": t.notices.closeError }, "×")),
+            pendingCommand && h("div", { className: "alert alert-warning", role: "status" },
+              h("span", null, t.notices.unknownResult(pendingCommand.label)),
+              h(antd.Button, { className: "secondary-button compact", onClick: retryPendingCommand, disabled: loading },
+                pendingCommand.retrying ? t.notices.retrying : t.notices.retrySame)),
+            notice && h("div", { className: "alert alert-success", role: "status" }, notice),
+            h("div", { className: "workspace-heading" },
+              h("div", null,
+                h("p", { className: "eyebrow" }, project ? t.workspace.eyebrowProject : t.workspace.eyebrowSpace),
+                h("h1", null, project ? project.name : t.workspace.pickProject),
+                project && h("p", { className: "subheading" }, project.goal || t.workspace.noGoal)),
+              project && h("form", { className: "new-conversation", onSubmit: createConversation },
+                h(antd.Input, {
+                  value: newConversation,
+                  onChange: (event) => setNewConversation(event.target.value),
+                  placeholder: t.workspace.newConversationPlaceholder,
+                  "aria-label": t.workspace.newConversationLabel,
+                }),
+                h(antd.Button, { type: "primary", htmlType: "submit", className: "compact", disabled: loading }, t.workspace.newConversation))),
+            project && h(WorkspaceTabs, { view, setView }),
+            project
+              ? h(MainView, {
+                view,
+                projectId,
+                conversations,
+                conversationId,
+                setConversationId,
+                currentConversation,
+                messages,
+                question,
+                setQuestion,
+                askQuestion,
+                loading,
+                activeRun,
+                plan,
+                planForm,
+                setPlanForm,
+                savePlan,
+                diagnosis,
+                diagnosisForm,
+                setDiagnosisForm,
+                saveDiagnosis,
+                generatePlan,
+                planGenerated,
+                taskStates,
+                onTransitionTask: transitionTask,
+                onSubmitTask: submitTask,
+                submissionsByTask,
+                taskBusyId,
+                sources,
+                ingestionJobs,
+                candidates,
+                acquisitionJobs,
+                sourceForm,
+                setSourceForm,
+                saveSource,
+                candidateForm,
+                setCandidateForm,
+                saveCandidate,
+                sourceSearchQuery,
+                setSourceSearchQuery,
+                searchSourceCandidates,
+                selectCandidate,
+              })
+              : h(EmptyProject, { onFocus: () => document.querySelector(".project-create summary")?.click() })),
+          project && h(EvidenceRail, { activeRun, sources, projectId, plan, view, onReadCitation: readCitation, citationReading })),
+        h(SettingsDrawer, {
+          open: settingsOpen,
+          onClose: () => setSettingsOpen(false),
+          user,
+          onLogout: logout,
+          onReload: reloadWorkspace,
+          loading,
+        })));
   }
 
   ReactDOM.createRoot(document.getElementById("root")).render(h(App));

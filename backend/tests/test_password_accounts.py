@@ -49,10 +49,33 @@ def test_username_normalized_form_is_revalidated_after_nfkc_casefold():
         normalize_username("K")
 
 
-def test_unicode_data_version_is_explicit_and_stable():
-    from app.identity.passwords import UNICODE_DATA_VERSION
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("alice", "alice"),          # 拉丁
+        ("Alice", "alice"),          # 大小写折叠
+        ("A_1.-", "a_1.-"),
+        ("Ａ", "a"),                  # 全角 ASCII 字母 -> NFKC 归一
+        ("Ａlice", "alice"),          # 混合：全角 + 拉丁
+        ("张", "张"),                  # 汉字不变
+        ("张三", "张三"),
+        ("㐀用户", "㐀用户"),            # CJK 扩展 A + 汉字
+        ("用户A", "用户a"),            # 汉字 + 拉丁混排
+    ],
+)
+def test_username_normalization_is_frozen_nfkc_casefold(raw, expected):
+    """归一化行为由测试向量冻结：NFKC + casefold，不依赖 `unidata_version`。
 
-    assert UNICODE_DATA_VERSION == unicodedata.unidata_version
+    运行时 Unicode 数据版本会随 Python 升级而变；与其在导入期硬失败，
+    不如把代表性输入（拉丁/全角/汉字/混合/碰撞对）的预期结果钉死，
+    让真正的行为漂移在测试里暴露。
+    """
+    assert normalize_username(raw).normalized == expected
+
+
+def test_username_collision_pairs_share_one_normalized_value():
+    for raw_a, raw_b in (("Ａ", "a"), ("Ａlice", "alice"), ("Alice", "alice")):
+        assert normalize_username(raw_a).normalized == normalize_username(raw_b).normalized
 
 
 @pytest.mark.parametrize("username", ["张", "张三", "张" * 16])

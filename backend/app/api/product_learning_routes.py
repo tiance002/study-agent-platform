@@ -18,7 +18,7 @@ from app.api.product_schemas import (
 from app.core.ids import new_id
 from app.identity.models import Principal
 from app.learning.evidence import Direction, EvidenceKind, Validity
-from app.learning.plan_builders import build_generated_bundle
+from app.learning.plan_builders import GENERATED_PLAN_GENERATOR, build_generated_bundle
 from app.product.models import TaskStatus
 
 router = APIRouter()
@@ -39,6 +39,8 @@ def _task_verified(events, task_id: str) -> bool:
 
     无效裁决（INCONCLUSIVE/VOIDED）与负向证据都不能让任务变绿 ——
     否则"掌握度只由合法证据更新"就会在这里漏一个口子。
+    **自报证据是中性裁决**（见 `rules.self_report_verdict`），因此它本身
+    永远不会把 `verified` 置为 True：自报 ≠ 已被验证。
     """
     for event in events:
         if event.task_id != task_id or event.kind is not EvidenceKind.LEARNING:
@@ -49,18 +51,29 @@ def _task_verified(events, task_id: str) -> bool:
     return False
 
 
+def _task_self_reported(state, actor: Principal, project_id: str, task_id: str) -> bool:
+    """该任务是否存在提交（MVP 只有自报）：`self_reported` 的计算值。"""
+    return bool(state.learning_loop.submissions_for_task(actor, project_id, task_id))
+
+
 @router.get("/projects/{project_id}/tasks/{task_id}")
 def get_task(request: Request, project_id: str, task_id: str) -> dict:
-    """任务详情。`verified` 是**计算结论**：存在 >=1 条有效正向学习证据。
+    """任务详情。`verified` 与 `self_reported` 都是**计算结论**，不存库。
 
-    它不存库 —— 存库就需要第二处写入者去维护它，而"已验证"的本质是
-    对证据的聚合，不是一个新的可变状态。
+    - `verified`：存在 >=1 条有效正向学习证据（自报是中性裁决，不算）；
+    - `self_reported`：存在自报提交。前端据此把
+      `verified=false + self_reported=true` 显示为"自报反馈已记录
+      （不等于自动评分）"。
     """
     state = _state(request)
     actor = _actor(request)
     task = state.products.get_task(actor, project_id, task_id)
     events = state.evidence.events_for(actor, project_id)
-    return {**task.to_dict(), "verified": _task_verified(events, task_id)}
+    return {
+        **task.to_dict(),
+        "verified": _task_verified(events, task_id),
+        "self_reported": _task_self_reported(state, actor, project_id, task_id),
+    }
 
 
 @router.post(
@@ -92,6 +105,7 @@ def transition_task(
         result = {
             **task.to_dict(),
             "verified": _task_verified(state.evidence.events_for(guard.principal, project_id), task_id),
+            "self_reported": _task_self_reported(state, guard.principal, project_id, task_id),
         }
         guard.complete(200, result)
         return result
@@ -150,16 +164,19 @@ def generate_plan(request: Request, project_id: str, body: GeneratePlanBody) -> 
         if diagnosis is None:
             raise deny(ErrorCode.PARAMS_INVALID, "请先完成基础诊断，再生成学习计划")
         project = state.membership.get(guard.principal, project_id)
+        # 每周可投入时长来自已保存的诊断（`answers.weekly_hours`）：
+        # 计划总时长按它分配，而不是无凭据地堆任务。
+        weekly_hours = int(diagnosis.answers.get("weekly_hours") or 0)
         bundle, assessments = build_generated_bundle(
             guard.principal,
             project_id,
             project.goal,
-            diagnosis.summary,
+            weekly_hours=weekly_hours,
             now=state.clock.now(),
         )
         saved = state.learning_loop.install_generated_plan(guard.principal, project_id, bundle, assessments)
         result = {
-            "generator": "template/graph-v1",
+            "generator": GENERATED_PLAN_GENERATOR,
             "plan": saved.plan.to_dict(),
             "milestones": [item.to_dict() for item in saved.milestones],
             "tasks": [item.to_dict() for item in saved.tasks],

@@ -66,6 +66,7 @@ def main() -> int:
         [python, "-m", "mypy", "backend/app"],
         [python, "-m", "compileall", "-q", "backend", "tools", "alembic"],
         ["node", "--check", "frontend/api-client.js"],
+        ["node", "--check", "frontend/terms.js"],
         ["node", "--check", "frontend/views.js"],
         ["node", "--check", "frontend/commands.js"],
         ["node", "--check", "frontend/project-state.js"],
@@ -74,6 +75,8 @@ def main() -> int:
         [python, "tools/check_round8_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts, "--invite", args.invite],
         # P9 证据栏浏览器回归：验证检索/路由标签与窄屏布局（复用同一预览）。
         [python, "tools/check_p9_evidence_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts],
+        # 知识库真实旅程：用户级资料库添加 → 关联到当前项目 → 项目资料可见。
+        [python, "tools/check_library_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts],
         [python, "tools/check_round8_process_recovery.py"],
     ]
     for command in commands:

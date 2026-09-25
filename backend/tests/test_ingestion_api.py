@@ -577,7 +577,12 @@ def test_api_layer_never_chunks_and_never_claims():
 
 @pytest.mark.invariant
 def test_ingestion_surface_contains_explicit_metadata_and_status_reads(client):
-    """摄取相关 HTTP 面只允许上传与受权限保护的状态读取。"""
+    """摄取相关 HTTP 面只允许上传与受权限保护的状态读取。
+
+    知识库原文上传（`/library/sources/{id}/content`）同样是**已认证的上传**：
+    它只写主体级库表（RLS 限定 tenant + principal），不直接落项目摄取表；
+    真正进入摄取的路径仍是项目内 `sources/{id}/content`，由关联动作复用。
+    """
     ingestion = {
         item
         for item in _route_pairs(client.app)
@@ -585,6 +590,7 @@ def test_ingestion_surface_contains_explicit_metadata_and_status_reads(client):
     }
     assert ingestion == {
         ("POST", "/projects/{project_id}/sources/{source_id}/content"),
+        ("POST", "/library/sources/{library_source_id}/content"),
         ("GET", "/projects/{project_id}/ingestion-jobs"),
         ("GET", "/projects/{project_id}/ingestion-jobs/{job_id}"),
     }

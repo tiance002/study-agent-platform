@@ -53,6 +53,12 @@ class TaskStatus(StrEnum):
     SKIPPED = "skipped"
 
 
+#: 任务类型闭集。空串属于手工计划（没有生成期分类），值必须落在闭集内。
+TASK_TYPES: tuple[str, ...] = ("", "concept", "practice", "reflection")
+#: 单个任务的时长上界（分钟）。与 0020 迁移的 CHECK 是同一条规则的两个出口。
+MAX_TASK_MINUTES = 600
+
+
 def _require_enum(value: object, expected: type[StrEnum], name: str) -> None:
     """枚举字段必须真的是那个枚举。
 
@@ -62,6 +68,14 @@ def _require_enum(value: object, expected: type[StrEnum], name: str) -> None:
     """
     if not isinstance(value, expected):
         raise ValueError(f"{name} 必须是 {expected.__name__}，收到 {value!r}")
+
+
+def _require_string_tuple(value: object, name: str) -> None:
+    """jsonb 数组字段的 Python 契约：非空字符串组成的元组。"""
+    if not isinstance(value, tuple) or not all(
+        isinstance(item, str) and item.strip() for item in value
+    ):
+        raise ValueError(f"{name} 必须是非空字符串组成的元组，收到 {value!r}")
 
 
 @dataclass(frozen=True)
@@ -201,7 +215,13 @@ class Milestone:
 
 @dataclass(frozen=True)
 class LearningTask:
-    """里程碑下的一个任务。"""
+    """里程碑下的一个任务。
+
+    `objective` / `instruction` / `deliverable` / `acceptance_criteria` 这组
+    "任务详情"字段由生成期填充（真实分解的产物）；手工计划用默认值即可 ——
+    默认值让既有手工路径**不受影响**，而生成路径必须把它们填满（质量不变量
+    由 `tests/test_plan_quality.py` 锁定）。
+    """
 
     task_id: str
     tenant_id: str
@@ -210,6 +230,15 @@ class LearningTask:
     order_index: int
     title: str
     status: TaskStatus
+    objective: str = ""
+    instruction: str = ""
+    task_type: str = ""
+    estimated_minutes: int = 0
+    deliverable: str = ""
+    acceptance_criteria: tuple[str, ...] = ()
+    evidence_required: tuple[str, ...] = ()
+    prerequisites: tuple[str, ...] = ()
+    related_skill_id: str = ""
 
     def __post_init__(self) -> None:
         require_id(self.task_id, "task_id")
@@ -219,13 +248,40 @@ class LearningTask:
         require_non_negative(self.order_index, "order_index")
         require_text(self.title, "title")
         _require_enum(self.status, TaskStatus, "status")
+        require_text(self.objective, "objective", allow_empty=True)
+        require_text(self.instruction, "instruction", allow_empty=True)
+        require_text(self.task_type, "task_type", allow_empty=True)
+        if self.task_type not in TASK_TYPES:
+            raise ValueError(f"task_type 必须是 {TASK_TYPES} 之一，收到 {self.task_type!r}")
+        require_non_negative(self.estimated_minutes, "estimated_minutes")
+        if self.estimated_minutes > MAX_TASK_MINUTES:
+            raise ValueError(
+                f"estimated_minutes 不得超过 {MAX_TASK_MINUTES}，收到 {self.estimated_minutes}"
+            )
+        require_text(self.deliverable, "deliverable", allow_empty=True)
+        _require_string_tuple(self.acceptance_criteria, "acceptance_criteria")
+        _require_string_tuple(self.evidence_required, "evidence_required")
+        _require_string_tuple(self.prerequisites, "prerequisites")
+        require_text(self.related_skill_id, "related_skill_id", allow_empty=True)
 
     def to_dict(self) -> dict:
         return {
             "task_id": self.task_id,
+            # 任务所属里程碑：前端刷新读回后要按里程碑分组渲染，缺失该字段时
+            # 只能把任务堆在计划末尾（见 frontend/views.js 的分组回退）。
+            "milestone_id": self.milestone_id,
             "order_index": self.order_index,
             "title": self.title,
             "status": str(self.status),
+            "objective": self.objective,
+            "instruction": self.instruction,
+            "task_type": self.task_type,
+            "estimated_minutes": self.estimated_minutes,
+            "deliverable": self.deliverable,
+            "acceptance_criteria": list(self.acceptance_criteria),
+            "evidence_required": list(self.evidence_required),
+            "prerequisites": list(self.prerequisites),
+            "related_skill_id": self.related_skill_id,
         }
 
 
