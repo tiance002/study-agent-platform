@@ -121,7 +121,8 @@ def test_validate_password_rejects_lone_surrogates():
 
 
 def test_password_hash_uses_argon2id_and_frozen_parameters():
-    password = "Argon2id1234"
+    # 值里带 dev-only 标记：占位口令，不是真实凭据（秘密扫描要求）。
+    password = "dev-only1234"
     encoded = hash_password(password)
     assert encoded.startswith("$argon2id$")
     assert ARGON2_PARAMETERS == {
@@ -157,7 +158,8 @@ def test_verify_password_uses_dummy_hash_for_missing_or_malformed_hash(monkeypat
 
 
 def test_password_preserves_leading_trailing_space_and_unicode_codepoints():
-    password = "  密码ab12  "
+    # 12 个码点：首尾空格 + dev-only 标记 + 汉字，三者都要保留。
+    password = " dev-only密码 "
     encoded = hash_password(password)
     assert verify_password(password, encoded) is True
     # 不 strip：去掉首尾空格是**另一个**合法长度的口令，必须验证失败。
@@ -171,9 +173,9 @@ def test_needs_rehash_exposes_argon2_check():
 
 
 def test_registration_takes_username_and_password_only_and_copies_display_name():
-    account = register_account(username="Alice_1", password="password-123")
+    account = register_account(username="Alice_1", password="dev-only1234")
     assert account.username_original == "Alice_1"
     assert account.username_normalized == "alice_1"
     assert account.display_name == "Alice_1"
     with pytest.raises(TypeError):
-        register_account(username="Alice_1", password="password-123", display_name="other")
+        register_account(username="Alice_1", password="dev-only1234", display_name="other")

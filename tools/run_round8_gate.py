@@ -71,6 +71,9 @@ def main() -> int:
         ["node", "--check", "frontend/project-state.js"],
         ["node", "--check", "frontend/app.js"],
         [python, "tools/skills/gen_contracts.py", "--all", "--check"],
+        # 秘密扫描与 CI 同源：本地门禁必须能提前发现"占位值缺标记"这类问题
+        # （此前两次由 CI 才暴露，故纳入本地门禁）。
+        [python, "tools/security/scan_secrets.py"],
         [python, "tools/check_round8_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts],
         # P9 证据栏浏览器回归：验证检索/路由标签与窄屏布局（复用同一预览）。
         [python, "tools/check_p9_evidence_browser.py", "--base-url", args.base_url, "--artifacts", args.artifacts],
