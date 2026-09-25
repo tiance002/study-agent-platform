@@ -1,3 +1,4 @@
+from app.deployment import DeploymentSettings
 from app.main import build_platform, create_app
 from fastapi.testclient import TestClient
 
@@ -13,14 +14,14 @@ def test_register_login_and_existing_cookie_contract(tmp_path):
     platform, client = _client(tmp_path)
     headers = {"Origin": "http://testserver"}
     registered = client.post(
-        "/auth/register", json={"username": "张三", "password": "LongPassword12"}, headers=headers
+        "/auth/register", json={"username": "张三", "password": "LongPass1234"}, headers=headers
     )
     assert registered.status_code == 201
     assert registered.headers["cache-control"] == "no-store"
     assert registered.json()["default_project_name"] == "我的学习项目"
 
     already = client.post(
-        "/auth/login", json={"username": "张三", "password": "LongPassword12"}, headers=headers
+        "/auth/login", json={"username": "张三", "password": "LongPass1234"}, headers=headers
     )
     assert already.status_code == 409
     assert already.json()["code"] == "already_authenticated"
@@ -28,7 +29,7 @@ def test_register_login_and_existing_cookie_contract(tmp_path):
 
     client.post("/auth/logout", headers={"Origin": "http://testserver"})
     logged_in = client.post(
-        "/auth/login", json={"username": "张三", "password": "LongPassword12"}, headers=headers
+        "/auth/login", json={"username": "张三", "password": "LongPass1234"}, headers=headers
     )
     assert logged_in.status_code == 200
     success_events = [
@@ -43,11 +44,11 @@ def test_nfkc_collision_and_wrong_password_are_uniform(tmp_path):
     _, client = _client(tmp_path)
     headers = {"Origin": "http://testserver"}
     assert client.post(
-        "/auth/register", json={"username": "Ａ", "password": "LongPassword12"}, headers=headers
+        "/auth/register", json={"username": "Ａ", "password": "LongPass1234"}, headers=headers
     ).status_code == 201
     client.post("/auth/logout", headers={"Origin": "http://testserver"})
     collision = client.post(
-        "/auth/register", json={"username": "a", "password": "LongPassword12"}, headers=headers
+        "/auth/register", json={"username": "a", "password": "LongPass1234"}, headers=headers
     )
     assert collision.status_code == 409
     client.post("/auth/logout", headers={"Origin": "http://testserver"})
@@ -57,14 +58,50 @@ def test_nfkc_collision_and_wrong_password_are_uniform(tmp_path):
     assert wrong.status_code == 401
 
 
-def test_missing_flags_default_closed(tmp_path):
+def test_development_flags_default_open_and_explicit_disable_still_works(tmp_path):
     platform = build_platform(var_dir=tmp_path)
+    assert platform.registration_enabled is True
+    assert platform.password_login_enabled is True
+
+    disabled_settings = DeploymentSettings.load(
+        {
+            "STUDY_PLATFORM_REGISTRATION_ENABLED": "false",
+            "STUDY_PLATFORM_PASSWORD_LOGIN_ENABLED": "false",
+        }
+    )
+    disabled_platform = build_platform(var_dir=tmp_path / "disabled", settings=disabled_settings)
     client = TestClient(create_app(platform=platform))
     response = client.post(
-        "/auth/register", json={"username": "张三", "password": "LongPassword12"}, headers={"Origin": "http://testserver"}
+        "/auth/register", json={"username": "张三", "password": "LongPass1234"}, headers={"Origin": "http://testserver"}
     )
-    assert response.status_code == 403
-    assert response.json()["code"] == "REGISTRATION_DISABLED"
+    assert response.status_code == 201
+
+    client.post("/auth/logout", headers={"Origin": "http://testserver"})
+    response = client.post(
+        "/auth/register", json={"username": "张三2", "password": "abcde"}, headers={"Origin": "http://testserver"}
+    )
+    assert response.status_code == 400
+    assert response.json()["message"] == "密码长度需为 6-12 个字符"
+
+    disabled_response = TestClient(create_app(platform=disabled_platform)).post(
+        "/auth/register", json={"username": "disabled", "password": "abc123"}, headers={"Origin": "http://testserver"}
+    )
+    assert disabled_response.status_code == 403
+    assert disabled_response.json()["code"] == "REGISTRATION_DISABLED"
+
+
+def test_six_character_registration_password_can_login(tmp_path):
+    platform, client = _client(tmp_path)
+    headers = {"Origin": "http://testserver"}
+    registered = client.post(
+        "/auth/register", json={"username": "sixchar", "password": "abc123"}, headers=headers
+    )
+    assert registered.status_code == 201
+    client.post("/auth/logout", headers=headers)
+    logged_in = client.post(
+        "/auth/login", json={"username": "sixchar", "password": "abc123"}, headers=headers
+    )
+    assert logged_in.status_code == 200
 
 
 def test_logout_clears_invalid_cookie_without_claiming_server_revocation(tmp_path):

@@ -76,7 +76,7 @@ def test_http_teaching_and_ingestion_survive_reconstructed_platform(
 
     registered = client_a.post(
         "/auth/register",
-        json={"username": "r8" + suffix, "password": "Round8-password-123"},
+        json={"username": "r8" + suffix, "password": "Round8Pass12"},
         headers=headers,
     )
     assert registered.status_code == 201, registered.text

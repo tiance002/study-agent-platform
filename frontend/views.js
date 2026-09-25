@@ -28,8 +28,8 @@
         h("label", { htmlFor: "auth-username" }, "用户名"),
         h("input", { id: "auth-username", value: credentials.username, onChange: (event) => setCredentials({ ...credentials, username: event.target.value }), autoComplete: "username", minLength: 1, maxLength: 16, placeholder: "1–16 个字符", disabled: busy }),
         h("label", { htmlFor: "auth-password" }, "密码"),
-        h("input", { id: "auth-password", type: "password", value: credentials.password, onChange: (event) => setCredentials({ ...credentials, password: event.target.value }), autoComplete: mode === "register" ? "new-password" : "current-password", minLength: 12, maxLength: 128, placeholder: "至少 12 个字符", disabled: busy }),
-        mode === "register" && h("p", { className: "field-hint" }, "首版不提供邮箱找回；请妥善保存密码。"),
+        h("input", { id: "auth-password", type: "password", value: credentials.password, onChange: (event) => setCredentials({ ...credentials, password: event.target.value }), autoComplete: mode === "register" ? "new-password" : "current-password", minLength: mode === "register" ? 6 : 1, maxLength: mode === "register" ? 12 : 128, placeholder: mode === "register" ? "6-12 个字符" : "请输入密码", disabled: busy, "aria-describedby": mode === "register" ? "password-hint" : undefined }),
+        mode === "register" && h("p", { id: "password-hint", className: `field-hint ${credentials.password && (credentials.password.length < 6 || credentials.password.length > 12) ? "field-error" : ""}` }, "密码长度需为 6-12 个字符。"),
         h("button", { className: "primary-button", disabled: busy || !credentials.username.trim() || !credentials.password }, busy ? "处理中…" : mode === "register" ? "创建账号" : "登录")
       )
     ));

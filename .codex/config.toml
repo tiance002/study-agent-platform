@@ -1,5 +1,6 @@
 # Project-only Codex MCP servers. This file is loaded for trusted projects.
 
+model_verbosity = "medium"
 [mcp_servers.serena]
 command = "powershell.exe"
 args = [

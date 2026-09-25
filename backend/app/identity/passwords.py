@@ -27,6 +27,8 @@ ARGON2_PARAMETERS = {
 }
 MIN_PASSWORD_CODEPOINTS = 12
 MAX_PASSWORD_CODEPOINTS = 128
+REGISTRATION_MIN_PASSWORD_CODEPOINTS = 6
+REGISTRATION_MAX_PASSWORD_CODEPOINTS = 12
 
 _USERNAME_ORIGINAL = re.compile(r"^[A-Za-z0-9_.\-\u3400-\u4DBF\u4E00-\u9FFF\uFF21-\uFF3A\uFF41-\uFF5A]+$")
 _USERNAME_NORMALIZED = re.compile(r"^[A-Za-z0-9_.\-\u3400-\u4DBF\u4E00-\u9FFF]+$")
@@ -80,6 +82,17 @@ def hash_password(password: str) -> str:
     return _PASSWORD_HASHER.hash(password)
 
 
+def hash_registration_password(password: str) -> str:
+    """Hash a newly registered credential under the product's 6-12 rule."""
+    if not isinstance(password, str) or not (
+        REGISTRATION_MIN_PASSWORD_CODEPOINTS
+        <= len(password)
+        <= REGISTRATION_MAX_PASSWORD_CODEPOINTS
+    ):
+        raise ValueError("registration password must contain 6 to 12 code points")
+    return _PASSWORD_HASHER.hash(password)
+
+
 def _verify_hash(encoded_hash: str, password: str) -> bool:
     return _PASSWORD_HASHER.verify(encoded_hash, password)
 
@@ -88,7 +101,7 @@ def verify_password_diagnostic(password: object, encoded_hash: object) -> tuple[
     """Internal-safe result: reason names contain no password or hash material."""
 
     try:
-        if not isinstance(password, str) or not MIN_PASSWORD_CODEPOINTS <= len(password) <= MAX_PASSWORD_CODEPOINTS:
+        if not isinstance(password, str) or not REGISTRATION_MIN_PASSWORD_CODEPOINTS <= len(password) <= MAX_PASSWORD_CODEPOINTS:
             _verify_hash(DUMMY_PASSWORD_HASH, password if isinstance(password, str) else "")
             return False, "invalid_password"
         target = encoded_hash if isinstance(encoded_hash, str) and encoded_hash.startswith("$argon2id$") else DUMMY_PASSWORD_HASH

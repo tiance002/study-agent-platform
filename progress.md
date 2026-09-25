@@ -836,3 +836,19 @@ worker 策略的角色集（`{public}` ↔ `{study_worker}`）、应用角色与
 - **未跟踪文件归属**：`.planning/`（三轮工作底稿，正式结论已在 progress.md/计划文档）、`.trae/mcp.json`（机器绝对路径）、`INTEGRATION_SUMMARY.md`（安装状态待复核）、`verify_components.py`（Trae 工具验证）均维持未跟踪；跟踪文件 370 个秘密扫描通过，未跟踪文件定向凭据模式扫描无命中。
 - **发布前总门禁**：`ROUND8_GATE_PASSED`（2026-09-24）。full 967 通过 / 1 跳过（并发争抢用例的 memory 参数化：内存锁天然串行，PG 场景由 PG 子集覆盖）；PG 子集 145 通过 / 0 跳过；ruff/mypy(137 文件)/compileall/5 个前端脚本 `node --check`/三份契约 `--check` 通过；迁移校验 19 条单头 0019；许可扫描通过（2 个 MPL-2.0 弱 copyleft 提示，非阻断）；`git diff --check` 通过。JUnit 证据在 `var/round8-gate/`（gitignore）。
 - **PR #2 同步**：门禁全绿后推送本分支更新 PR #2（`1349352..c490cca`，共 12 个提交），PR 描述保留原架构四节并追加「R9 混合检索与 P9 审查修复」「验收证据（ROUND8_GATE_PASSED）」「未完成项（pgvector/reranker）」三节；新 head `c490cca` 的 GitHub CI（gates）1m15s 通过；PR 保持 Draft，未请求评审，合并/部署另作决定。
+
+# progress.md 建议追加内容（2026-09-24）
+
+## 2026-09-24 · 开发流程加速调整
+
+- 对现有任务计划进行复审，确认当前主要风险已不再是基础设施缺失，而是首版用户闭环迟迟未进入真实使用验证。
+- 开发策略调整为“核心功能优先、可控 Bug 延期、数据驱动优化”。
+- 引入 P0/P1/P2/P3 四级缺陷模型：
+  - P0：安全、隔离、数据破坏、重复收费/副作用、错误证据等发布阻断问题。
+  - P1：当前里程碑核心路径严重问题。
+  - P2：影响范围可控、有绕过方案、可延期的问题。
+  - P3：性能、架构、体验改进项。
+- 非阻塞 Debug 默认设置约 45 分钟时间盒；超过后重新分级，P2/P3 停止深挖并继续主线。
+- Milestone A 前冻结：LightRAG/GraphRAG、reranker、完整四层记忆、多 provider、全格式 OCR、100k 规模并发专项优化等。
+- 下一阶段优先交付：普通用户入口、React 核心学习闭环、ContextBuilder v0、Memory v0、最小真实场景指标。
+- 核心功能稳定后，由真实用户场景与测试数据决定是否引入 pgvector、reranker、LightRAG、更复杂的记忆 consolidation 和性能优化。

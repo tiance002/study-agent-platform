@@ -1,0 +1,54 @@
+{
+  "mcpServers": {
+    "superpowers": {
+      "command": "npx",
+      "args": ["-y", "superpowers-mcp"],
+      "env": {
+        "START_MCP_TIMEOUT_MS": "120000",
+        "RUN_MCP_TIMEOUT_MS": "60000"
+      }
+    },
+    "serena": {
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", "E:/codex_workspace/study-plan/.codex/scripts/serena-mcp.ps1",
+        "start-mcp-server",
+        "--context=codex",
+        "--project-from-cwd",
+        "--enable-web-dashboard", "False",
+        "--open-web-dashboard", "False"
+      ],
+      "env": {
+        "SERENA_USAGE_REPORTING": "false",
+        "START_MCP_TIMEOUT_MS": "180000",
+        "RUN_MCP_TIMEOUT_MS": "120000"
+      }
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp@latest"],
+      "env": {
+        "START_MCP_TIMEOUT_MS": "60000",
+        "RUN_MCP_TIMEOUT_MS": "30000"
+      }
+    },
+    "playwright": {
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", "E:/codex_workspace/study-plan/.codex/scripts/playwright-mcp.ps1",
+        "--headless",
+        "--isolated",
+        "--no-webmcp",
+        "--file-paths=absolute"
+      ],
+      "env": {
+        "START_MCP_TIMEOUT_MS": "60000",
+        "RUN_MCP_TIMEOUT_MS": "120000"
+      }
+    }
+  }
+}

@@ -165,8 +165,9 @@ class DeploymentSettings:
     local_query_rewriter_url: str = ""
     local_query_rewriter_model: str = ""
     local_query_rewriter_timeout_seconds: float = 1.5
-    # Open registration and password login are independent kill switches.
-    # Missing environment variables deliberately resolve to False.
+    # Open registration and password login are independent switches. Development
+    # defaults keep the local product usable; production still requires explicit
+    # environment configuration through the mode-aware loader below.
     registration_enabled: bool = False
     password_login_enabled: bool = False
     paid_dispatch_enabled: bool = False
@@ -311,8 +312,16 @@ class DeploymentSettings:
             local_query_rewriter_timeout_seconds=float(
                 env.get("STUDY_PLATFORM_LOCAL_QUERY_REWRITER_TIMEOUT_SECONDS", "1.5")
             ),
-            registration_enabled=_env_bool("STUDY_PLATFORM_REGISTRATION_ENABLED", env=env),
-            password_login_enabled=_env_bool("STUDY_PLATFORM_PASSWORD_LOGIN_ENABLED", env=env),
+            registration_enabled=_env_bool(
+                "STUDY_PLATFORM_REGISTRATION_ENABLED",
+                default=mode is DeploymentMode.DEVELOPMENT,
+                env=env,
+            ),
+            password_login_enabled=_env_bool(
+                "STUDY_PLATFORM_PASSWORD_LOGIN_ENABLED",
+                default=mode is DeploymentMode.DEVELOPMENT,
+                env=env,
+            ),
             paid_dispatch_enabled=_env_bool("STUDY_PLATFORM_PAID_DISPATCH_ENABLED", env=env),
             auth_argon2_max_concurrency=int(env.get("STUDY_PLATFORM_ARGON2_MAX_CONCURRENCY", "2")),
             auth_argon2_queue_limit=int(env.get("STUDY_PLATFORM_ARGON2_QUEUE_LIMIT", "16")),

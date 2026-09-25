@@ -116,8 +116,8 @@ def test_healthz_declares_stub_components(client):
     assert body["components"]["rls"] == "not_implemented"
     assert body["components"]["sandbox"] == "not_implemented"
     assert body["features"] == {
-        "registration_enabled": False,
-        "password_login_enabled": False,
+        "registration_enabled": True,
+        "password_login_enabled": True,
         "paid_dispatch_config_source": "environment",
     }
 
