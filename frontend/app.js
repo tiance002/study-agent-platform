@@ -172,6 +172,7 @@
       refreshProjectData,
       refreshMessages,
       clearProjectData,
+      clearLibraryData,
     } = useProjectState({
       principalId,
       conversationId,
@@ -249,16 +250,21 @@
     }, [principalId, projectId, conversationId]);
 
     useEffect(() => {
-      if (!principalId) {
-        setLibraryForm({ name: "", url: "", content: "" });
-        return;
-      }
+      // 知识库是用户级列表：换账号时必须先清空旧账号的库列表与相关
+      // loading/error/busy/form 状态，再拉取新账号的库。否则旧账号的
+      // 资料（以及粘在表单里的草稿）会在新账号下继续可见。
+      clearLibraryData();
+      setLibraryLoading(false);
       setLibraryError("");
+      setLibraryBusy(false);
+      setLibraryBusyId("");
+      setLibraryForm({ name: "", url: "", content: "" });
+      if (!principalId) return;
       setLibraryLoading(true);
       refreshLibrary()
         .catch((caught) => setLibraryError(errorText(caught)))
         .finally(() => setLibraryLoading(false));
-    }, [principalId, refreshLibrary]);
+    }, [principalId, refreshLibrary, clearLibraryData]);
 
     useEffect(() => {
       const expired = () => {
@@ -373,8 +379,14 @@
         setPlanGenerated(false);
         setTaskStates({});
         setSubmissionsByTask({});
+        // 登出同样要清空用户级知识库及其 UI 状态，避免下一个账号
+        // 复用同一工作台时看到上一个账号的库。
+        clearLibraryData();
         setLibraryForm({ name: "", url: "", content: "" });
         setLibraryError("");
+        setLibraryLoading(false);
+        setLibraryBusy(false);
+        setLibraryBusyId("");
         resetCommands();
         setNewProject({ name: "", goal: "" });
       }

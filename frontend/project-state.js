@@ -66,6 +66,12 @@
       setAcquisitionJobs([]);
     }, []);
 
+    // 知识库是**用户级**列表，不随项目切换清空，但换账号/登出必须清空：
+    // 否则新账号会短暂（甚至永久）看到旧账号的库资料。
+    const clearLibraryData = useCallback(() => {
+      setLibrarySources([]);
+    }, []);
+
     const refreshLibrary = useCallback(async () => {
       const epoch = scopeRef.current.epoch;
       const owner = scopeRef.current.principalId;
@@ -154,6 +160,7 @@
       refreshProjectData,
       refreshMessages,
       clearProjectData,
+      clearLibraryData,
     };
   }
 
