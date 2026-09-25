@@ -92,7 +92,7 @@ DEMO_PROJECT = "proj_demo"
 DEFAULT_SESSION_TTL = timedelta(hours=8)
 
 #: 代码预期的数据库迁移版本。启动自检核对它；新增迁移必须同步更新。
-EXPECTED_SCHEMA_VERSION = "0021"
+EXPECTED_SCHEMA_VERSION = "0001"
 
 
 @dataclass
