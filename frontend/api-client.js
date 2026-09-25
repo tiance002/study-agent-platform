@@ -47,7 +47,7 @@
     } catch (error) {
       payload = { message: text || "服务器返回了无法读取的响应" };
     }
-    if (response.status === 401 && path !== "/auth/invitations/exchange") {
+    if (response.status === 401) {
       window.dispatchEvent(new Event("study:session-expired"));
     }
     if (!response.ok) throw new ApiError(response.status, payload);

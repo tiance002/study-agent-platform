@@ -49,6 +49,7 @@ def main() -> None:
     parser.add_argument("--var-dir", default="var/round8-preview")
     args = parser.parse_args()
 
+    # 唯一身份路径是开放注册 + 密码登录；不再播种任何邀请码。
     platform = build_platform(
         var_dir=Path(args.var_dir),
         settings=DeploymentSettings.load(
