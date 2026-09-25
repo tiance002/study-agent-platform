@@ -81,9 +81,11 @@ def test_learning_loop_records_self_report_without_forging_verified(
     component = next(
         item for item in mastery["components"] if item["component_id"] == first_task["task_type"]
     )
-    # 中性裁决不抬升独立水平：证据被记录（count=1），但水平仍是 unknown。
+    # 中性裁决不产生掌握证据：组件可见，但既不计入证据计数，也不抬升水平/置信度。
     assert component["independence_level"] == "unknown"
-    assert component["evidence_count"] == 1
+    assert component["evidence_count"] == 0
+    assert component["independence_groups"] == 0
+    assert component["confidence"] == "insufficient"
 
     done = client.post(
         f"/projects/{project_id}/tasks/{first_task['task_id']}/transition",

@@ -11,6 +11,11 @@
 
 另有一条容易搞错的规则：**产品执行证据不进入掌握投影**。跑通一次代码不等于掌握
 （不变量 #14）。只有事前声明 contract 的学习证据才计入。
+
+还有一条同样容易搞错的规则：**中性裁决不产生掌握证据**。自报（A03）的裁决
+`direction = NONE`，它随事件落库（审计事实保留），但投影时不计入证据计数与
+独立组，也不抬升独立水平与置信度 —— 否则"随手写一段自报"就能把 confidence
+抬到 MEDIUM/HIGH（"自报 ≠ 已被验证"）。
 """
 
 from __future__ import annotations
@@ -168,6 +173,12 @@ class Projector:
                         "last_at": None,
                     },
                 )
+                # 中性裁决（自报等 `Direction.NONE`）：组件出现在读模型里，
+                # 但**不**计入证据计数与独立组，也**不**抬升独立水平与置信度。
+                # 否则同一任务的多次自报会靠独立组数量把 confidence 抬到
+                # MEDIUM/HIGH —— 而自报只是"用户声称完成了"（A03），不是证据。
+                if verdict.direction is Direction.NONE:
+                    continue
                 bucket["count"] += 1
                 bucket["groups"].add(verdict.independence_group)
                 if verdict.direction is Direction.NEGATIVE:

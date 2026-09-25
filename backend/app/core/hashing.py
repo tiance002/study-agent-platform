@@ -51,12 +51,17 @@ def content_hash(value: Any) -> str:
 def acquisition_identity_hash(acquisition: dict) -> str:
     """从**获取方式**派生材料的稳定标识。
 
-    这是"同一份材料"的**唯一**判定出口：项目级 `sources` 的用户级知识库
-    `library_sources` 都用它去重，而知识库关联到项目靠的正是
-    "项目里已有同 `identity_hash` 的资料"。
+    这是**项目级** `sources` 去重（`UNIQUE (project_id, identity_hash)`）的
+    唯一判定出口，也是知识库关联到项目时"复用项目里已有资料"所依据的身份。
 
-    因此它必须只有一份实现 —— 两处各算一遍时，任何一次规范化差异
-    都会让"同一份材料"在两个域里得到不同哈希，于是关联会**静默地**
+    ⚠️ 知识库登记（`library_sources`）的身份**不完全是**本函数的结果：
+    登记时若**携带原文**，`knowledge.library.library_source_identity_hash`
+    会在此基础上并入内容指纹 —— 这样"同名不同内容"是两份材料，而不是
+    被幂等命中后静默丢弃新原文。本函数只保留 acquisition 维度，
+    项目级去重语义因此不受影响。
+
+    因此它必须只有一份实现 —— 项目级各调用点各算一遍时，任何一次规范化差异
+    都会让"同一份材料"得到不同哈希，于是关联会**静默地**
     在项目里创建第二份资料，而所有的去重声明看起来都还在。
     """
     return content_hash(acquisition)

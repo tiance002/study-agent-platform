@@ -105,13 +105,14 @@ def test_library_end_to_end_in_postgres(tmp_path):
     assert registered.json()["has_content"] is True
     assert registered.json()["identity_hash"].startswith("sha256:")
 
-    # 同样的 acquisition 再登记一次：返回既有记录（200），库里仍只有一行。
+    # 同样的 (acquisition, 原文) 再登记一次：返回既有记录（200），库里仍只有一行。
     repeated = client.post(
         "/library/sources",
         json={
             "display_name": "事务讲义(重传)",
             "media_type": "text/markdown",
             "acquisition": {"kind": "upload", "n": suffix},
+            "content": MARKDOWN,
         },
         headers=_keyed(),
     )
@@ -216,6 +217,68 @@ def test_attach_requires_membership_in_postgres(tmp_path):
     )
     assert denied.status_code == 404, denied.text
     assert denied.json()["code"] == "NOT_FOUND"
+
+
+@pytest.mark.invariant
+def test_attach_rolls_back_the_source_when_enqueue_fails(tmp_path, monkeypatch):
+    """真实事务回滚：摄取写入在资料登记之后失败，整段回滚，不留半成品。
+
+    与内存版的分工：内存版证明"路由不再分两步写"；这里证明 PostgreSQL 侧
+    "资料登记与入队在同一事务"，第二步失败时资料登记被一并回滚。
+    """
+    from app.db.ingestion_store import PostgresIngestionRepository
+
+    suffix = uuid.uuid4().hex[:10]
+    platform = build_platform(var_dir=tmp_path / "web", settings=_settings())
+    client = TestClient(create_app(platform=platform))
+    _principal_id, project_id = _register(client, suffix=suffix)
+
+    registered = client.post(
+        "/library/sources",
+        json={
+            "display_name": "事务讲义",
+            "media_type": "text/markdown",
+            "acquisition": {"kind": "upload", "n": suffix},
+            "content": MARKDOWN,
+        },
+        headers=_keyed(),
+    )
+    library_source_id = registered.json()["library_source_id"]
+
+    def _boom(self, *args, **kwargs):
+        raise RuntimeError("注入的入队失败：资料登记必须一并回滚")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(PostgresIngestionRepository, "_enqueue_in_conn", _boom)
+        with pytest.raises(RuntimeError):
+            client.post(
+                f"/projects/{project_id}/library-sources/{library_source_id}/attach",
+                headers=_keyed(),
+            )
+
+    # 项目里不残留该资料（资料登记已随事务回滚）。
+    assert client.get(f"/projects/{project_id}/sources").json()["sources"] == []
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM sources WHERE project_id = %s", (project_id,)
+        ).fetchone()[0] == 0
+        # 库侧记录不受影响。
+        assert conn.execute(
+            "SELECT count(*) FROM library_sources WHERE library_source_id = %s",
+            (library_source_id,),
+        ).fetchone()[0] == 1
+
+    # 恢复后重试成功：一份资料 + 一个摄取任务。
+    retry = client.post(
+        f"/projects/{project_id}/library-sources/{library_source_id}/attach",
+        headers=_keyed(),
+    )
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["created"] is True and retry.json()["ingestion_job_id"]
+    with psycopg.connect(pg_support.migration_dsn()) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM sources WHERE project_id = %s", (project_id,)
+        ).fetchone()[0] == 1
 
 
 @pytest.mark.invariant

@@ -6,8 +6,8 @@
 
 ## 1. 生成区
 
-<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:de455ee5896a1d93b81fd129e249ad27658ded8382c5b62af6441b57d707d550, generated_at=2026-09-25T09:28:43Z -->
-> 生成时间：2026-09-25T09:28:43Z
+<!-- BEGIN GENERATED: source=FastAPI OpenAPI + ErrorCode + node 定义, source_hash=sha256:b501a43ef8c5997637be4bf3d157bf92d00bc7172081943b08724c49b08da737, generated_at=2026-09-25T11:35:52Z -->
+> 生成时间：2026-09-25T11:35:52Z
 
 > 由 `tools/skills/gen_contracts.py` 从 FastAPI OpenAPI 与错误码枚举导出，请勿手工编辑本区。
 

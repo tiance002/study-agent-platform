@@ -8,20 +8,27 @@
 ## 三条边界，都收在服务端
 
 1. **登记幂等**：按 `(tenant_id, principal_id, identity_hash)` ——
-   `identity_hash` 由服务端从 `acquisition` 的规范化 JSON 派生，客户端声称的
-   "同一份材料"不算数。
+   `identity_hash` 由服务端派生（`knowledge.library.library_source_identity_hash`），
+   客户端声称的"同一份材料"不算数。登记时**带了原文**的材料，身份里并入
+   内容指纹：因此"同名不同内容"是两份材料（不会被幂等命中而丢弃新原文），
+   而同一 `(acquisition, content)` 重复登记仍然只落一条。
 2. **隔离**：读写都走主体级仓储（PostgreSQL 侧是 FORCE RLS）。
    不可见与不存在**同码同话术**，不给存在性探针留缝。
 3. **关联**：要求目标项目的 `membership.get` 通过；服务端在目标项目内
    **复用同一份材料**生成项目级 `sources`（同 `identity_hash`），
    有库内原文就直接入队摄取、没有就入队抓取。项目里的检索、引用与
-   项目级 RLS 因此**零改动**。
+   项目级 RLS 因此**零改动**。关联是**一条原子命令**：资料登记与
+   摄取/抓取入队在同一个事务里完成，第二步失败不会留下"有资料无任务"。
 
 ## 为什么关联是"复用同一份材料"而不是复制内容
 
-`identity_hash` 是同一算法算出来的，所以关联命中的就是项目里已有的那条
+`identity_hash` 由服务端算出来，所以关联命中的就是项目里已有的那条
 （如果有）。重复关联只会在项目里留下一份资料 —— 资料去重与摄取任务去重
 都在服务端完成，不依赖客户端"别点两次"。
+
+**但原文是冻结的**：关联那一刻把库内**最新一版**原文拷进项目副本，
+之后库侧 `set_content` 出新版本**不会**回溯已关联的项目。响应里的
+`library_document_version` 就是"这一次冻结的是哪一版"。
 """
 
 from __future__ import annotations
@@ -33,18 +40,17 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.core.hashing import acquisition_identity_hash
 from app.core.ids import new_id
 from app.identity.models import Principal
 from app.knowledge.acquisition import AcquisitionRequest, CandidateStatus, SourceCandidate
-from app.knowledge.library import LibraryRepository
+from app.knowledge.library import LibraryRepository, library_source_identity_hash
 from app.knowledge.models import (
     ACQUISITION_METHOD_UPLOAD,
     MAX_DOCUMENT_BYTES,
     TEXT_MEDIA_TYPES,
-    IngestionStatus,
     require_document_content,
 )
+from app.product.models import SourceRecord
 
 router = APIRouter()
 
@@ -130,7 +136,9 @@ def register_library_source(request: Request, body: LibrarySourceBody) -> JSONRe
             library_source_id=new_id("libsrc"),
             display_name=body.display_name,
             media_type=body.media_type,
-            identity_hash=acquisition_identity_hash(body.acquisition),
+            identity_hash=library_source_identity_hash(
+                body.acquisition, body.content or ""
+            ),
             acquisition=body.acquisition,
             content=body.content or "",
             library_document_id=new_id("libdoc"),
@@ -184,16 +192,21 @@ def attach_library_source(
 ) -> dict | JSONResponse:
     """把知识库材料关联到项目：在目标项目内复用同一份材料并让摄取/抓取入队。
 
-    响应 `{source_id, ingestion_job_id, created}`：
+    响应 `{source_id, ingestion_job_id, created, library_document_version}`：
 
     - `created` 表示项目里这条资料是**本次新建**的还是复用既有的；
     - `ingestion_job_id` 是缺省路径下可直接轮询的摄取任务 id；
+    - `library_document_version` 是本次关联读取到的**库内原文最新版本号**
+      （只做加法新增；`null` = 这次关联没有库内原文）。首次关联会把它冻结进
+      项目副本；库侧之后 `set_content` 出的新版本**不会**回溯已关联的项目
+      （见模块 docstring 的「关联即冻结」）；
     - URL 类材料（库里没有原文、`acquisition` 带 url）走**抓取**路径：
       先登记候选并创建 durable 下载任务，因此此刻还没有摄取任务，
       `ingestion_job_id` 为 `null`（下载完成后 worker 才会产生摄取任务）。
 
     关联要求目标项目的 `membership.get` 通过；重复关联复用既有资料与既有任务，
-    不产生第二份资料或第二个摄取。
+    不产生第二份资料或第二个摄取。资料登记与摄取/抓取入队是**一条原子命令**
+    （见 `IngestionRepository.enqueue_with_source`）：第二步失败不会留下半成品。
     """
     from app.api.http_idempotency import idempotent_write
 
@@ -204,45 +217,55 @@ def attach_library_source(
         actor = guard.principal
         # 知识库可见性先行：他人主体的材料与不存在的材料同样是 404。
         library_source = state.library.get_source(actor, library_source_id)
-        # 目标项目必须属于调用者（`register_source` 内部也会判定一次，这里显式前置）。
+        # 目标项目必须属于调用者（原子命令内部也会判定一次，这里显式前置）。
         state.membership.get(actor, project_id)
 
         candidate_source_id = new_id("src")
-        source = state.products.register_source(
-            actor,
-            project_id,
-            source_id=candidate_source_id,
-            display_name=library_source.display_name,
-            media_type=library_source.media_type,
-            identity_hash=library_source.identity_hash,
-            acquisition=library_source.acquisition,
-        )
-        created = source.source_id == candidate_source_id
-
-        ingestion_job_id = _existing_ingestion_job_id(state, actor, project_id, source.source_id)
-        if ingestion_job_id is None:
-            content = state.library.latest_content(actor, library_source_id)
-            if content:
-                _, job = state.ingestion.enqueue(
+        document_version: int | None = None
+        ingestion_job_id: str | None = None
+        content = state.library.latest_content(actor, library_source_id)
+        if content:
+            document_version = state.library.latest_document_version(actor, library_source_id)
+            # 原子路径：登记/复用资料 + 入队摄取，同一事务，不留半成品。
+            source, job, created = state.ingestion.enqueue_with_source(
+                actor,
+                project_id,
+                source_id=candidate_source_id,
+                display_name=library_source.display_name,
+                media_type=library_source.media_type,
+                identity_hash=library_source.identity_hash,
+                acquisition=library_source.acquisition,
+                document_id=new_id("doc"),
+                job_id=new_id("job"),
+                title=library_source.display_name,
+                content=content,
+                document_media_type=_document_media_type(library_source.media_type),
+                language=_DEFAULT_LANGUAGE,
+                acquisition_method=ACQUISITION_METHOD_UPLOAD,
+            )
+            ingestion_job_id = job.job_id
+        else:
+            # 无库内原文：URL 材料由抓取路径**在它自己的事务里**登记资料 +
+            # 创建下载任务（`select_with_source`），避免"先登记资料、抓取失败"。
+            source = _enqueue_fetch(state, actor, project_id, candidate_source_id, library_source)
+            if source is None:
+                # 既没有原文也没有可抓取的 URL：只登记资料，没有可入队的活。
+                source = state.products.register_source(
                     actor,
                     project_id,
-                    source.source_id,
-                    document_id=new_id("doc"),
-                    job_id=new_id("job"),
-                    title=library_source.display_name,
-                    content=content,
-                    media_type=_document_media_type(library_source.media_type),
-                    language=_DEFAULT_LANGUAGE,
-                    acquisition_method=ACQUISITION_METHOD_UPLOAD,
+                    source_id=candidate_source_id,
+                    display_name=library_source.display_name,
+                    media_type=library_source.media_type,
+                    identity_hash=library_source.identity_hash,
+                    acquisition=library_source.acquisition,
                 )
-                ingestion_job_id = job.job_id
-            else:
-                _enqueue_fetch(state, actor, project_id, source.source_id, library_source)
+            created = source.source_id == candidate_source_id
 
         result = {
             "source_id": source.source_id,
             "ingestion_job_id": ingestion_job_id,
             "created": created,
+            "library_document_version": document_version,
         }
         guard.complete(200, result)
         return result
@@ -256,38 +279,25 @@ def _document_media_type(media_type: str) -> str:
     return media_type if media_type in TEXT_MEDIA_TYPES else _DEFAULT_DOCUMENT_MEDIA_TYPE
 
 
-def _existing_ingestion_job_id(
-    state, actor: Principal, project_id: str, source_id: str
-) -> str | None:
-    """该项目里这条资料**已有的、未失败**的摄取任务 id。
-
-    这是"重复关联不产生第二个摄取"的落点：HTTP 幂等键只挡住同一个 key 的
-    重试，而用户完全可能用两个不同的 key 关联两次 —— 那时必须靠
-    "这条资料已经有活在跑"来复用，而不是再入队一份原文。
-    失败的任务不算：它没有产出可用片段，重关联正是用户表达"再试一次"的方式。
-    """
-    for job in state.ingestion.list_jobs(actor, project_id):
-        if job.source_id == source_id and job.status is not IngestionStatus.FAILED:
-            return job.job_id
-    return None
-
-
 def _enqueue_fetch(
     state, actor: Principal, project_id: str, source_id: str, library_source
-) -> None:
+) -> SourceRecord | None:
     """URL 类材料：登记候选并创建 durable 下载任务（请求内不访问外网）。
 
     复用 `AcquisitionRepository` 而不是另写一条抓取路径：候选状态机、下载围栏与
     worker 认领全都已经在那里，复制一份只会让两套语义慢慢分叉。
     幂等键由 `library_source_id` 派生，因此重复关联会命中既有下载任务。
+
+    资料登记由 `select_with_source` **在它自己的事务内**完成（与该下载任务一起）：
+    因此抓取入队失败不会留下一条孤儿资料。返回登记/复用到的项目资料；
+    既没有原文、也没有可抓取的 URL 时返回 `None`（只登记资料，没有可入队的活）。
     """
     url = library_source.acquisition.get("url")
     if not isinstance(url, str) or not url.strip():
-        # 既没有原文、也没有可抓取的 URL：只登记资料，没有可入队的活。
-        return
+        return None
     now = state.clock.now()
     candidate = _find_or_discover_candidate(state, actor, project_id, library_source, url, now)
-    state.acquisition.select_with_source(
+    source, _job = state.acquisition.select_with_source(
         actor,
         project_id,
         AcquisitionRequest(
@@ -308,6 +318,7 @@ def _enqueue_fetch(
         source_identity_hash=library_source.identity_hash,
         source_acquisition=library_source.acquisition,
     )
+    return source
 
 
 def _find_or_discover_candidate(
